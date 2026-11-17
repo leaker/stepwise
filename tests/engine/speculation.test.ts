@@ -15,6 +15,8 @@ let browser: Browser
 let server: Server
 let origin: string
 let rulesServed = 0
+const requests: string[] = []
+const INLINE_RULES = JSON.stringify({ prefetch: [{ source: 'document', where: { href_matches: '/*' }, eagerness: 'conservative' }] })
 
 beforeAll(async () => {
   server = createServer((req, res) => {
@@ -22,6 +24,11 @@ beforeAll(async () => {
       rulesServed++
       res.writeHead(200, { 'content-type': 'application/speculationrules+json' })
       return res.end(JSON.stringify({ prefetch: [{ source: 'document', where: { href_matches: '/*' }, eagerness: 'conservative' }] }))
+    }
+    requests.push(`${req.url} ${req.headers['sec-purpose'] ?? '-'}`)
+    if (req.url?.startsWith('/inline')) {
+      res.writeHead(200, { 'content-type': 'text/html' })
+      return res.end(`<!doctype html><title>inline</title><script type="speculationrules">${INLINE_RULES}</script><a id="next" href="/next" style="display:block;padding:40px">Next</a>`)
     }
     res.writeHead(200, { 'content-type': 'text/html', 'speculation-rules': '"/cdn-cgi/speculation"' })
     res.end(`<!doctype html><title>${req.url}</title><a id="next" href="/next">Next</a><button id="bye" onclick="window.close()">Close</button>`)
@@ -48,6 +55,35 @@ describe('speculation rules', () => {
     await page.waitForURL('**/next')
     expect(rulesServed).toBe(0)
     await context.close()
+  })
+})
+
+describe('speculation rules written into the page', () => {
+  const pressOnLink = async (guarded: boolean) => {
+    const context = await browser.newContext()
+    if (guarded) await guardContext(context as never, {}, origin)
+    const page = await context.newPage()
+    await page.goto(origin + '/inline')
+    await page.waitForTimeout(300)
+    requests.length = 0
+    const box = (await page.locator('#next').boundingBox())!
+    await page.mouse.move(box.x + 10, box.y + 10)
+    await page.mouse.down() // pressed, not released: this is when Chrome speculates
+    await page.waitForTimeout(700)
+    const speculative = requests.filter((r) => r.includes('prefetch') || r.includes('prerender'))
+    await page.mouse.up()
+    await page.waitForURL('**/next')
+    await context.close()
+    return speculative
+  }
+
+  it('cause a prefetch on mouse-down in an unguarded browser (what the guard is for)', async () => {
+    expect(await pressOnLink(false)).toEqual(['/next prefetch'])
+  })
+
+  it('never reach the network through the guard, and the click still navigates', async () => {
+    expect(await pressOnLink(true)).toEqual([])
+    expect(requests.some((r) => r.startsWith('/next '))).toBe(true)
   })
 })
 

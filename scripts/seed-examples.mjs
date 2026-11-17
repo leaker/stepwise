@@ -9,11 +9,16 @@
 //   --code-file <path>   file that holds the access code (sent as "Authorization: Bearer"; never printed)
 //   --run                afterwards start a batch run of the example cases and print the results
 //
-// A test case whose name already exists in the project is left alone, so the script can be run again.
-// Exit code: 0 when everything was built (and, with --run, nothing failed), 1 otherwise.
+// A test case that this script (or a person) finished is left alone, so the script can be run again. A case
+// it could not finish - a failed build, Ctrl-C, a lost connection - is removed again when it can be, and is
+// recognised and rebuilt by the next run when it cannot: while a case is being built its description starts
+// with a marker that only the final save replaces.
+// Exit code: 0 when everything was built (and, with --run, nothing failed), 1 otherwise, 130 when interrupted.
 import { readFile } from 'node:fs/promises'
 
 const PROJECT_NAME = 'Harbor Inn demo'
+/** Starts the description of a case this script is still building. Never part of a finished case. */
+const BUILDING = '[seed-examples: being built, not complete] '
 const DEVICE_LABEL = { desktop: 'Desktop', iphone: 'iPhone 15', pixel: 'Pixel 8' }
 
 // ---------- arguments ----------
@@ -46,10 +51,15 @@ function usage(code, problem) {
 
 let accessCode = ''
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+/** Set by Ctrl-C / SIGTERM: the build stops where it is and only the clean-up talks to the server. */
+let interrupted = false
+const never = new Promise(() => {})
 
 /** One API call. A 503 means no browser could be started right now (a transient limit), so it is retried. */
-async function api(method, path, body) {
+async function api(method, path, body, { cleanup = false } = {}) {
   for (let attempt = 1; ; attempt++) {
+    // After an interrupt the build must not go on writing while (or after) its work is being undone.
+    if (interrupted && !cleanup) await never
     let res
     try {
       res = await fetch(`${baseUrl}/api${path}`, {
@@ -67,8 +77,9 @@ async function api(method, path, body) {
     } catch {
       data = null
     }
+    if (interrupted && !cleanup) await never
     if (res.ok) return data
-    if (res.status === 503 && attempt < 5) {
+    if (res.status === 503 && attempt < 5 && !cleanup) {
       console.log(`    no browser available, trying again in ${attempt * 10} s`)
       await sleep(attempt * 10_000)
       continue
@@ -88,6 +99,8 @@ class Builder {
   constructor(testCase, steps = []) {
     this.testCase = testCase
     this.steps = steps
+    /** Screens captured while building, so a build that is undone can take them away again. */
+    this.uiIds = []
   }
 
   /** Append a step. `target` is an element picked with pick(). */
@@ -106,6 +119,7 @@ class Builder {
     await this.save()
     const last = this.steps[this.steps.length - 1]
     const res = await api('POST', `/test-cases/${this.testCase.id}/uis`, { afterStepId: last.id })
+    this.uiIds.push(res.ui.id)
     if (res.replayError) {
       const n = this.steps.findIndex((s) => s.id === res.replayError.stepId) + 1
       throw new Error(`the replay before a capture stopped at step ${n}: ${res.replayError.message}`)
@@ -239,39 +253,77 @@ const CASES = [
   },
 ]
 
+/** The build in progress, for the interrupt handler: undoes what was started on the server. */
+let undoCurrent = null
+
 /** Create (or complete) one example case. Returns its id, or throws after undoing what it started. */
 async function seedCase(project, existing, spec) {
   const found = existing.find((t) => t.name === spec.name)
   // The demo project is created with case 1 holding only its "Navigate" step: that one is completed in place.
   const stub = found && found.steps.length <= 1 && found.steps.every((s) => s.command === 'navigate')
-  if (found && !stub) {
+  // Left behind by a run that was cut off before it could save the finished case or undo its work.
+  const partial = found && found.description.startsWith(BUILDING)
+  if (found && !stub && !partial) {
     console.log(`  = #${found.number} ${spec.name}: already there (${found.steps.length} steps), left as it is`)
     return found.id
   }
   let testCase = found
+  // What to put back when the build fails. A partly built case has nothing worth keeping: its steps go.
+  const before = found ? { steps: partial ? [] : found.steps, description: found.description, device: found.device } : null
   if (testCase) {
-    console.log(`  + #${testCase.number} ${spec.name}: completing the existing test case`)
-    testCase = await api('PATCH', `/test-cases/${testCase.id}`, { description: spec.description, device: spec.device })
+    console.log(`  + #${testCase.number} ${spec.name}: ${partial ? 'found partly built by an earlier run that was cut off, building it again' : 'completing the existing test case'}`)
+    testCase = await api('PATCH', `/test-cases/${testCase.id}`, { description: BUILDING + spec.description, device: spec.device, ...(partial ? { steps: [] } : {}) })
+    // The screens the cut-off run captured belong to steps that no longer exist.
+    if (partial) for (const ui of await api('GET', `/test-cases/${testCase.id}/uis`)) await api('DELETE', `/uis/${ui.id}`)
   } else {
-    testCase = await api('POST', `/projects/${project.id}/test-cases`, { name: spec.name, description: spec.description, device: spec.device })
+    testCase = await api('POST', `/projects/${project.id}/test-cases`, { name: spec.name, description: BUILDING + spec.description, device: spec.device })
     console.log(`  + #${testCase.number} ${spec.name}: created (${DEVICE_LABEL[spec.device] ?? spec.device})`)
   }
-  const builder = new Builder(testCase, found ? structuredClone(found.steps) : [])
+  const builder = new Builder(testCase, found && !partial ? structuredClone(found.steps) : [])
+  // Do not leave a half-built case behind. A new case is deleted (its captured screens go with it); the
+  // demo project's own case gets its step back, keeps the marker if it was already partly built, and loses
+  // the screens this build captured.
+  const undo = async () => {
+    const clean = { cleanup: true }
+    if (!before) return api('DELETE', `/test-cases/${testCase.id}`, undefined, clean)
+    await api('PATCH', `/test-cases/${found.id}`, before, clean)
+    for (const uiId of builder.uiIds) await api('DELETE', `/uis/${uiId}`, undefined, clean).catch(() => {})
+  }
+  undoCurrent = { undo, label: `#${testCase.number} ${spec.name}` }
   try {
     await spec.build(builder)
-    await builder.save()
+    // The last save is the one that makes the case complete: steps and the real description together.
+    await api('PATCH', `/test-cases/${testCase.id}`, { steps: builder.steps, description: spec.description })
+    undoCurrent = null
     console.log(`    saved ${builder.steps.length} steps`)
     return testCase.id
   } catch (e) {
-    // Do not leave a half-built case behind: the next run of this script would take it for a finished one.
+    undoCurrent = null
     try {
-      if (found) await api('PATCH', `/test-cases/${found.id}`, { steps: found.steps, description: found.description, device: found.device })
-      else await api('DELETE', `/test-cases/${testCase.id}`)
+      await undo()
     } catch {
-      console.error(`    could not undo the partly built test case #${testCase.number}; delete it before running this script again`)
+      // The marker in its description is still there, so the next run builds it again instead of trusting it.
+      console.error(`    could not undo the partly built test case #${testCase.number}; the next run of this script will build it again`)
     }
     throw new Error(`"${spec.name}": ${e instanceof Error ? e.message : e}`)
   }
+}
+
+/** Ctrl-C or a kill: stop building, undo the case in progress, and exit with a failure code. */
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    if (interrupted) process.exit(130) // a second signal: give up on the clean-up
+    interrupted = true
+    const current = undoCurrent
+    undoCurrent = null
+    console.error(`\nInterrupted (${signal}).`)
+    if (!current) process.exit(130)
+    console.error(`Removing the partly built test case ${current.label} (press Ctrl-C again to skip)...`)
+    current.undo().then(
+      () => console.error('Done. Nothing half-built was left behind.'),
+      (e) => console.error(`Could not undo it (${e instanceof Error ? e.message : e}). The next run of this script will build it again.`),
+    ).finally(() => process.exit(130))
+  })
 }
 
 // ---------- batch run ----------

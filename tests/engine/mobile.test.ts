@@ -135,3 +135,138 @@ describe('phone profile', () => {
     expect(r.status).toBe('succeeded')
   })
 })
+
+// ---- pages with layers of their own: sticky / fixed bars, and controls drawn over their label ----
+
+const BARS = `<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><title>Bars</title>
+<style>
+  body { margin: 0; background: #fff; font: 16px sans-serif }
+  header { position: sticky; top: 0; height: 50px; background: #f00 }
+  footer { position: fixed; left: 0; right: 0; bottom: 0; height: 60px; background: #00f }
+  main { height: 3000px }
+  button { margin: 10px 0 0 60px; height: 30px }
+</style>
+<header><button id="menu">Menu</button></header><main><p style="margin: 900px 0 0 60px" id="para">Somewhere down the page</p></main><footer><button id="buy">Buy</button></footer>`
+
+/** The rows of a JPEG whose pixel at x is mostly red, and those where it is mostly blue (first and last row of each). */
+async function colouredRows(context: BrowserContext, jpeg: Uint8Array, x: number) {
+  const probe = await context.newPage()
+  try {
+    return await probe.evaluate(
+      async ({ b64, x }) => {
+        const img = new Image()
+        img.src = `data:image/jpeg;base64,${b64}`
+        await img.decode()
+        const canvas = document.createElement('canvas')
+        canvas.width = img.naturalWidth
+        canvas.height = img.naturalHeight
+        const g = canvas.getContext('2d')!
+        g.drawImage(img, 0, 0)
+        const column = g.getImageData(x, 0, 1, canvas.height).data
+        const span = (is: (r: number, g: number, b: number) => boolean) => {
+          let first = -1
+          let last = -1
+          for (let y = 0; y < canvas.height; y++) {
+            if (!is(column[y * 4], column[y * 4 + 1], column[y * 4 + 2])) continue
+            if (first < 0) first = y
+            last = y
+          }
+          return { first, last }
+        }
+        return { red: span((r, g, b) => r > 180 && g < 90 && b < 90), blue: span((r, g, b) => b > 180 && r < 90 && g < 90) }
+      },
+      { b64: Buffer.from(jpeg).toString('base64'), x },
+    )
+  } finally {
+    await probe.close()
+  }
+}
+
+describe('captures of a scrolled page with sticky and fixed bars', () => {
+  for (const device of [DEVICES.iphone, DEVICES.pixel, DEVICES.desktop]) {
+    it(`puts the boxes of the bars where the screenshot shows them (${device.id})`, async () => {
+      const ctx = await browser.newContext({ viewport: { ...device.viewport }, isMobile: device.isMobile, hasTouch: device.hasTouch, deviceScaleFactor: device.deviceScaleFactor, ...(device.userAgent ? { userAgent: device.userAgent } : {}) })
+      try {
+        const p = await ctx.newPage()
+        await p.setContent(BARS)
+        await p.evaluate(() => window.scrollTo(0, 620))
+        const ui = await capture(p, 'bars')
+        const rows = await colouredRows(ctx, ui.screenshot, 5)
+        const menu = ui.elements.find((e) => e.name === '"Menu" button')!
+        const buy = ui.elements.find((e) => e.name === '"Buy" button')!
+        expect(rows.red.first).toBeGreaterThanOrEqual(0)
+        expect(rows.blue.first).toBeGreaterThanOrEqual(0)
+        // Each button lies inside the band of its bar (JPEG edges are soft: allow a few pixels).
+        expect(menu.box.y).toBeGreaterThanOrEqual(rows.red.first - 3)
+        expect(menu.box.y + menu.box.h).toBeLessThanOrEqual(rows.red.last + 4)
+        expect(buy.box.y).toBeGreaterThanOrEqual(rows.blue.first - 3)
+        expect(buy.box.y + buy.box.h).toBeLessThanOrEqual(rows.blue.last + 4)
+        // An element in the normal flow is where it always was, and the page is left where it was.
+        const para = ui.elements.find((e) => e.name.includes('Somewhere down the page'))!
+        expect(Math.abs(para.box.y - (50 + 900))).toBeLessThanOrEqual(2)
+        expect(await p.evaluate(() => window.scrollY)).toBe(620)
+      } finally {
+        await ctx.close()
+      }
+    })
+  }
+})
+
+describe('a native checkbox laid transparently over its label', () => {
+  it('is still offered by a capture (checkbox-hack menus, custom switches)', async () => {
+    await page.setContent(`<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><title>Toggle</title>
+      <style>
+        .dropdown { position: relative; display: inline-block; margin: 40px }
+        .dropdown input { position: absolute; top: 0; left: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer }
+        .dropdown label { display: block; padding: 8px 14px; border: 1px solid #888 }
+        .cover { position: fixed; left: 0; right: 0; top: 200px; height: 80px; background: #ccc }
+        #under { position: absolute; top: 220px; left: 40px }
+      </style>
+      <div class="dropdown"><input type="checkbox" id="main-menu" aria-label="Main menu"><label for="main-menu">Main menu</label></div>
+      <button id="under">Hidden under the bar</button><div class="cover"></div>`)
+    const ui = await capture(page, 'toggle')
+    const toggle = ui.elements.find((e) => e.type === 'checkbox')
+    expect(toggle, names(ui).join(' | ')).toBeDefined()
+    expect(toggle!.name).toContain('Main menu')
+    // The filter still does its job for something that really is in the way.
+    expect(names(ui).join(' | ')).not.toContain('Hidden under the bar')
+
+    const r = await run(page, [step('check', { target: { uiId: 'toggle', elementId: toggle!.id, name: toggle!.name, locator: toggle!.locators[0], candidates: toggle!.locators, fingerprint: toggle!.fingerprint } })], baseUrl, PHONE)
+    expect(r.log).not.toContain('ERROR')
+    expect(await page.evaluate(() => (document.getElementById('main-menu') as HTMLInputElement).checked)).toBe(true)
+  })
+})
+
+describe('swipe over a scrolling area', () => {
+  it('moves the area under the finger once, and leaves the window alone', async () => {
+    await page.setContent(`<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><title>List</title>
+      <style>body { margin: 0 } #list { height: 600px; margin-top: 126px; overflow: auto } #list div { height: 4000px } #tail { height: 3000px }</style>
+      <div id="list"><div>rows</div></div><div id="tail">more</div>`)
+    const r = await run(page, [step('swipe', { value: 'up' })], baseUrl, PHONE)
+    expect(r.status).toBe('succeeded')
+    const pos = await page.evaluate(() => ({ window: window.scrollY, list: document.getElementById('list')!.scrollTop }))
+    expect(pos.list).toBeGreaterThan(300)
+    expect(pos.window).toBe(0)
+    expect(r.log).toMatch(/\[1\] scrolled an area inside the page from \(0,0\) to \(0,\d+\)/)
+  })
+
+  it('reports the move in an app-shell layout, where <main> scrolls and the window cannot', async () => {
+    await page.setContent(`<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><title>Shell</title>
+      <style>html, body { height: 100%; margin: 0; overflow: hidden } main { height: 100%; overflow-y: auto } main div { height: 5000px }</style>
+      <main><div>content</div></main>`)
+    const r = await run(page, [step('swipe', { value: 'up' }), step('swipe', { value: 'down' }), step('swipe', { value: 'down' })], baseUrl, PHONE)
+    expect(r.status).toBe('succeeded')
+    expect(r.log).toMatch(/\[1\] scrolled an area inside the page/)
+    expect(r.log).toMatch(/\[2\] scrolled an area inside the page/)
+    expect(r.log).toContain('[3] the page did not move')
+    expect(await page.evaluate(() => document.querySelector('main')!.scrollTop)).toBe(0)
+  })
+})
+
+describe('built-in variables', () => {
+  it('win over a project variable of the same name, and the log says so', async () => {
+    const r = await run(page, [step('assert_variable_equals', { variable: 'DEVICE', value: 'iphone' })], baseUrl, { ...PHONE, variables: { DEVICE: 'tablet' } })
+    expect(r.status).toBe('succeeded')
+    expect(r.log).toContain('[warning] the project variable DEVICE is ignored: DEVICE is built in (its value here is "iphone")')
+  })
+})

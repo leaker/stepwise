@@ -500,8 +500,12 @@ export function scanPage(args: ScanArgs): ScanResult {
   }
   if (doc.body) walk(doc.body)
 
-  /** Is the middle of `shown` covered by a positioned layer that the element is not part of? */
-  const isCovered = (shown: any): boolean => {
+  /**
+   * Is the middle of `shown` covered by a positioned layer that the element is not part of? `el` is the
+   * element `shown` stands for: a native checkbox laid transparently over its own label (the usual custom
+   * checkbox, switch and "checkbox hack" menu toggle) is the control itself, not something in the way.
+   */
+  const isCovered = (shown: any, el: any): boolean => {
     const r = shown.getBoundingClientRect()
     const x = r.left + r.width / 2
     const y = r.top + r.height / 2
@@ -516,7 +520,7 @@ export function scanPage(args: ScanArgs): ScanResult {
     const chain = new Set<any>()
     for (let n = shown; n; n = parentOf(n)) chain.add(n)
     // The hit is the element, inside it, or a container of it: nothing is in the way.
-    for (let n = hit; n; n = parentOf(n)) if (n === shown) return false
+    for (let n = hit; n; n = parentOf(n)) if (n === shown || n === el) return false
     if (chain.has(hit)) return false
     const label = typeof hit.closest === 'function' ? hit.closest('label') : null
     if (label && label.control && chain.has(label.control)) return false
@@ -528,7 +532,7 @@ export function scanPage(args: ScanArgs): ScanResult {
     }
     return false
   }
-  if (args.skipCovered) picked = picked.filter((p) => !isCovered(p.shown))
+  if (args.skipCovered) picked = picked.filter((p) => !isCovered(p.shown, p.el))
 
   let kept = picked
   if (picked.length > args.max) {
@@ -600,11 +604,22 @@ export async function scan(page: Page, args: ScanArgs): Promise<ScanResult> {
 
 export const CAPTURE_MAX_ELEMENTS = 300
 
+/* eslint-disable @typescript-eslint/no-explicit-any */
 export async function captureUi(page: Page): Promise<Capture> {
   await page.waitForLoadState('load', { timeout: 15_000 }).catch(() => {})
-  const result = await scan(page, { max: CAPTURE_MAX_ELEMENTS, probes: [], skipCovered: true })
+  const scroll = () => page.evaluate(() => ({ x: (globalThis as any).scrollX || 0, y: (globalThis as any).scrollY || 0 }))
+  const before = await scroll()
+  // The screenshot comes first: on an emulated phone a full-page screenshot leaves the page scrolled somewhere
+  // else, and fixed or sticky elements are drawn where they are at that position. Scanning afterwards, at the
+  // position the screenshot left behind, keeps their boxes on the pixels that show them.
   // scale 'css': an emulated phone has a device pixel ratio of 2-3, and the element boxes are in CSS pixels.
   const shot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 70, animations: 'disabled', scale: 'css' })
+  const result = await scan(page, { max: CAPTURE_MAX_ELEMENTS, probes: [], skipCovered: true })
+  const after = await scroll()
+  // Whoever goes on using the page (a test, a later step) finds it where it was.
+  if (after.x !== before.x || after.y !== before.y) {
+    await page.evaluate((to: { x: number; y: number }) => (globalThis as any).scrollTo({ left: to.x, top: to.y, behavior: 'instant' }), before).catch(() => {})
+  }
   return {
     url: result.url,
     title: result.title,
@@ -614,3 +629,4 @@ export async function captureUi(page: Page): Promise<Capture> {
     elements: result.elements,
   }
 }
+/* eslint-enable @typescript-eslint/no-explicit-any */

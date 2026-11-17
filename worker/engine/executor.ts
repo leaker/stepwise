@@ -1,6 +1,6 @@
 // Step executor: runs a test case's steps against a Playwright page.
 import type { Locator as PwLocator, Page } from '@cloudflare/playwright'
-import { COMMAND_BY_ID, stepSentence, SWIPE_DIRECTIONS, validateSteps } from '../../shared/commands'
+import { BUILT_IN_VARIABLES, COMMAND_BY_ID, stepSentence, SWIPE_DIRECTIONS, validateSteps } from '../../shared/commands'
 import type { CommandDef } from '../../shared/commands'
 import { locatorToString } from '../../shared/types'
 import type { ElementRef, Fingerprint, HealProposal, Locator, Step, StepResult } from '../../shared/types'
@@ -47,6 +47,10 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
   const finish = (status: RunOutcome['status']): RunOutcome => {
     log(`Finished: ${status}`)
     return { status, results, log: lines.join('\n') }
+  }
+
+  for (const name of BUILT_IN_VARIABLES) {
+    if (Object.hasOwn(opts.variables, name)) log(`[warning] the project variable ${name} is ignored: ${name} is built in (its value here is ${quote(vars[name])})`)
   }
 
   const structural = validateSteps(steps)
@@ -198,8 +202,35 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
   const actionTimeout = Math.max(waitMs, 1000)
 
   /* eslint-disable @typescript-eslint/no-explicit-any */
-  const scrollPosition = (): Promise<{ x: number; y: number }> =>
-    page.evaluate(() => ({ x: Math.round((globalThis as any).scrollX || 0), y: Math.round((globalThis as any).scrollY || 0) }))
+  /**
+   * Where the page is scrolled to, and where the scrollable areas around a point of the viewport are: a wheel
+   * gesture over a scrolling list, or in a layout whose <main> scrolls instead of the window, moves those and
+   * leaves the window where it is. `mark` remembers the areas (the element under the point changes as things
+   * move); later calls read the same ones.
+   */
+  const scrollState = (point: { x: number; y: number } | null): Promise<{ x: number; y: number; inner: string }> =>
+    page.evaluate(
+      ({ point, key }: { point: { x: number; y: number } | null; key: string }) => {
+        const win = globalThis as any
+        if (point) {
+          const areas: any[] = []
+          let node = win.document.elementFromPoint(point.x, point.y)
+          while (node && node.shadowRoot) {
+            const inner = node.shadowRoot.elementFromPoint(point.x, point.y)
+            if (!inner || inner === node) break
+            node = inner
+          }
+          for (; node; node = node.parentElement || (node.getRootNode && node.getRootNode().host) || null) {
+            if (node === win.document.documentElement || node === win.document.body) continue // the window's own scrolling
+            if (node.scrollHeight > node.clientHeight + 1 || node.scrollWidth > node.clientWidth + 1) areas.push(node)
+          }
+          win[key] = areas
+        }
+        const areas: any[] = win[key] || []
+        return { x: Math.round(win.scrollX || 0), y: Math.round(win.scrollY || 0), inner: areas.map((a) => `${Math.round(a.scrollLeft)},${Math.round(a.scrollTop)}`).join(' ') }
+      },
+      { point, key: '__stepwiseSwipeAreas' },
+    )
   /* eslint-enable @typescript-eslint/no-explicit-any */
 
   /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -351,20 +382,24 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
         // Directions are the finger's: swiping up drags the page up, which scrolls it down.
         const dx = Math.round(size.width * SWIPE_SHARE) * (direction === 'left' ? 1 : direction === 'right' ? -1 : 0)
         const dy = Math.round(size.height * SWIPE_SHARE) * (direction === 'up' ? 1 : direction === 'down' ? -1 : 0)
-        const before = await scrollPosition()
+        const centre = { x: Math.round(size.width / 2), y: Math.round(size.height / 2) }
+        const before = await scrollState(centre)
+        const same = (a: { x: number; y: number; inner: string }, b: { x: number; y: number; inner: string }) => a.x === b.x && a.y === b.y && a.inner === b.inner
         // A wheel gesture in the middle of the viewport goes through the browser's input pipeline, so
         // scroll listeners and scroll-snap behave as they do for a real swipe.
         try {
-          await page.mouse.move(Math.round(size.width / 2), Math.round(size.height / 2))
+          await page.mouse.move(centre.x, centre.y)
           await page.mouse.wheel(dx, dy)
         } catch (e) {
           log(`[${n}] [warning] wheel gesture failed, scrolling the page instead: ${firstLine(e)}`)
         }
         let after = before
         const moved = await poll(async () => {
-          after = await scrollPosition()
-          return after.x !== before.x || after.y !== before.y
+          after = await scrollState(null)
+          return !same(after, before)
         }, 450)
+        // Only when nothing took the gesture: a scrolling area under the finger that moved has consumed it, and
+        // scrolling the window as well would move the page twice.
         if (!moved) {
           /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
           await page.evaluate((d: { x: number; y: number }) => (globalThis as any).scrollBy({ left: d.x, top: d.y, behavior: 'instant' }), { x: dx, y: dy })
@@ -372,13 +407,16 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
         // Let a smooth scroll come to rest before the screenshot and the next step.
         for (let i = 0; i < 12; i++) {
           await sleep(100)
-          const now = await scrollPosition()
-          const still = now.x === after.x && now.y === after.y
+          const now = await scrollState(null)
+          const still = same(now, after)
           after = now
           if (still) break
         }
-        if (after.x === before.x && after.y === before.y) log(`[${n}] the page did not move: there is nothing further to show in that direction`)
-        else log(`[${n}] scrolled from (${before.x}, ${before.y}) to (${after.x}, ${after.y})`)
+        /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
+        await page.evaluate((key: string) => void delete (globalThis as any)[key], '__stepwiseSwipeAreas').catch(() => {})
+        if (after.x !== before.x || after.y !== before.y) log(`[${n}] scrolled from (${before.x}, ${before.y}) to (${after.x}, ${after.y})`)
+        else if (after.inner !== before.inner) log(`[${n}] scrolled an area inside the page from (${before.inner.split(' ').join(') (')}) to (${after.inner.split(' ').join(') (')}); the page itself stayed at (${after.x}, ${after.y})`)
+        else log(`[${n}] the page did not move: there is nothing further to show in that direction`)
         return
       }
       case 'screenshot':
