@@ -1,122 +1,111 @@
-import { useState } from 'react'
-import heroImg from './assets/hero.png'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import './App.css'
+import { MutationCache, QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { KeyRound } from 'lucide-react'
+import { useState, type ReactNode } from 'react'
+import { BrowserRouter, Link, Route, Routes } from 'react-router-dom'
+import { api, ApiError, qk } from './api'
+import { Button, ErrorState, Loading, Logo, Shell, toastError, Toaster } from './components/ui'
+import { Editor } from './editor/Editor'
+import { BatchRunPage } from './pages/BatchRunPage'
+import { ProjectPage } from './pages/ProjectPage'
+import { ProjectsPage } from './pages/ProjectsPage'
+import { RunPage } from './pages/RunPage'
+import { TestCasePage } from './pages/TestCasePage'
 
-function App() {
-  const [count, setCount] = useState(0)
+const queryClient: QueryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 5_000,
+      refetchOnWindowFocus: false,
+      retry: (count, err) => !(err instanceof ApiError && err.status >= 400 && err.status < 500) && count < 2,
+    },
+  },
+  mutationCache: new MutationCache({
+    onError: (err, _vars, _ctx, mutation) => {
+      if (err instanceof ApiError && err.status === 401) void queryClient.invalidateQueries({ queryKey: qk.session })
+      if (!mutation.meta?.silent) toastError(err)
+    },
+  }),
+})
+
+function AccessGate({ children }: { children: ReactNode }) {
+  const qc = useQueryClient()
+  const session = useQuery({ queryKey: qk.session, queryFn: api.session, staleTime: Infinity })
+  const [code, setCode] = useState('')
+  const signIn = useMutation({
+    mutationFn: () => api.signIn(code.trim()),
+    meta: { silent: true },
+    onSuccess: () => qc.invalidateQueries(),
+  })
+
+  if (session.isPending) return <Loading />
+  if (session.isError) return <ErrorState error={session.error} onRetry={() => session.refetch()} />
+  if (!session.data.required || session.data.ok) return <>{children}</>
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
+    <div className="gate">
+      <form
+        className="gate-card"
+        onSubmit={(e) => {
+          e.preventDefault()
+          if (code.trim()) signIn.mutate()
+        }}
+      >
+        <Logo />
+        <h1>Enter the access code</h1>
+        <p className="muted">This workspace is private. Ask whoever shared the link for its code.</p>
+        <input
+          className="input"
+          type="password"
+          autoFocus
+          autoComplete="off"
+          aria-label="Access code"
+          placeholder="Access code"
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          aria-invalid={signIn.isError}
+        />
+        {signIn.isError && (
+          <p className="gate-error" role="alert">
+            {signIn.error instanceof ApiError && signIn.error.status === 401 ? 'That code is not correct.' : signIn.error.message}
           </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
-
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+        )}
+        <Button type="submit" variant="primary" icon={<KeyRound size={16} />} busy={signIn.isPending} disabled={!code.trim()}>
+          Open workspace
+        </Button>
+      </form>
+    </div>
   )
 }
 
-export default App
+function NotFound() {
+  return (
+    <Shell>
+      <div className="state">
+        <span>
+          This page does not exist. <Link to="/">Go to projects</Link>
+        </span>
+      </div>
+    </Shell>
+  )
+}
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AccessGate>
+          <Routes>
+            <Route path="/" element={<ProjectsPage />} />
+            <Route path="/p/:pid" element={<ProjectPage />} />
+            <Route path="/t/:tid" element={<TestCasePage />} />
+            <Route path="/t/:tid/edit" element={<Editor />} />
+            <Route path="/r/:rid" element={<RunPage />} />
+            <Route path="/b/:bid" element={<BatchRunPage />} />
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </AccessGate>
+      </BrowserRouter>
+      <Toaster />
+    </QueryClientProvider>
+  )
+}
