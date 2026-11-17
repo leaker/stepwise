@@ -6,7 +6,7 @@ import { locatorToString } from '../../shared/types'
 import type { ElementRef, Fingerprint, HealProposal, Locator, Step, StepResult } from '../../shared/types'
 import { findReplacement } from './heal'
 import type { RunOptions, RunOutcome } from './index'
-import { poll, sleep, toSelector, waitForElement } from './locate'
+import { isRendered, poll, sleep, waitForElement } from './locate'
 
 const IF_WAIT_MS = 2000
 const NAVIGATION_TIMEOUT_MS = 30_000
@@ -122,11 +122,13 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
   const locate = async (step: Step, def: CommandDef, target: ElementRef, n: number, out: Outcome, timeoutMs = waitMs): Promise<PwLocator> => {
     const locator = effectiveLocator(target)
     const found = await waitForElement(page, locator, timeoutMs)
-    if (found) return found
+    if (found.el) return found.el
     const missing =
-      step.command === 'assert_exists'
-        ? `AssertionError: UI element does not exist (${locatorToString(locator)})`
-        : `UI element ${target.name} was not found (${locatorToString(locator)})`
+      found.count > 1
+        ? `UI element ${target.name} is ambiguous: its locator now matches ${found.count} elements (${locatorToString(locator)})`
+        : step.command === 'assert_exists'
+          ? `AssertionError: UI element does not exist (${locatorToString(locator)})`
+          : `UI element ${target.name} was not found (${locatorToString(locator)})`
     if (!opts.heal || !def.healable) throw new StepError(missing)
 
     log(`[${n}] ${missing}`)
@@ -144,7 +146,7 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
     }
     const { element } = replacement
     const newLocator = element.locators[0]
-    const handle = await waitForElement(page, newLocator, 1000)
+    const handle = (await waitForElement(page, newLocator, 1000)).el
     if (!handle) throw new StepError(missing)
     const screenshotKey = (await takeShot(true)) ?? ''
     out.heal = {
@@ -192,6 +194,46 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
 
   const actionTimeout = Math.max(waitMs, 1000)
 
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  /**
+   * A native checkbox or radio button that is not rendered itself (`display: none`, or clipped to a
+   * pixel, with a styled label drawn in its place) is operated through that label, as a user would.
+   */
+  const standIn = async (el: PwLocator) => {
+    const handle = await el.evaluateHandle((node: any) => {
+      if (node.tagName !== 'INPUT' || (node.type !== 'checkbox' && node.type !== 'radio')) return null
+      const r = node.getBoundingClientRect()
+      if (r.width >= 2 && r.height >= 2 && (globalThis as any).getComputedStyle(node).visibility === 'visible') return null
+      return (node.labels && node.labels[0]) || node.closest('label') || null
+    })
+    return handle.asElement()
+  }
+
+  /**
+   * What a click at this viewport point would land on, if that is not `el`, something inside it or
+   * its label: a short description such as `<div id="cookie-banner">`. Empty when the point hits `el`.
+   */
+  const blockerAt = (el: PwLocator, x: number, y: number): Promise<string> =>
+    el.evaluate(
+      (node: any, p: { x: number; y: number }) => {
+        let hit = (globalThis as any).document.elementFromPoint(p.x, p.y)
+        while (hit && hit.shadowRoot) {
+          const inner = hit.shadowRoot.elementFromPoint(p.x, p.y)
+          if (!inner || inner === hit) break
+          hit = inner
+        }
+        if (!hit) return 'nothing (the point is outside the viewport)'
+        for (let n = hit; n; n = n.parentNode || n.host) if (n === node) return ''
+        const label = hit.closest ? hit.closest('label') : null
+        if (label && label.control === node) return ''
+        const id = hit.getAttribute('id')
+        const cls = String(hit.getAttribute('class') || '').trim()
+        return '<' + hit.tagName.toLowerCase() + (id ? ' id="' + id + '"' : '') + (cls ? ' class="' + cls.slice(0, 60) + '"' : '') + '>'
+      },
+      { x, y },
+    )
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+
   /** Executes one non-structural step. Returns the branch condition for If commands. */
   const execute = async (step: Step, def: CommandDef, value: string, n: number, out: Outcome): Promise<boolean | void> => {
     const describe = (t: ElementRef) => `${t.name} (${locatorToString(effectiveLocator(t))})`
@@ -220,16 +262,21 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
       case 'click': {
         const t = need(step)
         await act(t, 'clicked', async (el) => {
+          const label = await standIn(el)
+          if (label) return label.click({ timeout: actionTimeout })
           try {
             await el.click({ timeout: actionTimeout })
           } catch (e) {
-            // Same fallback as a human would try: the element is there and enabled but something
-            // intercepts the element-based click, so click its centre by coordinates.
+            // The element is there and enabled but the element-based click did not go through
+            // (e.g. it never stops moving). Click its centre by coordinates, but only when that
+            // point really belongs to the element: a click that lands on an overlay tests nothing.
             const box = await el.boundingBox().catch(() => null)
             const usable = box && (await el.isVisible().catch(() => false)) && (await el.isEnabled().catch(() => false))
             if (!box || !usable) throw e
             const x = Math.round(box.x + box.width / 2)
             const y = Math.round(box.y + box.height / 2)
+            const blocker = await blockerAt(el, x, y).catch(() => 'another element')
+            if (blocker) throw new StepError(`UI element ${t.name} could not be clicked (${locatorToString(effectiveLocator(t))}): it is covered by ${blocker}`)
             log(`[${n}] [warning] element-based click failed, retrying by coordinates; the target position: (${x}, ${y})`)
             await page.mouse.click(x, y)
           }
@@ -244,10 +291,17 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
         await act(need(step), 'filled', (el) => el.fill(value, { timeout: actionTimeout }))
         return
       case 'check':
-      case 'uncheck':
-        await act(need(step), step.command === 'check' ? 'checked' : 'unchecked', (el) => el.setChecked(step.command === 'check', { timeout: actionTimeout }))
+      case 'uncheck': {
+        const want = step.command === 'check'
+        await act(need(step), want ? 'checked' : 'unchecked', async (el) => {
+          const label = await standIn(el)
+          if (!label) return el.setChecked(want, { timeout: actionTimeout })
+          if ((await el.isChecked()) !== want) await label.click({ timeout: actionTimeout })
+          if ((await el.isChecked()) !== want) throw new Error('clicking its label did not change its state')
+        })
         await settle()
         return
+      }
       case 'select': {
         const t = need(step)
         await act(t, 'selected', async (el) => {
@@ -294,13 +348,19 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
         if (!r.ok) throw new StepError(`AssertionError: text ${quote(r.actual)} does not ${equals ? 'equal' : 'contain'} ${quote(expected)}`)
         return
       }
-      case 'assert_exists':
-        await locate(step, def, need(step), n, out)
+      // "Exists" means rendered, matching what a capture offers: a node that is in the DOM but
+      // hidden (an empty error box, a closed dialog) does not exist for the user.
+      case 'assert_exists': {
+        const t = need(step)
+        await locate(step, def, t, n, out)
+        if (!(await poll(() => isRendered(page, effectiveLocator(t)), waitMs))) {
+          throw new StepError(`AssertionError: UI element is in the page but hidden (${locatorToString(effectiveLocator(t))})`)
+        }
         return
+      }
       case 'assert_not_exists': {
         const t = need(step)
-        const handle = page.locator(toSelector(effectiveLocator(t)))
-        const gone = await poll(async () => (await handle.count()) === 0, waitMs)
+        const gone = await poll(async () => !(await isRendered(page, effectiveLocator(t))), waitMs)
         if (!gone) throw new StepError(`AssertionError: UI element exists (${locatorToString(effectiveLocator(t))})`)
         return
       }
@@ -376,7 +436,7 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
 
       case 'if_exists': {
         const t = need(step)
-        return !!(await waitForElement(page, effectiveLocator(t), Math.min(IF_WAIT_MS, waitMs)))
+        return !!(await poll(() => isRendered(page, effectiveLocator(t)), Math.min(IF_WAIT_MS, waitMs)))
       }
       case 'if_variable_equals': {
         const name = needVariable(step)
@@ -390,6 +450,10 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
   const frames: Frame[] = []
   const executing = (depth = frames.length) => frames.slice(0, depth).every((f) => f.exec)
   const range = opts.range ?? null
+  // Partial runs: the steps before the range are replayed silently so the range starts on the right page.
+  const setupTo = range && opts.replaySetup ? range.from - 1 : 0
+  if (setupTo > 0) log(`Set-up: replaying steps 1-${setupTo} before the requested range`)
+  const blockedMessage = (url: string) => `Navigation to ${url} was blocked: the host is not allowed by this deployment's target policy`
   let failed = false
   let aborted = false
 
@@ -397,7 +461,8 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
     const step = steps[i]
     const n = i + 1
     if (step.disabled) continue
-    if (range && (n < range.from || n > range.to)) continue
+    if (range && (n > range.to || (n < range.from && n > setupTo))) continue
+    const setup = n <= setupTo
     const def: CommandDef | undefined = COMMAND_BY_ID[step.command]
     const isIf = step.command === 'if_exists' || step.command === 'if_variable_equals'
 
@@ -420,8 +485,9 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
       if (!frames.pop() || !executing()) continue
     } else if (!executing()) continue
 
-    if (await opts.shouldAbort?.()) {
-      log(`[${n}] Aborted by user`)
+    const stop = await opts.shouldAbort?.()
+    if (stop) {
+      log(`[${n}] ${typeof stop === 'string' ? stop : 'Aborted by user'}`)
       aborted = true
       break
     }
@@ -446,6 +512,8 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
       log(`[${n}] ${step.command}(${args.join(', ')})`)
       if (substitutionError) throw substitutionError
       if (step.command !== 'else' && step.command !== 'end_if') condition = await execute(step, def, value, n, out)
+      const blocked = opts.takeBlockedNavigation?.()
+      if (blocked) throw new StepError(blockedMessage(blocked))
       if (isIf) {
         frames.push({ exec: condition === true, taken: condition === true })
         log(`[${n}] condition is ${condition === true}`)
@@ -456,12 +524,26 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
       }
     } catch (e) {
       result.status = 'failed'
-      result.error = e instanceof StepError ? e.message : `Unexpected error: ${firstLine(e)}`
+      // A refused navigation explains the failure better than whatever the step tripped over afterwards.
+      const blocked = opts.takeBlockedNavigation?.()
+      result.error = blocked ? blockedMessage(blocked) : e instanceof StepError ? e.message : `Unexpected error: ${firstLine(e)}`
       log(`[${n}] ERROR: ${result.error}`)
       if (out.heal && step.target) healed.delete(targetKey(step.target))
     }
-    if (def?.shot) result.screenshotKey = await takeShot()
+    const tolerated = result.status === 'failed' && !!def?.assertion && !!step.continueOnFailure
+    // A step that failed or was repaired always gets a screenshot: the report must show the page at that point.
+    if (setup ? result.status === 'failed' && !tolerated : def?.shot || result.status !== 'passed') result.screenshotKey = await takeShot()
     result.durationMs = Date.now() - started
+
+    if (setup) {
+      // Set-up steps are not part of the report unless one of them stops the run.
+      if (result.status !== 'failed') continue
+      if (tolerated) {
+        log(`[${n}] set-up: continuing after the failed assertion`)
+        continue
+      }
+      result.error = `Set-up failed before the requested steps: ${result.error}`
+    }
 
     if (result.status === 'failed') {
       failed = true

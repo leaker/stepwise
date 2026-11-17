@@ -45,6 +45,10 @@ export function scanPage(args: ScanArgs): ScanResult {
   const SKIP_TAGS = new Set(['script', 'style', 'noscript', 'template', 'head', 'meta', 'link', 'option', 'optgroup'])
   const INTERACTIVE_SEL =
     'a[href],button,input:not([type=hidden]),select,textarea,img[alt],[role=button],[role=link],[role=checkbox],[role=radio],[role=switch],[role=textbox]'
+  /** Controls that may sit inside a sentence ("Total: $120, see <a>terms</a>") without breaking it up. */
+  const INLINE_CONTROLS = new Set(['a', 'button', 'img', 'input', 'select'])
+  /** Children a clickable leaf (icon button built from a div or span) may have. */
+  const ICON_TAGS = new Set(['i', 'img', 'svg', 'picture'])
   const BUTTON_INPUTS = new Set(['submit', 'button', 'reset', 'image'])
   const SUFFIX: Record<string, string> = {
     button: 'button',
@@ -57,6 +61,32 @@ export function scanPage(args: ScanArgs): ScanResult {
     image: 'image',
     text: 'text',
     other: 'element',
+  }
+
+  // Open shadow roots are scanned too. `roots` is filled by the walk below, before any locator is built.
+  const roots: any[] = [doc]
+  const parentOf = (n: any): any => n.parentElement || (n.parentNode && n.parentNode.host) || null
+  const inShadow = (el: any): boolean => typeof el.getRootNode === 'function' && el.getRootNode() !== doc
+
+  /**
+   * A <div> / <span> that is wired up as a button without saying so: an inline handler, a tab stop,
+   * or a pointer cursor of its own. Only leaves qualify (text and icons inside, nothing else), so a
+   * clickable card keeps its heading, text and buttons as separate elements.
+   */
+  const isClickableLeaf = (el: any, tag: string): boolean => {
+    if (tag === 'label' || tag === 'body' || tag === 'html' || tag === 'iframe' || !el.getBoundingClientRect) return false
+    let hinted = el.hasAttribute('onclick') || (el.hasAttribute('tabindex') && el.tabIndex >= 0)
+    if (!hinted) {
+      if (win.getComputedStyle(el).cursor !== 'pointer') return false
+      const parent = parentOf(el)
+      hinted = !parent || win.getComputedStyle(parent).cursor !== 'pointer'
+    }
+    if (!hinted || el.shadowRoot || el.querySelector(INTERACTIVE_SEL)) return false
+    for (const d of el.querySelectorAll('*')) {
+      const t = tagOf(d)
+      if (!INLINE.has(t) && !ICON_TAGS.has(t) && !(d.closest && d.closest('svg'))) return false
+    }
+    return true
   }
 
   const typeOf = (el: any): string | null => {
@@ -82,23 +112,43 @@ export function scanPage(args: ScanArgs): ScanResult {
     if (role === 'link') return 'link'
     if (tag === 'img') return attr(el, 'alt') ? 'image' : null
     if (el.isContentEditable && !(el.parentElement && el.parentElement.isContentEditable)) return 'textarea'
+    if (tag !== 'svg' && isClickableLeaf(el, tag)) return 'other'
     return null
   }
 
-  const isVisible = (el: any): boolean => {
+  /** `ownOpacity: false` ignores the element's own `opacity: 0` (an invisible control that still takes clicks). */
+  const isVisible = (el: any, ownOpacity = true): boolean => {
     const r = el.getBoundingClientRect()
     if (r.width < 2 || r.height < 2) return false
     if (r.right + sx <= 0 || r.bottom + sy <= 0) return false
     const cs = win.getComputedStyle(el)
-    if (cs.display === 'none' || cs.visibility !== 'visible' || parseFloat(cs.opacity) === 0) return false
+    if (cs.display === 'none' || cs.visibility !== 'visible') return false
+    if (ownOpacity && parseFloat(cs.opacity) === 0) return false
     if (typeof el.checkVisibility === 'function') {
       try {
-        if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false
+        if (!el.checkVisibility({ checkOpacity: ownOpacity, checkVisibilityCSS: true })) return false
       } catch {
         // Older engines: fall through, the checks above are good enough.
       }
     }
+    if (!ownOpacity) {
+      for (let p = parentOf(el); p; p = parentOf(p)) if (parseFloat(win.getComputedStyle(p).opacity) === 0) return false
+    }
     return true
+  }
+
+  /**
+   * The node whose rectangle stands for `el` on the screenshot, or null when there is nothing to show.
+   * Custom checkboxes, radio buttons and switches usually hide the native input (opacity 0, a
+   * clipped pixel, display none) and draw the control with its label: the input is still the
+   * element a test acts on, so it is reported at the label's position.
+   */
+  const shownAs = (el: any, type: string): any => {
+    if (isVisible(el)) return el
+    if ((type !== 'checkbox' && type !== 'radio') || tagOf(el) !== 'input') return null
+    const label = (el.labels && el.labels[0]) || (typeof el.closest === 'function' ? el.closest('label') : null)
+    if (label && isVisible(label)) return label
+    return isVisible(el, false) ? el : null
   }
 
   /** Text of a node without the content of nested form controls (a wrapping label must not include its select's options). */
@@ -132,7 +182,15 @@ export function scanPage(args: ScanArgs): ScanResult {
     }
     if (el.labels && el.labels.length) return textOutsideControls(el.labels[0])
     const wrap = typeof el.closest === 'function' ? el.closest('label') : null
-    return wrap && wrap !== el ? textOutsideControls(wrap) : ''
+    if (wrap && wrap !== el) return textOutsideControls(wrap)
+    // <input type=checkbox><label>Buy milk</label>: a label that is only placed next to its control.
+    const t = tagOf(el) === 'input' ? attr(el, 'type').toLowerCase() : ''
+    if (t === 'checkbox' || t === 'radio') {
+      for (const near of [el.nextElementSibling, el.previousElementSibling]) {
+        if (near && tagOf(near) === 'label' && !near.control) return textOutsideControls(near)
+      }
+    }
+    return ''
   }
 
   const labelIsAssociated = (label: any): boolean => {
@@ -158,18 +216,23 @@ export function scanPage(args: ScanArgs): ScanResult {
     return img ? attr(img, 'alt') : ''
   }
 
+  const hasControls = (el: any): boolean => !!el.querySelector(INTERACTIVE_SEL)
+
   const isTextCandidate = (el: any, tag: string): boolean => {
     const role = attr(el, 'role').toLowerCase()
     if (role === 'alert' || role === 'status') return visibleText(el) !== ''
     if (!TEXT_TAGS.has(tag)) return false
-    const text = visibleText(el)
-    if (!text || text.length > 120) return false
-    if (el.querySelector(INTERACTIVE_SEL)) return false
-    if (/^h[1-6]$/.test(tag)) return true
+    if (!visibleText(el)) return false
+    // A sentence with a link or a control in it is still one text, as long as it has words of its own.
+    const mixed = hasControls(el)
+    if (!mixed && /^h[1-6]$/.test(tag)) return true
     let own = false
     for (const child of el.childNodes) {
       if (child.nodeType === 3 && norm(child.nodeValue)) own = true
-      else if (child.nodeType === 1 && !INLINE.has(tagOf(child))) return false
+      else if (child.nodeType === 1) {
+        const t = tagOf(child)
+        if (!INLINE.has(t) && !(mixed && INLINE_CONTROLS.has(t))) return false
+      }
     }
     return own
   }
@@ -181,9 +244,12 @@ export function scanPage(args: ScanArgs): ScanResult {
     if (!s.includes('"')) return '"' + s + '"'
     return 'concat(' + s.split("'").map((part) => "'" + part + "'").join(', "\'", ') + ')'
   }
+  // Playwright's css engine pierces open shadow roots, so "unique" has to mean unique across all of them.
   const cssAll = (sel: string): any[] => {
     try {
-      return Array.from(doc.querySelectorAll(sel))
+      const out: any[] = []
+      for (const root of roots) for (const hit of root.querySelectorAll(sel)) out.push(hit)
+      return out
     } catch {
       return []
     }
@@ -273,13 +339,12 @@ export function scanPage(args: ScanArgs): ScanResult {
       const v = attr(el, name)
       if (v && v.length <= 80) tryCss(tag + '[' + name + '=' + cssQuote(el.getAttribute(name)) + ']')
     }
-    const typeAttr = attr(el, 'type')
-    if (typeAttr && (tag === 'input' || tag === 'button')) tryCss(tag + '[type=' + cssQuote(typeAttr) + ']')
 
-    // Text based XPath. Numbers in plain text are usually volatile (prices, counters), so those rank last.
+    // Text based XPath. Numbers are usually volatile (prices, counters, "3 hours ago"), so a text
+    // with digits ranks last, after even the positional fallback.
     const text = tag === 'input' || tag === 'select' || tag === 'textarea' || type === 'image' ? '' : norm(el.textContent)
     const usableText = text.length > 0 && text.length <= 80
-    const volatile = type === 'text' && /\d/.test(text)
+    const volatile = /\d/.test(text)
     const single = el.childNodes.length === 1 && el.childNodes[0].nodeType === 3 && el.childNodes[0].nodeValue === text
     const textExpr = '//' + tag + '[' + (single ? 'text()' : 'normalize-space()') + '=' + xpathLiteral(text) + ']'
     let textUnique = false
@@ -304,12 +369,19 @@ export function scanPage(args: ScanArgs): ScanResult {
       break
     }
 
-    if (usableText && !textUnique) {
-      if (volatile) tryXpath(textExpr)
+    if (usableText && !textUnique && !volatile) {
       const twins = xpathAll(textExpr)
       const at = twins.indexOf(el)
       if (at >= 0 && twins.length > 1) tryXpath('(' + textExpr + ')[' + (at + 1) + ']')
     }
+
+    // tag[type=...] says what kind of control this is, not which one: it is unique only until the
+    // page gains a second submit button or email field, so it ranks just above the positional fallback.
+    const typeAttr = attr(el, 'type')
+    if (typeAttr && (tag === 'input' || tag === 'button')) tryCss(tag + '[type=' + cssQuote(typeAttr) + ']')
+
+    // XPath does not reach into shadow roots: an element in one keeps its CSS locators only.
+    if (inShadow(el)) return out
 
     // Positional fallback: always resolves, least stable.
     const base = classes.length ? '//' + tag + '[contains(@class,' + xpathLiteral(classes[0]) + ')]' : '//' + tag
@@ -321,24 +393,33 @@ export function scanPage(args: ScanArgs): ScanResult {
       const path = absolutePath(el)
       if (!tryXpath(path, true)) push('xpath', path)
     }
+    if (usableText && volatile) tryXpath(textExpr, true)
     return out
   }
 
   // ---- element description ----
   const FP_ATTRS = ['id', 'name', 'class', 'href', 'placeholder', 'aria-label', 'role', 'type', 'data-testid', 'alt', 'title']
-  const describe = (el: any, type: string): UiElement => {
+  /** Name of last resort for icon-only controls: a tooltip or accessible name on something inside. */
+  const innerName = (el: any): string => {
+    const named = el.querySelector ? el.querySelector('[aria-label],[title]') : null
+    if (named) return attr(named, 'aria-label') || attr(named, 'title')
+    const svgTitle = el.querySelector ? el.querySelector('svg > title') : null
+    return svgTitle ? norm(svgTitle.textContent) : ''
+  }
+
+  const describe = (el: any, type: string, shown: any): UiElement => {
     const tag = tagOf(el)
-    const r = el.getBoundingClientRect()
+    const r = shown.getBoundingClientRect()
     const box = { x: Math.round(r.left + sx), y: Math.round(r.top + sy), w: Math.round(r.width), h: Math.round(r.height) }
     const control = type === 'input' || type === 'textarea' || type === 'checkbox' || type === 'radio' || type === 'select'
     const aria = attr(el, 'aria-label')
     const associated = control || type === 'button' ? labelFor(el) : ''
     const placeholder = attr(el, 'placeholder')
     const text = ownText(el, type)
-    const label = aria || associated || placeholder || text || attr(el, 'name') || attr(el, 'alt') || attr(el, 'title')
+    const label = aria || associated || placeholder || text || attr(el, 'name') || attr(el, 'alt') || attr(el, 'title') || (control ? '' : innerName(el))
     const fallback = tag === 'input' ? attr(el, 'type') || 'text' : ''
-    const shown = cut(label || fallback, 60)
-    const name = shown ? '"' + shown + '" ' + SUFFIX[type] : 'Unnamed ' + SUFFIX[type]
+    const title = cut(label || fallback, 60)
+    const name = title ? '"' + title + '" ' + SUFFIX[type] : 'Unnamed ' + SUFFIX[type]
 
     const attrs: Record<string, string> = {}
     for (const a of FP_ATTRS) {
@@ -347,7 +428,7 @@ export function scanPage(args: ScanArgs): ScanResult {
     }
     if (type === 'button' && attr(el, 'value')) attrs.value = attr(el, 'value').slice(0, 200)
     const path: string[] = []
-    for (let n = el; n && n.nodeType === 1 && n !== doc.documentElement; n = n.parentElement) path.unshift(tagOf(n))
+    for (let n = el; n && n.nodeType === 1 && n !== doc.documentElement; n = parentOf(n)) path.unshift(tagOf(n))
 
     return {
       id: '',
@@ -368,43 +449,50 @@ export function scanPage(args: ScanArgs): ScanResult {
   }
 
   // ---- walk ----
-  const picked: { el: any; type: string }[] = []
+  const picked: { el: any; type: string; shown: any }[] = []
   const blockAll = new WeakSet<object>()
   const blockText = new WeakSet<object>()
-  const all: any[] = doc.body ? Array.from(doc.body.querySelectorAll('*')) : []
-  for (const el of all) {
+  const consider = (el: any): void => {
     const tag = tagOf(el)
-    if (SKIP_TAGS.has(tag)) continue
-    let insideControl = false
+    if (SKIP_TAGS.has(tag)) return
     let insideText = false
-    for (let p = el.parentElement; p && p !== doc.body; p = p.parentElement) {
-      if (blockAll.has(p)) {
-        insideControl = true
-        break
-      }
+    for (let p = parentOf(el); p && p !== doc.body; p = parentOf(p)) {
+      if (blockAll.has(p)) return
       if (blockText.has(p)) insideText = true
     }
-    if (insideControl) continue
     const type = typeOf(el)
     if (type) {
       blockAll.add(el)
-      if (isVisible(el)) picked.push({ el, type })
-      continue
+      const shown = shownAs(el, type)
+      if (shown) picked.push({ el, type, shown })
+      return
     }
     if (tag === 'svg') {
       blockAll.add(el)
-      continue
+      return
     }
     if (tag === 'label' && labelIsAssociated(el)) {
       blockText.add(el)
-      continue
+      return
     }
-    if (insideText) continue
+    if (insideText) return
     if (isTextCandidate(el, tag)) {
-      blockText.add(el)
-      if (isVisible(el)) picked.push({ el, type: 'text' })
+      // A plain text block hides the fragments inside it; one with links or controls in it does
+      // not, so "$120" in "Total: <b>$120</b>, see <a>terms</a>" can still be picked on its own.
+      if (!hasControls(el)) blockText.add(el)
+      if (isVisible(el)) picked.push({ el, type: 'text', shown: el })
     }
   }
+  const walk = (root: any): void => {
+    for (const el of Array.from(root.querySelectorAll('*')) as any[]) {
+      consider(el)
+      if (el.shadowRoot && !blockAll.has(el)) {
+        roots.push(el.shadowRoot)
+        walk(el.shadowRoot)
+      }
+    }
+  }
+  if (doc.body) walk(doc.body)
 
   let kept = picked
   if (picked.length > args.max) {
@@ -425,8 +513,11 @@ export function scanPage(args: ScanArgs): ScanResult {
   const elements: UiElement[] = []
   const indexOf = new Map<any, number>()
   for (const p of kept) {
+    const described = describe(p.el, p.type, p.shown)
+    // Only happens inside a shadow root, when no CSS locator is unique: nothing could find it at run time.
+    if (!described.locators.length) continue
     indexOf.set(p.el, elements.length)
-    elements.push(describe(p.el, p.type))
+    elements.push(described)
   }
   const probes = args.probes.map((probe) => {
     const hits = resolve(probe)
@@ -434,10 +525,13 @@ export function scanPage(args: ScanArgs): ScanResult {
     const el = hits[0]
     let index = indexOf.get(el)
     if (index === undefined) {
-      if (!el || el.nodeType !== 1 || !isVisible(el)) return { count: 1, index: -1 }
+      if (!el || el.nodeType !== 1) return { count: 1, index: -1 }
+      const type = typeOf(el) || (isTextCandidate(el, tagOf(el)) ? 'text' : 'other')
+      const shown = shownAs(el, type)
+      if (!shown) return { count: 1, index: -1 }
       index = elements.length
       indexOf.set(el, index)
-      elements.push(describe(el, typeOf(el) || (isTextCandidate(el, tagOf(el)) ? 'text' : 'other')))
+      elements.push(describe(el, type, shown))
     }
     return { count: 1, index }
   })

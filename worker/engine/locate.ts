@@ -32,9 +32,37 @@ export async function poll<T>(attempt: () => Promise<T | null | undefined | fals
   }
 }
 
-/** Waits until the locator matches at least one node; returns the first match, or null on timeout. */
-export async function waitForElement(page: Page, locator: Locator, timeoutMs: number): Promise<PwLocator | null> {
+export interface Resolved {
+  /** The element, when the locator matches exactly one node. */
+  el: PwLocator | null
+  /** How many nodes the locator matched when the wait ended: 0 = missing, more than 1 = ambiguous. */
+  count: number
+}
+
+/**
+ * Waits until the locator matches exactly one node. A locator is unique when it is captured, so
+ * one that matches several nodes later has stopped identifying its element: acting on the first
+ * match would silently test something else, hence no element is returned for it.
+ */
+export async function waitForElement(page: Page, locator: Locator, timeoutMs: number): Promise<Resolved> {
   const handle = page.locator(toSelector(locator))
-  const found = await poll(async () => (await handle.count()) > 0, timeoutMs)
-  return found ? handle.first() : null
+  let count = 0
+  const found = await poll(async () => (count = await handle.count()) === 1, timeoutMs)
+  return { el: found ? handle : null, count: found ? 1 : count }
+}
+
+/**
+ * Is any node matched by the locator rendered (it has a box and is not `visibility: hidden`)?
+ * This is what "exists" means to the person who built the test: captures only offer elements
+ * that can be seen, and an empty `display: none` error box is not an error on the screen.
+ */
+export async function isRendered(page: Page, locator: Locator): Promise<boolean> {
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  return page.locator(toSelector(locator)).evaluateAll((nodes: any[]) =>
+    nodes.some((node) => {
+      const r = node.getBoundingClientRect()
+      return r.width > 0 && r.height > 0 && (globalThis as any).getComputedStyle(node).visibility === 'visible'
+    }),
+  )
+  /* eslint-enable @typescript-eslint/no-explicit-any */
 }

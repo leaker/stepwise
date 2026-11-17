@@ -246,6 +246,57 @@ describe('runSteps', () => {
     expect(r.results.map((x) => x.number)).toEqual([4, 5, 6, 7, 8, 9, 10, 12, 13])
   })
 
+  it('replays the steps before the range as set-up when asked to, without reporting them', async () => {
+    const steps = [
+      ...loginSteps(), // 1-5: set-up
+      step('store_fixed', { variable: 'GREETING', value: 'Welcome back, Demo User' }), // 6: set-up
+      step('assert_title_equals', { value: 'not the title', continueOnFailure: true }), // 7: set-up, tolerated
+      step('assert_text_equals', { target: ref(uis.dashboard, '"Welcome back, Demo User" text'), value: '${GREETING}' }), // 8
+      step('assert_title_equals', { value: 'not run' }), // 9: after the range
+    ]
+    const r = await run(page, steps, baseUrl, { variables: V1, range: { from: 8, to: 8 }, replaySetup: true })
+    expect(r.status).toBe('succeeded')
+    expect(r.results.map((x) => x.number)).toEqual([8])
+    expect(r.shots).toHaveLength(1)
+    expect(r.onStepCalls).toBe(1)
+    expect(r.log).toContain('Set-up: replaying steps 1-7')
+  })
+
+  it('fails a partial run with the set-up step that broke', async () => {
+    const steps = [
+      step('navigate', { value: 'index.html' }), // 1
+      step('click', { target: ref(uis.login, '"Sign in" button') }), // 2: not on this page
+      step('assert_url_contains', { value: 'dashboard' }), // 3
+    ]
+    const r = await run(page, steps, baseUrl, { range: { from: 3, to: 3 }, replaySetup: true })
+    expect(r.status).toBe('failed')
+    expect(r.results.map((x) => x.number)).toEqual([2])
+    expect(r.results[0].error).toBe('Set-up failed before the requested steps: UI element "Sign in" button was not found (id=signin-button)')
+    expect(r.results[0].screenshotKey).toBeTruthy()
+  })
+
+  it('takes a screenshot of a failed step even when its command normally takes none', async () => {
+    const steps = [
+      step('navigate', { value: 'index.html' }),
+      step('store_fixed', { variable: 'A', value: '1' }),
+      step('store_text', { target: ref(uis.login, '"Sign in" button'), variable: 'LABEL' }),
+    ]
+    const r = await run(page, steps, baseUrl)
+    expect(r.status).toBe('failed')
+    expect(r.results[1].screenshotKey).toBeUndefined()
+    expect(r.results[2].status).toBe('failed')
+    expect(r.results[2].screenshotKey).toBe('shot-2')
+  })
+
+  it('fails the step during which a top-level navigation was refused', async () => {
+    const pending: (string | null)[] = [null, 'http://10.0.0.1/admin']
+    const steps = [step('navigate', { value: 'index.html' }), step('assert_title_contains', { value: 'Harbor' }), step('assert_title_contains', { value: 'Harbor' })]
+    const r = await run(page, steps, baseUrl, { takeBlockedNavigation: () => pending.shift() ?? null })
+    expect(r.status).toBe('failed')
+    expect(r.results.map((x) => x.status)).toEqual(['passed', 'failed'])
+    expect(r.results[1].error).toBe("Navigation to http://10.0.0.1/admin was blocked: the host is not allowed by this deployment's target policy")
+  })
+
   it('reports a missing element with its name and locator', async () => {
     const steps = [step('navigate', { value: 'index.html' }), step('click', { target: ref(uis.login, '"Sign in" button') })]
     const r = await run(page, steps, baseUrl)
@@ -258,6 +309,13 @@ describe('runSteps', () => {
     const r = await run(page, scenario(), baseUrl, { variables: V1, shouldAbort: () => ++calls > 3 })
     expect(r.status).toBe('aborted')
     expect(r.results).toHaveLength(3)
+  })
+
+  it('logs why it stopped when the reason is not a user abort', async () => {
+    const r = await run(page, [step('navigate', { value: 'index.html' })], baseUrl, { shouldAbort: () => 'Stopped: the run is no longer active' })
+    expect(r.status).toBe('aborted')
+    expect(r.log).toContain('[1] Stopped: the run is no longer active')
+    expect(r.log).not.toContain('Aborted by user')
   })
 })
 

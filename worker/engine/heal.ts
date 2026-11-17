@@ -8,8 +8,11 @@ import { scan } from './detect'
 export const HEAL_MIN_SCORE = 0.55
 /** ... and only when it beats the second best candidate by this much. */
 export const HEAL_MIN_MARGIN = 0.08
-/** A stored fallback locator must still point at something that resembles the original. */
-const CANDIDATE_MIN_SCORE = 0.4
+/**
+ * Below this, a text / label / attribute is treated as "a different one". Structure and position
+ * alone never make a match: something that says *which* element it is has to carry over.
+ */
+export const IDENTITY_MIN_SCORE = 0.5
 const HEAL_SCAN_LIMIT = 1500
 
 const CLICKABLE: ElementType[] = ['button', 'link', 'other']
@@ -103,14 +106,42 @@ function attrSimilarity(name: string, a: string, b: string | undefined): number 
   return textSimilarity(a, b)
 }
 
+const classSimilarity = (a: string, b: string | undefined) => jaccard(a.split(/\s+/).filter(Boolean), (b ?? '').split(/\s+/).filter(Boolean))
+
+/** Attributes that identify one particular element (as opposed to `type` or `role`, which describe a kind). */
+const IDENTITY_ATTRS = ['id', 'name', 'data-testid', 'placeholder', 'href', 'aria-label', 'alt', 'title', 'value']
+
+/**
+ * Does `live` carry over anything that identifies the stored element? Tag, element type, ancestor
+ * path, position and size are shared by whatever happens to sit in the same spot, so they do not count.
+ *
+ * - A text element *is* its text: a different message in the same place is a different element
+ *   (otherwise "Your reservation is confirmed" heals onto "Payment failed").
+ * - Anything else needs its text, its label, an identifying attribute or its classes to survive.
+ *   A renamed button that kept its styling still qualifies; an unrelated button in its place does not.
+ * - A stored fingerprint with none of these has nothing to compare, so only the score decides.
+ */
+export function sameIdentity(stored: Fingerprint, live: Fingerprint): boolean {
+  if (stored.type === 'text' && stored.text) return textSimilarity(stored.text, live.text) >= IDENTITY_MIN_SCORE
+  const evidence: number[] = []
+  if (stored.text) evidence.push(textSimilarity(stored.text, live.text))
+  if (stored.label) evidence.push(textSimilarity(stored.label, live.label))
+  for (const name of IDENTITY_ATTRS) {
+    const value = stored.attrs[name]
+    if (value) evidence.push(attrSimilarity(name, value, live.attrs[name]))
+  }
+  if (stored.attrs.class) evidence.push(classSimilarity(stored.attrs.class, live.attrs.class))
+  return evidence.length === 0 || Math.max(...evidence) >= IDENTITY_MIN_SCORE
+}
+
 /**
  * Weighted similarity (0..1) between a stored fingerprint and a live element. Only features
  * the stored fingerprint actually has take part, so an input without text is not penalised for it.
- * Returns 0 for incompatible element types.
+ * Returns 0 for incompatible element types and for elements that fail `sameIdentity`.
  */
 export function similarity(stored: Fingerprint, live: Fingerprint): number {
   const compat = typeCompatibility(stored.type, live.type)
-  if (compat === 0) return 0
+  if (compat === 0 || !sameIdentity(stored, live)) return 0
   let total = 0
   let weight = 0
   const add = (w: number, s: number) => {
@@ -124,7 +155,7 @@ export function similarity(stored: Fingerprint, live: Fingerprint): number {
     const value = stored.attrs[name]
     if (value) add(w, attrSimilarity(name, value, live.attrs[name]))
   }
-  if (stored.attrs.class) add(1.5, jaccard(stored.attrs.class.split(/\s+/), (live.attrs.class ?? '').split(/\s+/).filter(Boolean)))
+  if (stored.attrs.class) add(1.5, classSimilarity(stored.attrs.class, live.attrs.class))
   add(1, stored.tag === live.tag ? 1 : 0)
   add(1, compat)
   add(1.5, pathSimilarity(stored.path, live.path))
@@ -141,7 +172,7 @@ export function similarity(stored: Fingerprint, live: Fingerprint): number {
 
 export interface Replacement {
   element: UiElement
-  /** 1 when a stored fallback locator still worked, otherwise the fingerprint similarity. */
+  /** Fingerprint similarity between the stored element and the replacement, whichever way it was found. */
   score: number
   via: 'candidate' | 'fingerprint'
   pageWidth: number
@@ -156,11 +187,26 @@ export interface HealMiss {
 const sameLocator = (a: Locator, b: Locator) => a.key === b.key && a.value === b.value
 
 /**
+ * Fallback locators that name the element (id, test id, name, label, text, href, class) are trusted
+ * to find it again. `tag[type=...]` and positional XPaths only say "the n-th thing of this kind":
+ * whatever replaced the element matches them too, so those are left to the fingerprint comparison.
+ */
+export function isSpecificLocator(l: Locator): boolean {
+  if (l.key === 'id') return true
+  if (l.key === 'css') return !/^[a-z][a-z0-9-]*\[type=[^\]]*\]$/i.test(l.value)
+  return !l.value.startsWith('(') && /(text\(\)|normalize-space\(\))\s*=/.test(l.value)
+}
+
+/**
  * Looks for the element `target` used to describe. `broken` is the locator that just failed
  * (it is skipped when trying the stored fallbacks).
+ *
+ * A stored fallback locator is accepted when it is specific, still matches exactly one element and
+ * that element passes the same similarity threshold as a fingerprint match. Otherwise every element
+ * on the page is ranked by fingerprint similarity and the best one must win by a clear margin.
  */
 export async function findReplacement(page: Page, target: ElementRef, broken: Locator): Promise<Replacement | HealMiss> {
-  const fallbacks = target.candidates.filter((c) => !sameLocator(c, broken) && !sameLocator(c, target.locator))
+  const fallbacks = target.candidates.filter((c) => isSpecificLocator(c) && !sameLocator(c, broken) && !sameLocator(c, target.locator))
   const result = await scan(page, { max: HEAL_SCAN_LIMIT, probes: fallbacks })
   const size = { pageWidth: result.width, pageHeight: result.height }
 
@@ -168,9 +214,9 @@ export async function findReplacement(page: Page, target: ElementRef, broken: Lo
     const hit = result.probes[i]
     if (!hit || hit.index < 0) continue
     const element = result.elements[hit.index]
-    if (element.locators.length && similarity(target.fingerprint, element.fingerprint) >= CANDIDATE_MIN_SCORE) {
-      return { element, score: 1, via: 'candidate', ...size }
-    }
+    if (!element.locators.length) continue
+    const score = similarity(target.fingerprint, element.fingerprint)
+    if (score >= HEAL_MIN_SCORE) return { element, score: Math.round(score * 1000) / 1000, via: 'candidate', ...size }
   }
 
   const ranked = result.elements
@@ -179,7 +225,7 @@ export async function findReplacement(page: Page, target: ElementRef, broken: Lo
     .filter((r) => r.score > 0)
     .sort((x, y) => y.score - x.score)
   const best = ranked[0]
-  if (!best) return { reason: 'no element of a compatible type is on the page' }
+  if (!best) return { reason: 'no element on the page has a compatible type and a matching text, label or attribute' }
   const runnerUp = ranked[1]?.score ?? 0
   const shown = best.score.toFixed(2)
   if (best.score < HEAL_MIN_SCORE) return { reason: `best match ${best.element.name} scored ${shown}, below ${HEAL_MIN_SCORE}` }
