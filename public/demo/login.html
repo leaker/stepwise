@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in | Harbor Inn</title>
+    <link rel="icon" href="logo.svg" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="inner">
+        <a class="brand" href="index.html"><img src="logo.svg" alt="Harbor Inn logo" /><span>Harbor Inn</span></a>
+        <nav class="site-nav" aria-label="Main">
+          <a class="nav-link" data-v2-class="menu-item" href="index.html">Home</a>
+          <a class="nav-link" data-v2-class="menu-item" href="index.html#rooms">Rooms</a>
+          <a class="nav-link" data-v2-class="menu-item" href="reserve.html">Reserve</a>
+          <a class="nav-link session-link" data-v2-class="menu-item session-link" href="login.html">Sign in</a>
+        </nav>
+      </div>
+    </header>
+    <main>
+      <div class="auth-card">
+        <h1>Sign in</h1>
+        <p class="hint">Use demo@example.com and demo1234 to try the guest area.</p>
+        <form id="login-form" data-v2-wrap="auth-panel" novalidate>
+          <div class="form-error" id="login-error" data-v2-id="auth-message" data-v2-class="notice notice-danger" role="alert"></div>
+          <div class="field">
+            <label for="email">Email</label>
+            <input type="email" id="email" data-v2-id="user-email" name="email" placeholder="you@example.com" autocomplete="username" />
+          </div>
+          <div class="field">
+            <label for="password">Password</label>
+            <input type="password" id="password" data-v2-id="user-password" name="password" data-v2-name="pass" placeholder="Your password" autocomplete="current-password" />
+          </div>
+          <label class="choice"><input type="checkbox" id="remember" data-v2-id="keep-signed-in" name="remember" /> Remember me</label>
+          <button type="submit" class="btn btn-primary btn-block" id="signin-button" data-v2-id="login-submit" data-v2-class="btn btn-solid btn-block" data-v2-text="Log in to your account">Sign in</button>
+        </form>
+        <p class="hint" style="margin-top: 16px">New here? <a href="reserve.html">Reserve without an account</a></p>
+      </div>
+    </main>
+    <footer class="site-footer">
+      <div class="inner">
+        <span>Harbor Inn, 12 Quay Street, Port Alder</span>
+        <span class="spacer"></span>
+        <a href="reserve.html">Reserve</a>
+        <a class="session-link" href="login.html">Sign in</a>
+        <a href="mailto:stay@harborinn.example">Contact</a>
+      </div>
+    </footer>
+    <script src="app.js"></script>
+    <script>
+      ;(function () {
+        var form = document.getElementById('login-form')
+        var email = document.getElementById('email')
+        var password = document.getElementById('password')
+        var remember = document.getElementById('remember')
+        var error = document.getElementById('login-error')
+        form.addEventListener('submit', function (event) {
+          event.preventDefault()
+          error.textContent = ''
+          if (!email.value.trim() || !password.value) {
+            error.textContent = 'Enter your email and password.'
+            return
+          }
+          if (email.value.trim().toLowerCase() !== 'demo@example.com' || password.value !== 'demo1234') {
+            error.textContent = 'The email or password is incorrect.'
+            return
+          }
+          Harbor.setUser({ name: 'Demo User', email: 'demo@example.com', remember: remember.checked })
+          Harbor.go('dashboard.html')
+        })
+        Harbor.ready()
+      })()
+    </script>
+  </body>
+</html>

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Reservation confirmed | Harbor Inn</title>
+    <link rel="icon" href="logo.svg" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="inner">
+        <a class="brand" href="index.html"><img src="logo.svg" alt="Harbor Inn logo" /><span>Harbor Inn</span></a>
+        <nav class="site-nav" aria-label="Main">
+          <a class="nav-link" data-v2-class="menu-item" href="index.html">Home</a>
+          <a class="nav-link" data-v2-class="menu-item" href="index.html#rooms">Rooms</a>
+          <a class="nav-link" data-v2-class="menu-item" href="reserve.html">Reserve</a>
+          <a class="nav-link session-link" data-v2-class="menu-item session-link" href="login.html">Sign in</a>
+        </nav>
+      </div>
+    </header>
+    <main>
+      <div class="card" data-v2-wrap="receipt">
+        <h1 id="confirm-title" data-v2-id="receipt-title">Your reservation is confirmed</h1>
+        <p>Reservation ID <span class="ref" id="reservation-id" data-v2-id="booking-ref"></span></p>
+        <dl class="summary">
+          <dt>Guest</dt>
+          <dd id="sum-name" data-v2-id="detail-name"></dd>
+          <dt>Check-in</dt>
+          <dd id="sum-checkin" data-v2-id="detail-checkin"></dd>
+          <dt>Nights</dt>
+          <dd id="sum-nights" data-v2-id="detail-nights"></dd>
+          <dt>Guests</dt>
+          <dd id="sum-guests" data-v2-id="detail-guests"></dd>
+          <dt>Room plan</dt>
+          <dd id="sum-plan" data-v2-id="detail-plan"></dd>
+          <dt>Breakfast</dt>
+          <dd id="sum-breakfast" data-v2-id="detail-breakfast"></dd>
+          <dt>Notes</dt>
+          <dd id="sum-notes" data-v2-id="detail-notes"></dd>
+          <dt>Total</dt>
+          <dd id="sum-total" data-v2-id="detail-total"></dd>
+        </dl>
+        <div class="actions">
+          <a class="btn btn-primary" data-v2-class="btn btn-solid" href="index.html">Back to home</a>
+          <a href="reserve.html">Make another reservation</a>
+        </div>
+      </div>
+    </main>
+    <footer class="site-footer">
+      <div class="inner">
+        <span>Harbor Inn, 12 Quay Street, Port Alder</span>
+        <span class="spacer"></span>
+        <a href="reserve.html">Reserve</a>
+        <a class="session-link" href="login.html">Sign in</a>
+        <a href="mailto:stay@harborinn.example">Contact</a>
+      </div>
+    </footer>
+    <script src="app.js"></script>
+    <script>
+      ;(function () {
+        var data = null
+        try {
+          data = JSON.parse(sessionStorage.getItem('harbor.reservation') || 'null')
+        } catch (e) {}
+        if (!data) {
+          Harbor.go('reserve.html')
+          return
+        }
+        function set(id, value) {
+          document.getElementById(id).textContent = value
+        }
+        set('reservation-id', data.id)
+        set('sum-name', data.name)
+        set('sum-checkin', data.checkin)
+        set('sum-nights', String(data.nights))
+        set('sum-guests', data.guestsLabel)
+        set('sum-plan', data.plan)
+        set('sum-breakfast', data.breakfast ? 'Included' : 'Not included')
+        set('sum-notes', data.notes || 'None')
+        set('sum-total', data.total)
+        Harbor.ready()
+      })()
+    </script>
+  </body>
+</html>

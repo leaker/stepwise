@@ -1,8 +1,7 @@
 // Public surface of the test engine. Implementation lives in the sibling files.
 // The engine only depends on the Playwright `Page` API, so it runs unchanged on
 // Cloudflare Browser Run (@cloudflare/playwright) and on Node Playwright (tests).
-import type { Page } from '@cloudflare/playwright'
-import type { Step, StepResult, UiElement } from '../../shared/types'
+import type { StepResult, UiElement } from '../../shared/types'
 
 export interface Capture {
   url: string
@@ -38,5 +37,5 @@ export interface RunOutcome {
   log: string
 }
 
-export declare function captureUi(page: Page): Promise<Capture>
-export declare function runSteps(page: Page, steps: Step[], opts: RunOptions): Promise<RunOutcome>
+export { captureUi } from './detect'
+export { runSteps } from './executor'

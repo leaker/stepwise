@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Your stays | Harbor Inn</title>
+    <link rel="icon" href="logo.svg" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="inner">
+        <a class="brand" href="index.html"><img src="logo.svg" alt="Harbor Inn logo" /><span>Harbor Inn</span></a>
+        <nav class="site-nav" aria-label="Main">
+          <a class="nav-link" data-v2-class="menu-item" href="index.html">Home</a>
+          <a class="nav-link" data-v2-class="menu-item" href="index.html#rooms">Rooms</a>
+          <a class="nav-link" data-v2-class="menu-item" href="reserve.html">Reserve</a>
+          <a class="nav-link session-link" data-v2-class="menu-item session-link" href="login.html">Sign in</a>
+        </nav>
+      </div>
+    </header>
+    <main>
+      <div class="section-title">
+        <h1 id="greeting" data-v2-id="welcome-heading">Welcome back</h1>
+        <button type="button" class="btn btn-quiet" id="signout-button" data-v2-id="logout">Sign out</button>
+      </div>
+      <p>Signed in as <span id="account-email" data-v2-id="member-email"></span></p>
+      <div class="actions" style="margin: 0 0 28px" data-v2-wrap="quick-actions">
+        <a class="btn btn-primary" id="reserve-link" data-v2-id="book-stay" data-v2-class="btn btn-solid" href="reserve.html">Reserve a room</a>
+        <span class="hint">Members save 10% on stays of three nights or more.</span>
+      </div>
+      <h2>Past stays</h2>
+      <table class="stays">
+        <thead>
+          <tr><th>Reservation</th><th>Room</th><th>Check-in</th><th>Nights</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>HB-20418</td><td>Standard room</td><td>March 3</td><td>2</td></tr>
+          <tr><td>HB-19877</td><td>Deluxe harbor view</td><td>January 14</td><td>3</td></tr>
+        </tbody>
+      </table>
+    </main>
+    <footer class="site-footer">
+      <div class="inner">
+        <span>Harbor Inn, 12 Quay Street, Port Alder</span>
+        <span class="spacer"></span>
+        <a href="reserve.html">Reserve</a>
+        <a class="session-link" href="login.html">Sign in</a>
+        <a href="mailto:stay@harborinn.example">Contact</a>
+      </div>
+    </footer>
+    <script src="app.js"></script>
+    <script>
+      ;(function () {
+        var user = Harbor.getUser()
+        if (!user) {
+          Harbor.go('login.html')
+          return
+        }
+        document.getElementById('greeting').textContent = 'Welcome back, ' + user.name
+        document.getElementById('account-email').textContent = user.email
+        document.getElementById('signout-button').addEventListener('click', function () {
+          Harbor.setUser(null)
+          Harbor.go('index.html')
+        })
+        Harbor.ready()
+      })()
+    </script>
+  </body>
+</html>

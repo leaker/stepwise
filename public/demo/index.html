@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Harbor Inn | A small hotel on the quay</title>
+    <link rel="icon" href="logo.svg" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="inner">
+        <a class="brand" href="index.html"><img src="logo.svg" alt="Harbor Inn logo" /><span>Harbor Inn</span></a>
+        <nav class="site-nav" aria-label="Main">
+          <a class="nav-link" data-v2-class="menu-item" href="index.html">Home</a>
+          <a class="nav-link" data-v2-class="menu-item" href="index.html#rooms">Rooms</a>
+          <a class="nav-link" data-v2-class="menu-item" href="reserve.html">Reserve</a>
+          <a class="nav-link session-link" data-v2-class="menu-item session-link" href="login.html">Sign in</a>
+        </nav>
+      </div>
+    </header>
+    <main>
+      <section class="hero" data-v2-wrap="hero-frame">
+        <div>
+          <h1>Wake up to the tide.</h1>
+          <p>Twenty-four quiet rooms above the old harbor, a short walk from the ferry.</p>
+          <a class="btn btn-primary" id="cta-reserve" data-v2-id="hero-book" data-v2-class="btn btn-solid" href="reserve.html">Reserve a room</a>
+        </div>
+        <ul class="facts">
+          <li>Check-in from 3:00 PM</li>
+          <li>Breakfast served 7:00 to 10:30</li>
+          <li>Free cancellation up to 48 hours before arrival</li>
+        </ul>
+      </section>
+
+      <section id="rooms">
+        <div class="section-title">
+          <h2>Rooms</h2>
+          <a href="reserve.html">See availability</a>
+        </div>
+        <div class="rooms">
+          <article class="room-card">
+            <img src="room-standard.svg" alt="Standard room" />
+            <div class="body">
+              <h3>Standard room</h3>
+              <p>Queen bed, courtyard side, rain shower.</p>
+              <p class="price">$120 per night</p>
+              <a class="plan-link" href="reserve.html#plan=standard">View plan</a>
+            </div>
+          </article>
+          <article class="room-card">
+            <img src="room-deluxe.svg" alt="Deluxe harbor view" />
+            <div class="body">
+              <h3>Deluxe harbor view</h3>
+              <p>King bed, balcony over the water.</p>
+              <p class="price">$180 per night</p>
+              <a class="plan-link" href="reserve.html#plan=deluxe">View plan</a>
+            </div>
+          </article>
+          <article class="room-card">
+            <img src="room-suite.svg" alt="Captain&rsquo;s suite" />
+            <div class="body">
+              <h3>Captain&rsquo;s suite</h3>
+              <p>Two rooms, fireplace, corner windows.</p>
+              <p class="price">$260 per night</p>
+              <a class="plan-link" href="reserve.html#plan=suite">View plan</a>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+    <footer class="site-footer">
+      <div class="inner">
+        <span>Harbor Inn, 12 Quay Street, Port Alder</span>
+        <span class="spacer"></span>
+        <a href="reserve.html">Reserve</a>
+        <a class="session-link" href="login.html">Sign in</a>
+        <a href="mailto:stay@harborinn.example">Contact</a>
+      </div>
+    </footer>
+    <script src="app.js"></script>
+    <script>
+      Harbor.ready()
+    </script>
+  </body>
+</html>

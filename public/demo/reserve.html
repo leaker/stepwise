@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Reserve a room | Harbor Inn</title>
+    <link rel="icon" href="logo.svg" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="inner">
+        <a class="brand" href="index.html"><img src="logo.svg" alt="Harbor Inn logo" /><span>Harbor Inn</span></a>
+        <nav class="site-nav" aria-label="Main">
+          <a class="nav-link" data-v2-class="menu-item" href="index.html">Home</a>
+          <a class="nav-link" data-v2-class="menu-item" href="index.html#rooms">Rooms</a>
+          <a class="nav-link" data-v2-class="menu-item" href="reserve.html">Reserve</a>
+          <a class="nav-link session-link" data-v2-class="menu-item session-link" href="login.html">Sign in</a>
+        </nav>
+      </div>
+    </header>
+    <main>
+      <h1>Reserve a room</h1>
+      <p class="hint">No payment is taken until you arrive.</p>
+      <div class="layout-split">
+        <form class="card" id="reserve-form" data-v2-wrap="booking-shell" novalidate>
+          <div class="form-error" id="reserve-error" data-v2-id="booking-message" data-v2-class="notice notice-danger" role="alert"></div>
+          <div class="grid-2">
+            <div class="field">
+              <label for="checkin">Check-in date</label>
+              <input type="date" id="checkin" data-v2-id="arrival-date" name="checkin" />
+            </div>
+            <div class="field">
+              <label for="nights">Nights</label>
+              <input type="number" id="nights" data-v2-id="stay-nights" name="nights" min="1" max="14" value="1" />
+            </div>
+          </div>
+          <div class="field">
+            <label for="guests">Guests</label>
+            <select id="guests" data-v2-id="party-size" name="guests">
+              <option value="1">1 guest</option>
+              <option value="2">2 guests</option>
+              <option value="3">3 guests</option>
+              <option value="4">4 guests</option>
+            </select>
+          </div>
+          <fieldset>
+            <legend>Room plan</legend>
+            <label class="choice"><input type="radio" name="plan" id="plan-standard" data-v2-id="room-standard" value="standard" checked /> Standard room</label>
+            <label class="choice"><input type="radio" name="plan" id="plan-deluxe" data-v2-id="room-deluxe" value="deluxe" /> Deluxe harbor view</label>
+            <label class="choice"><input type="radio" name="plan" id="plan-suite" data-v2-id="room-suite" value="suite" /> Captain&rsquo;s suite</label>
+          </fieldset>
+          <label class="choice"><input type="checkbox" id="breakfast" data-v2-id="add-breakfast" name="breakfast" /> Add breakfast</label>
+          <div class="field">
+            <label for="guest-name">Full name</label>
+            <input type="text" id="guest-name" data-v2-id="contact-name" name="name" placeholder="As shown on your ID" />
+          </div>
+          <div class="field">
+            <label for="notes">Notes for the front desk</label>
+            <textarea id="notes" data-v2-id="special-requests" name="notes" placeholder="Late arrival, allergies, anything else"></textarea>
+          </div>
+          <button type="submit" class="btn btn-primary" id="confirm-button" data-v2-id="submit-reservation" data-v2-class="btn btn-solid">Confirm reservation</button>
+        </form>
+        <aside class="total-box">
+          <p class="hint">Total for your stay</p>
+          <p class="amount" id="total" data-v2-id="price-total">$120.00</p>
+          <p class="hint" id="total-detail" data-v2-id="price-detail">1 night, Standard room</p>
+        </aside>
+      </div>
+    </main>
+    <footer class="site-footer">
+      <div class="inner">
+        <span>Harbor Inn, 12 Quay Street, Port Alder</span>
+        <span class="spacer"></span>
+        <a href="reserve.html">Reserve</a>
+        <a class="session-link" href="login.html">Sign in</a>
+        <a href="mailto:stay@harborinn.example">Contact</a>
+      </div>
+    </footer>
+    <script src="app.js"></script>
+    <script>
+      ;(function () {
+        var form = document.getElementById('reserve-form')
+        var error = document.getElementById('reserve-error')
+        var total = document.getElementById('total')
+        var detail = document.getElementById('total-detail')
+        var fields = form.elements
+
+        function read() {
+          var planId = fields.plan.value
+          var plan = Harbor.PLANS[planId]
+          var nights = Math.max(1, Math.min(14, parseInt(fields.nights.value, 10) || 1))
+          var guests = parseInt(fields.guests.value, 10)
+          var breakfast = fields.breakfast.checked
+          var amount = plan.rate * nights + (breakfast ? Harbor.BREAKFAST_RATE * guests * nights : 0)
+          return {
+            checkin: fields.checkin.value,
+            nights: nights,
+            guests: guests,
+            guestsLabel: fields.guests.options[fields.guests.selectedIndex].text,
+            planId: planId,
+            plan: plan.label,
+            breakfast: breakfast,
+            name: fields.name.value.trim(),
+            notes: fields.notes.value.trim(),
+            total: Harbor.money(amount),
+          }
+        }
+
+        function render() {
+          var data = read()
+          total.textContent = data.total
+          detail.textContent = data.nights + (data.nights === 1 ? ' night, ' : ' nights, ') + data.plan + (data.breakfast ? ', with breakfast' : '')
+        }
+
+        var preset = /plan=(\w+)/.exec(location.hash)
+        if (preset && Harbor.PLANS[preset[1]]) fields.plan.value = preset[1]
+
+        form.addEventListener('input', render)
+        form.addEventListener('change', render)
+        form.addEventListener('submit', function (event) {
+          event.preventDefault()
+          var data = read()
+          error.textContent = ''
+          if (!data.checkin) {
+            error.textContent = 'Choose a check-in date.'
+            return
+          }
+          if (!data.name) {
+            error.textContent = 'Enter the name of the main guest.'
+            return
+          }
+          data.id = 'HB-' + String(Math.floor(Math.random() * 90000) + 10000)
+          sessionStorage.setItem('harbor.reservation', JSON.stringify(data))
+          Harbor.go('confirm.html')
+        })
+        render()
+        Harbor.ready()
+      })()
+    </script>
+  </body>
+</html>

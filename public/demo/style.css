@@ -1,0 +1,97 @@
+:root {
+  --ink: #16263a;
+  --muted: #5b6b7d;
+  --line: #d9e0e7;
+  --paper: #f7f5f0;
+  --card: #ffffff;
+  --brand: #12355b;
+  --accent: #c8553d;
+  --accent-ink: #ffffff;
+  --gold: #f4d58d;
+  --radius: 10px;
+}
+* { box-sizing: border-box; }
+html { font-family: 'Avenir Next', 'Segoe UI', system-ui, sans-serif; color: var(--ink); background: var(--paper); }
+body { margin: 0; min-height: 100vh; display: flex; flex-direction: column; line-height: 1.5; }
+a { color: var(--brand); }
+h1, h2, h3 { font-family: Georgia, 'Times New Roman', serif; line-height: 1.2; margin: 0 0 12px; }
+h1 { font-size: 34px; }
+h2 { font-size: 24px; }
+h3 { font-size: 18px; }
+p { margin: 0 0 12px; }
+
+.site-header { background: var(--card); border-bottom: 1px solid var(--line); }
+.site-header .inner, .site-footer .inner, main { width: 100%; max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+.site-header .inner { display: flex; align-items: center; gap: 24px; height: 68px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-family: Georgia, serif; font-size: 20px; font-weight: 700; color: var(--brand); }
+.brand img { width: 36px; height: 36px; }
+.site-nav { margin-left: auto; display: flex; gap: 6px; }
+.nav-link, .menu-item { padding: 8px 12px; border-radius: 8px; text-decoration: none; color: var(--ink); font-weight: 600; font-size: 15px; }
+.nav-link:hover, .menu-item:hover { background: var(--paper); }
+main { flex: 1; padding-top: 36px; padding-bottom: 56px; }
+
+.hero { display: grid; grid-template-columns: 1.2fr 1fr; gap: 32px; align-items: center; background: var(--brand); color: #fff; border-radius: 16px; padding: 44px; margin-bottom: 40px; }
+.hero h1 { color: #fff; font-size: 40px; }
+.hero p { color: #d5e0ec; font-size: 17px; }
+.hero .facts { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+.hero .facts li { background: rgba(255, 255, 255, 0.1); border-radius: 8px; padding: 10px 14px; }
+
+.btn { display: inline-block; border: 0; border-radius: 8px; padding: 11px 20px; font: inherit; font-weight: 700; cursor: pointer; text-decoration: none; }
+.btn-primary, .btn-solid { background: var(--accent); color: var(--accent-ink); }
+.btn-primary:hover, .btn-solid:hover { filter: brightness(1.08); }
+.btn-quiet { background: transparent; color: var(--brand); border: 1px solid var(--line); }
+.btn-block { width: 100%; }
+
+.rooms { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+.room-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.room-card img { display: block; width: 100%; height: auto; }
+.room-card .body { padding: 16px; }
+.price { font-weight: 700; color: var(--accent); }
+.section-title { display: flex; justify-content: space-between; align-items: baseline; margin: 0 0 16px; }
+
+.card, .auth-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 28px; }
+.auth-card { max-width: 420px; margin: 24px auto 0; }
+.auth-panel { border-left: 4px solid var(--gold); padding-left: 16px; }
+.field { margin-bottom: 16px; }
+.field > label, fieldset legend { display: block; font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+input[type='text'], input[type='email'], input[type='password'], input[type='date'], input[type='number'], select, textarea {
+  width: 100%; padding: 10px 12px; border: 1px solid #b9c4cf; border-radius: 8px; font: inherit; background: #fff; color: var(--ink);
+}
+textarea { min-height: 84px; resize: vertical; }
+.choice { display: flex; align-items: center; gap: 8px; font-size: 15px; margin-bottom: 8px; }
+fieldset { border: 0; padding: 0; margin: 0 0 16px; }
+.hint { color: var(--muted); font-size: 13px; }
+.form-error, .notice-danger { background: #fdecea; color: #a12a1b; border: 1px solid #f3b8b0; border-radius: 8px; padding: 10px 12px; margin-bottom: 16px; font-size: 14px; }
+.form-error:empty, .notice:empty { display: none; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.layout-split { display: grid; grid-template-columns: 1.5fr 1fr; gap: 24px; align-items: start; }
+.total-box { background: var(--brand); color: #fff; border-radius: var(--radius); padding: 22px; }
+.total-box .amount { font-family: Georgia, serif; font-size: 34px; font-weight: 700; color: var(--gold); }
+.total-box .hint { color: #c3d2e2; }
+
+table.stays { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+table.stays th, table.stays td { text-align: left; padding: 12px 16px; border-bottom: 1px solid var(--line); font-size: 15px; }
+table.stays th { background: #eef2f6; font-size: 13px; text-transform: none; color: var(--muted); }
+.summary { display: grid; grid-template-columns: 180px 1fr; gap: 10px 16px; margin: 0 0 20px; }
+.summary dt { color: var(--muted); font-size: 14px; }
+.summary dd { margin: 0; font-weight: 600; }
+.ref { font-family: 'SF Mono', Menlo, monospace; font-size: 20px; letter-spacing: 1px; color: var(--accent); }
+.actions { display: flex; gap: 12px; align-items: center; margin-top: 20px; }
+
+.site-footer { background: #101c2b; color: #a9b7c6; font-size: 14px; }
+.site-footer .inner { display: flex; gap: 24px; align-items: center; padding-top: 22px; padding-bottom: 22px; flex-wrap: wrap; }
+.site-footer a { color: #d5e0ec; text-decoration: none; }
+.site-footer .spacer { flex: 1; }
+
+/* Redesign (?ui=v2) */
+.theme-v2 { --paper: #f1f4f7; --accent: #0f7b6c; --brand: #1d2b3a; --gold: #9fe0d2; --radius: 4px; }
+.theme-v2 .site-header { background: var(--brand); border-bottom: 0; }
+.theme-v2 .brand, .theme-v2 .menu-item, .theme-v2 .nav-link { color: #fff; }
+.theme-v2 .menu-item:hover { background: rgba(255, 255, 255, 0.12); }
+.theme-v2 .btn { border-radius: 999px; }
+.theme-v2 .auth-card { max-width: 480px; }
+.theme-v2 h1, .theme-v2 h2, .theme-v2 h3 { font-family: inherit; letter-spacing: -0.01em; }
+
+@media (max-width: 760px) {
+  .hero, .rooms, .layout-split, .grid-2 { grid-template-columns: 1fr; }
+}
