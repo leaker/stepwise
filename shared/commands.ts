@@ -27,6 +27,7 @@ export const COMMANDS: CommandDef[] = [
   { id: 'hover', label: 'Hover', category: 'UI operation', target: true, sentence: 'Hover over {target}', shot: true, healable: true },
   { id: 'check', label: 'Check', category: 'UI operation', target: true, sentence: 'Check {target}', shot: true, healable: true },
   { id: 'uncheck', label: 'Uncheck', category: 'UI operation', target: true, sentence: 'Uncheck {target}', shot: true, healable: true },
+  { id: 'swipe', label: 'Swipe', category: 'UI operation', target: false, value: 'Direction', sentence: 'Swipe {value}', shot: true },
 
   { id: 'input', label: 'Input', category: 'UI input', target: true, value: 'Text', sentence: 'Input {value} to {target}', shot: true, healable: true },
   { id: 'select', label: 'Select pull-down menu', category: 'UI input', target: true, value: 'Option', sentence: 'Select {value} in {target}', shot: true, healable: true },
@@ -81,13 +82,19 @@ export const DEFAULT_COMMAND: Record<ElementType, CommandId> = {
 /** Keys offered by the "Input keyboard key" command (Playwright key names). */
 export const KEYS = ['Enter', 'Tab', 'Escape', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space']
 
+/**
+ * Directions of the "Swipe" command, named after the finger: swiping up moves the page up and shows
+ * what is below, as on a phone.
+ */
+export const SWIPE_DIRECTIONS = ['up', 'down', 'left', 'right']
+
 /** Render a step as a plain sentence, e.g. `Input "alice" to "Email" input area`. */
 export function stepSentence(step: Step): string {
   const def = COMMAND_BY_ID[step.command]
   if (!def) return step.command
   return def.sentence
     .replace('{target}', step.target ? step.target.name : '(no element)')
-    .replace('{value}', def.id === 'comment' || def.id === 'wait_seconds' || def.id === 'wait_visible' || def.id === 'press_key' ? (step.value ?? '') : JSON.stringify(step.value ?? ''))
+    .replace('{value}', def.id === 'comment' || def.id === 'wait_seconds' || def.id === 'wait_visible' || def.id === 'press_key' || def.id === 'swipe' ? (step.value ?? '') : JSON.stringify(step.value ?? ''))
     .replace('{variable}', step.variable ?? '(no variable)')
     .trim()
 }

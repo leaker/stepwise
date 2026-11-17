@@ -20,7 +20,7 @@ h2 { font-size: 24px; }
 h3 { font-size: 18px; }
 p { margin: 0 0 12px; }
 
-.site-header { background: var(--card); border-bottom: 1px solid var(--line); }
+.site-header { position: relative; background: var(--card); border-bottom: 1px solid var(--line); }
 .site-header .inner, .site-footer .inner, main { width: 100%; max-width: 1040px; margin: 0 auto; padding: 0 24px; }
 .site-header .inner { display: flex; align-items: center; gap: 24px; height: 68px; }
 .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-family: Georgia, serif; font-size: 20px; font-weight: 700; color: var(--brand); }
@@ -28,6 +28,7 @@ p { margin: 0 0 12px; }
 .site-nav { margin-left: auto; display: flex; gap: 6px; }
 .nav-link, .menu-item { padding: 8px 12px; border-radius: 8px; text-decoration: none; color: var(--ink); font-weight: 600; font-size: 15px; }
 .nav-link:hover, .menu-item:hover { background: var(--paper); }
+.nav-toggle { display: none; margin-left: auto; padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--ink); font: inherit; font-weight: 600; font-size: 15px; cursor: pointer; }
 main { flex: 1; padding-top: 36px; padding-bottom: 56px; }
 
 .hero { display: grid; grid-template-columns: 1.2fr 1fr; gap: 32px; align-items: center; background: var(--brand); color: #fff; border-radius: 16px; padding: 44px; margin-bottom: 40px; }
@@ -88,10 +89,32 @@ table.stays th { background: #eef2f6; font-size: 13px; text-transform: none; col
 .theme-v2 .site-header { background: var(--brand); border-bottom: 0; }
 .theme-v2 .brand, .theme-v2 .menu-item, .theme-v2 .nav-link { color: #fff; }
 .theme-v2 .menu-item:hover { background: rgba(255, 255, 255, 0.12); }
+.theme-v2 .nav-toggle { color: #fff; border-color: rgba(255, 255, 255, 0.35); border-radius: 999px; }
 .theme-v2 .btn { border-radius: 999px; }
 .theme-v2 .auth-card { max-width: 480px; }
 .theme-v2 h1, .theme-v2 h2, .theme-v2 h3 { font-family: inherit; letter-spacing: -0.01em; }
 
 @media (max-width: 760px) {
   .hero, .rooms, .layout-split, .grid-2 { grid-template-columns: 1fr; }
+}
+
+/* Phones: the navigation moves into a drawer behind the "Menu" button. */
+@media (max-width: 639px) {
+  .site-header .inner, .site-footer .inner, main { padding-left: 16px; padding-right: 16px; }
+  .site-header .inner { height: 60px; gap: 12px; }
+  .nav-toggle { display: block; }
+  .site-nav { display: none; position: absolute; z-index: 20; top: 100%; left: 0; right: 0; margin: 0; padding: 8px 16px 14px; flex-direction: column; gap: 2px; background: var(--card); border-bottom: 1px solid var(--line); box-shadow: 0 12px 24px rgba(16, 28, 43, 0.14); }
+  .nav-open .site-nav { display: flex; }
+  .site-nav .nav-link, .site-nav .menu-item { padding: 12px; font-size: 16px; }
+  .theme-v2 .site-nav { background: var(--brand); border-bottom: 0; }
+  main { padding-top: 24px; padding-bottom: 40px; }
+  h1 { font-size: 28px; }
+  .hero { padding: 24px; gap: 20px; margin-bottom: 28px; }
+  .hero h1 { font-size: 30px; }
+  .card, .auth-card { padding: 20px; }
+  .section-title, .actions { flex-wrap: wrap; gap: 10px; }
+  .summary { grid-template-columns: 110px 1fr; }
+  table.stays { display: block; overflow-x: auto; white-space: nowrap; }
+  .site-footer .inner { gap: 12px 20px; }
+  .site-footer .spacer { flex-basis: 100%; height: 0; }
 }

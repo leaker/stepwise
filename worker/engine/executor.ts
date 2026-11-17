@@ -1,6 +1,6 @@
 // Step executor: runs a test case's steps against a Playwright page.
 import type { Locator as PwLocator, Page } from '@cloudflare/playwright'
-import { COMMAND_BY_ID, stepSentence, validateSteps } from '../../shared/commands'
+import { COMMAND_BY_ID, stepSentence, SWIPE_DIRECTIONS, validateSteps } from '../../shared/commands'
 import type { CommandDef } from '../../shared/commands'
 import { locatorToString } from '../../shared/types'
 import type { ElementRef, Fingerprint, HealProposal, Locator, Step, StepResult } from '../../shared/types'
@@ -11,6 +11,8 @@ import { isRendered, poll, sleep, waitForElement } from './locate'
 const IF_WAIT_MS = 2000
 const NAVIGATION_TIMEOUT_MS = 30_000
 const MAX_FIXED_WAIT_S = 300
+/** How far a swipe moves the page, as a share of the viewport. */
+const SWIPE_SHARE = 0.7
 
 class StepError extends Error {}
 
@@ -33,7 +35,7 @@ interface Frame {
 
 export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Promise<RunOutcome> {
   const waitMs = Math.max(0, opts.waitSeconds ?? 10) * 1000
-  const vars: Record<string, string> = { ...opts.variables, BASE_URL: opts.baseUrl, BROWSER: 'chrome' }
+  const vars: Record<string, string> = { ...opts.variables, BASE_URL: opts.baseUrl, BROWSER: 'chrome', DEVICE: opts.device ?? 'desktop' }
   const results: StepResult[] = []
   const lines: string[] = []
   const healed = new Map<string, Healed>()
@@ -89,7 +91,8 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
 
   const takeShot = async (fullPage = false): Promise<string | undefined> => {
     try {
-      const bytes = await page.screenshot({ type: 'jpeg', quality: 70, fullPage, animations: 'disabled', timeout: 15_000 })
+      // scale 'css': one image pixel per CSS pixel on every device, so boxes line up and phone shots stay small.
+      const bytes = await page.screenshot({ type: 'jpeg', quality: 70, fullPage, animations: 'disabled', scale: 'css', timeout: 15_000 })
       return await opts.saveShot(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength))
     } catch (e) {
       log(`    [warning] screenshot failed: ${firstLine(e)}`)
@@ -195,6 +198,11 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
   const actionTimeout = Math.max(waitMs, 1000)
 
   /* eslint-disable @typescript-eslint/no-explicit-any */
+  const scrollPosition = (): Promise<{ x: number; y: number }> =>
+    page.evaluate(() => ({ x: Math.round((globalThis as any).scrollX || 0), y: Math.round((globalThis as any).scrollY || 0) }))
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+
+  /* eslint-disable @typescript-eslint/no-explicit-any */
   /**
    * A native checkbox or radio button that is not rendered itself (`display: none`, or clipped to a
    * pixel, with a styled label drawn in its place) is operated through that label, as a user would.
@@ -262,10 +270,12 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
       case 'click': {
         const t = need(step)
         await act(t, 'clicked', async (el) => {
+          // On a touch device a click is a tap: the page gets touch events first, then the click.
           const label = await standIn(el)
-          if (label) return label.click({ timeout: actionTimeout })
+          if (label) return opts.touch ? label.tap({ timeout: actionTimeout }) : label.click({ timeout: actionTimeout })
           try {
-            await el.click({ timeout: actionTimeout })
+            if (opts.touch) await el.tap({ timeout: actionTimeout })
+            else await el.click({ timeout: actionTimeout })
           } catch (e) {
             // The element is there and enabled but the element-based click did not go through
             // (e.g. it never stops moving). Click its centre by coordinates, but only when that
@@ -278,7 +288,8 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
             const blocker = await blockerAt(el, x, y).catch(() => 'another element')
             if (blocker) throw new StepError(`UI element ${t.name} could not be clicked (${locatorToString(effectiveLocator(t))}): it is covered by ${blocker}`)
             log(`[${n}] [warning] element-based click failed, retrying by coordinates; the target position: (${x}, ${y})`)
-            await page.mouse.click(x, y)
+            if (opts.touch) await page.touchscreen.tap(x, y)
+            else await page.mouse.click(x, y)
           }
         })
         await settle()
@@ -330,6 +341,44 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
           throw new StepError(`Could not press ${quote(value)}: ${firstLine(e)}`)
         }
         await settle()
+        return
+      }
+      case 'swipe': {
+        const direction = value.trim().toLowerCase()
+        if (!direction) throw new StepError('No direction is set for this step')
+        if (!SWIPE_DIRECTIONS.includes(direction)) throw new StepError(`${quote(value)} is not a swipe direction; use up, down, left or right`)
+        const size = page.viewportSize() ?? { width: 1280, height: 800 }
+        // Directions are the finger's: swiping up drags the page up, which scrolls it down.
+        const dx = Math.round(size.width * SWIPE_SHARE) * (direction === 'left' ? 1 : direction === 'right' ? -1 : 0)
+        const dy = Math.round(size.height * SWIPE_SHARE) * (direction === 'up' ? 1 : direction === 'down' ? -1 : 0)
+        const before = await scrollPosition()
+        // A wheel gesture in the middle of the viewport goes through the browser's input pipeline, so
+        // scroll listeners and scroll-snap behave as they do for a real swipe.
+        try {
+          await page.mouse.move(Math.round(size.width / 2), Math.round(size.height / 2))
+          await page.mouse.wheel(dx, dy)
+        } catch (e) {
+          log(`[${n}] [warning] wheel gesture failed, scrolling the page instead: ${firstLine(e)}`)
+        }
+        let after = before
+        const moved = await poll(async () => {
+          after = await scrollPosition()
+          return after.x !== before.x || after.y !== before.y
+        }, 450)
+        if (!moved) {
+          /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
+          await page.evaluate((d: { x: number; y: number }) => (globalThis as any).scrollBy({ left: d.x, top: d.y, behavior: 'instant' }), { x: dx, y: dy })
+        }
+        // Let a smooth scroll come to rest before the screenshot and the next step.
+        for (let i = 0; i < 12; i++) {
+          await sleep(100)
+          const now = await scrollPosition()
+          const still = now.x === after.x && now.y === after.y
+          after = now
+          if (still) break
+        }
+        if (after.x === before.x && after.y === before.y) log(`[${n}] the page did not move: there is nothing further to show in that direction`)
+        else log(`[${n}] scrolled from (${before.x}, ${before.y}) to (${after.x}, ${after.y})`)
         return
       }
       case 'screenshot':

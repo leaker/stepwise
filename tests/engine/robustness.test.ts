@@ -190,10 +190,14 @@ describe('"exists" means the user can see it', () => {
 
 describe('click', () => {
   it('does not click through to an overlay and names what is in the way', async () => {
-    await page.setContent(
-      html(`<button id="buy" onclick="document.title='BOUGHT'">Buy</button><div id="modal" class="backdrop" style="position:fixed;inset:0;background:rgba(0,0,0,.4)" onclick="document.title='OVERLAY'"></div>`),
-    )
+    await page.setContent(html(`<button id="buy" onclick="document.title='BOUGHT'">Buy</button>`))
     const target = ref(await capture(page, 'ui'), '"Buy" button')
+    // The overlay appears after the capture, as a dialog that a test did not expect would.
+    await page.evaluate(() => {
+      document.body.insertAdjacentHTML('beforeend', `<div id="modal" class="backdrop" style="position:fixed;inset:0;background:rgba(0,0,0,.4)" onclick="document.title='OVERLAY'"></div>`)
+    })
+    // A capture taken now no longer offers the covered button.
+    expect((await capture(page, 'covered')).elements.map((e) => e.name)).not.toContain('"Buy" button')
     const r = await run(page, [step('click', { target })], baseUrl)
     expect(r.status).toBe('failed')
     expect(r.results[0].error).toBe('UI element "Buy" button could not be clicked (id=buy): it is covered by <div id="modal" class="backdrop">')

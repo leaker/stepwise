@@ -10,6 +10,12 @@ export interface ScanArgs {
   max: number
   /** Locators to resolve in the same pass; a uniquely matched element is always included in the result. */
   probes: Locator[]
+  /**
+   * Leave out elements that lie under an overlay (an open menu drawer, a dialog and its backdrop, a
+   * sticky bar). Captures use this: such an element cannot be pointed at on the screenshot and a click
+   * on it would hit the overlay. Only elements inside the viewport can be judged; the rest are kept.
+   */
+  skipCovered?: boolean
 }
 
 export interface ScanResult {
@@ -449,7 +455,7 @@ export function scanPage(args: ScanArgs): ScanResult {
   }
 
   // ---- walk ----
-  const picked: { el: any; type: string; shown: any }[] = []
+  let picked: { el: any; type: string; shown: any }[] = []
   const blockAll = new WeakSet<object>()
   const blockText = new WeakSet<object>()
   const consider = (el: any): void => {
@@ -493,6 +499,36 @@ export function scanPage(args: ScanArgs): ScanResult {
     }
   }
   if (doc.body) walk(doc.body)
+
+  /** Is the middle of `shown` covered by a positioned layer that the element is not part of? */
+  const isCovered = (shown: any): boolean => {
+    const r = shown.getBoundingClientRect()
+    const x = r.left + r.width / 2
+    const y = r.top + r.height / 2
+    if (x < 0 || y < 0 || x >= win.innerWidth || y >= win.innerHeight) return false
+    let hit = doc.elementFromPoint(x, y)
+    while (hit && hit.shadowRoot) {
+      const inner = hit.shadowRoot.elementFromPoint(x, y)
+      if (!inner || inner === hit) break
+      hit = inner
+    }
+    if (!hit) return false
+    const chain = new Set<any>()
+    for (let n = shown; n; n = parentOf(n)) chain.add(n)
+    // The hit is the element, inside it, or a container of it: nothing is in the way.
+    for (let n = hit; n; n = parentOf(n)) if (n === shown) return false
+    if (chain.has(hit)) return false
+    const label = typeof hit.closest === 'function' ? hit.closest('label') : null
+    if (label && label.control && chain.has(label.control)) return false
+    // Something else is there. It only counts as a cover when it is a layer of its own (positioned
+    // outside the normal flow), not a neighbour that an oddly shaped box happens to overlap.
+    for (let n = hit; n && !chain.has(n); n = parentOf(n)) {
+      const position = win.getComputedStyle(n).position
+      if (position === 'absolute' || position === 'fixed' || position === 'sticky') return true
+    }
+    return false
+  }
+  if (args.skipCovered) picked = picked.filter((p) => !isCovered(p.shown))
 
   let kept = picked
   if (picked.length > args.max) {
@@ -566,8 +602,9 @@ export const CAPTURE_MAX_ELEMENTS = 300
 
 export async function captureUi(page: Page): Promise<Capture> {
   await page.waitForLoadState('load', { timeout: 15_000 }).catch(() => {})
-  const result = await scan(page, { max: CAPTURE_MAX_ELEMENTS, probes: [] })
-  const shot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 70, animations: 'disabled' })
+  const result = await scan(page, { max: CAPTURE_MAX_ELEMENTS, probes: [], skipCovered: true })
+  // scale 'css': an emulated phone has a device pixel ratio of 2-3, and the element boxes are in CSS pixels.
+  const shot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 70, animations: 'disabled', scale: 'css' })
   return {
     url: result.url,
     title: result.title,

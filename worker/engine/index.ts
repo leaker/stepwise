@@ -1,22 +1,26 @@
 // Public surface of the test engine. Implementation lives in the sibling files.
 // The engine only depends on the Playwright `Page` API, so it runs unchanged on
 // Cloudflare Browser Run (@cloudflare/playwright) and on Node Playwright (tests).
-import type { StepResult, UiElement } from '../../shared/types'
+import type { DeviceId, StepResult, UiElement } from '../../shared/types'
 
 export interface Capture {
   url: string
   title: string
   width: number
   height: number
-  /** Full-page JPEG. */
+  /** Full-page JPEG, one image pixel per CSS pixel whatever the device pixel ratio. */
   screenshot: Uint8Array
   elements: UiElement[]
 }
 
 export interface RunOptions {
   baseUrl: string
-  /** Project variables; steps may add more. BASE_URL and BROWSER are provided automatically. */
+  /** Project variables; steps may add more. BASE_URL, BROWSER and DEVICE are provided automatically. */
   variables: Record<string, string>
+  /** Value of the built-in DEVICE variable: the device profile the page's context emulates. Default 'desktop'. */
+  device?: DeviceId
+  /** The context has touch input (an emulated phone): clicks are sent as taps. */
+  touch?: boolean
   /** Try to self-heal missing elements (batch runs). */
   heal: boolean
   /** Inclusive 1-based range for partial runs. */
