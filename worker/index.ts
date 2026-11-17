@@ -1,21 +1,36 @@
 // Stepwise Worker: JSON API under /api, the bundled demo site under /demo, and the run queue consumer.
 import { Hono } from 'hono'
+import { bodyLimit } from 'hono/body-limit'
 import { projects } from './api/projects'
 import { runs } from './api/runs'
 import { testCases } from './api/testCases'
 import { accessGate, getSession, postSession } from './auth'
-import { errorMessage, HttpError, type Env, type QueueMessage } from './env'
+import { HttpError, type Env, type QueueMessage } from './env'
 import { handleQueue } from './runner'
+import { MAX_BODY_BYTES } from './validate'
 
 const app = new Hono<{ Bindings: Env }>()
 
 app.onError((err, c) => {
   if (err instanceof HttpError) return c.json({ error: err.message }, err.status)
+  // Details (database errors, parse errors of stored data, ...) stay in the Worker log.
   console.error(err)
-  return c.json({ error: errorMessage(err) || 'Internal error' }, 500)
+  return c.json({ error: 'Internal error' }, 500)
 })
 
 app.use('/api/*', accessGate)
+app.use(
+  '/api/*',
+  bodyLimit({
+    maxSize: MAX_BODY_BYTES,
+    onError: async (c) => {
+      // Read the upload to its end without keeping it: answering while the client is still sending
+      // resets the connection on some proxies (the local dev server among them) instead of delivering the 413.
+      await c.req.raw.body?.pipeTo(new WritableStream()).catch(() => {})
+      return c.json({ error: `Request body is too large (${MAX_BODY_BYTES / 1024 / 1024} MB at most)` }, 413)
+    },
+  }),
+)
 app.get('/api/session', getSession)
 app.post('/api/session', postSession)
 
@@ -25,7 +40,12 @@ app.route('/api', runs)
 
 // Screenshot keys contain slashes (ui/<id>.jpg, run/<runId>/<n>.jpg), hence the wildcard.
 app.get('/api/shots/*', async (c) => {
-  const key = decodeURIComponent(c.req.path.slice('/api/shots/'.length))
+  let key = ''
+  try {
+    key = decodeURIComponent(c.req.path.slice('/api/shots/'.length))
+  } catch {
+    /* malformed percent-encoding: not a key we ever issued */
+  }
   if (!/^(ui|run)\/[A-Za-z0-9/_.-]+$/.test(key) || key.includes('..')) return c.json({ error: 'Screenshot not found' }, 404)
   const object = await c.env.SHOTS.get(key)
   if (!object) return c.json({ error: 'Screenshot not found' }, 404)

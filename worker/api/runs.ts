@@ -10,6 +10,7 @@ import {
   newId,
   now,
   refreshBatchRun,
+  resolveBaseUrl,
   RUN_SUMMARY_COLUMNS,
   sweepStaleRuns,
   toBatchRun,
@@ -39,6 +40,8 @@ function parseRange(value: unknown, stepCount: number): { from: number; to: numb
   return { from, to }
 }
 
+const hasEnabledSteps = (steps: Step[]): boolean => steps.some((s) => !s.disabled)
+
 // ---- single runs ----
 
 runs.post('/test-cases/:tid/runs', async (c) => {
@@ -46,7 +49,7 @@ runs.post('/test-cases/:tid/runs', async (c) => {
   const project = await getProjectRow(c.env.DB, testCase.project_id)
   const body = await readBody(c.req)
   const steps = JSON.parse(testCase.steps) as Step[]
-  if (steps.length === 0) throw new HttpError(400, 'This test case has no steps to run')
+  if (!hasEnabledSteps(steps)) throw new HttpError(400, 'This test case has no steps to run')
   const range = parseRange(body.range, steps.length)
   if (!range) {
     const problems = validateSteps(steps)
@@ -56,12 +59,14 @@ runs.post('/test-cases/:tid/runs', async (c) => {
     }
   }
   const origin = new URL(c.req.url).origin
-  const inRange = range ? steps.slice(range.from - 1, range.to) : steps
-  assertNavigateTargetsAllowed(inRange, project.base_url, JSON.parse(project.variables) as Record<string, string>, c.env, origin)
+  const baseUrl = resolveBaseUrl(project.base_url, origin)
+  // The steps before a partial run's range are replayed as set-up, so they are checked too.
+  const executed = range ? steps.slice(0, range.to) : steps
+  assertNavigateTargetsAllowed(executed, baseUrl, JSON.parse(project.variables) as Record<string, string>, c.env, origin)
 
   const id = newId()
   await c.env.DB.prepare(INSERT_RUN)
-    .bind(id, project.id, testCase.id, testCase.number, testCase.name, null, 0, 'queued', testCase.steps, environmentOf(project.base_url), range ? JSON.stringify(range) : null, now())
+    .bind(id, project.id, testCase.id, testCase.number, testCase.name, null, 0, 'queued', testCase.steps, environmentOf(baseUrl), range ? JSON.stringify(range) : null, now())
     .run()
   try {
     await c.env.RUN_QUEUE.send({ runId: id, origin })
@@ -114,39 +119,62 @@ runs.post('/runs/:rid/heals/:stepId', async (c) => {
   const result = results.find((r) => r.stepId === stepId && r.heal)
   const heal = result?.heal
   if (!heal) throw new HttpError(404, 'This step has no repair proposal')
+  // A decision is final: deciding twice would leave the test case and the report telling different stories.
+  if (heal.state !== 'unresolved') throw new HttpError(409, `This repair was already ${heal.state}`)
   const target = (JSON.parse(run.steps ?? '[]') as Step[]).find((s) => s.id === stepId)?.target
 
   heal.state = action === 'approve' ? 'approved' : 'rejected'
 
+  // Only a run that was waiting for review changes its verdict. One that failed (a failed step, a crash,
+  // the time limit) or was aborted keeps it: approving a repair does not make an unfinished test pass.
+  let status = run.status as RunStatus
+  if (status === 'unresolved') {
+    if (results.some((r) => r.status === 'failed' || r.heal?.state === 'rejected')) status = 'failed'
+    else if (!results.some((r) => r.heal?.state === 'unresolved')) status = 'succeeded'
+  }
+
+  // Everything below is one transaction, and every statement only applies while the run's results are
+  // still the ones this decision was based on, so two reviewers cannot overwrite each other's decision.
+  const unchanged = 'EXISTS (SELECT 1 FROM runs WHERE id = ? AND results = ?)'
+  const statements: D1PreparedStatement[] = []
   if (action === 'approve' && target) {
     // Apply the repair to the live test case: every step that uses this element gets the new locator.
+    // Boxes stay as captured: they are positions on the stored screenshot, which is not retaken.
     const testCase = await c.env.DB.prepare('SELECT * FROM test_cases WHERE id = ?').bind(run.test_case_id).first<TestCaseRow>()
     if (testCase) {
       let changed = false
       const steps = (JSON.parse(testCase.steps) as Step[]).map((s) => {
         if (s.target?.uiId !== target.uiId || s.target.elementId !== target.elementId) return s
         changed = true
-        return { ...s, target: { ...s.target, locator: heal.newLocator, candidates: heal.newCandidates, fingerprint: heal.newFingerprint } }
+        return { ...s, target: { ...s.target, locator: heal.newLocator, candidates: heal.newCandidates, fingerprint: { ...heal.newFingerprint, box: s.target.fingerprint.box } } }
       })
-      if (changed) await c.env.DB.prepare('UPDATE test_cases SET steps = ?, updated_at = ? WHERE id = ?').bind(JSON.stringify(steps), now(), testCase.id).run()
+      if (changed) {
+        statements.push(
+          c.env.DB.prepare(`UPDATE test_cases SET steps = ?, updated_at = ? WHERE id = ? AND ${unchanged}`).bind(JSON.stringify(steps), now(), testCase.id, id, run.results),
+        )
+      }
     }
     const ui = await c.env.DB.prepare('SELECT elements FROM uis WHERE id = ?').bind(target.uiId).first<{ elements: string }>()
     if (ui) {
       const elements = (JSON.parse(ui.elements) as UiElement[]).map((el) =>
-        el.id === target.elementId ? { ...el, locators: heal.newCandidates.length ? heal.newCandidates : [heal.newLocator], fingerprint: heal.newFingerprint, box: heal.newFingerprint.box } : el,
+        el.id === target.elementId ? { ...el, locators: heal.newCandidates.length ? heal.newCandidates : [heal.newLocator], fingerprint: { ...heal.newFingerprint, box: el.box } } : el,
       )
-      await c.env.DB.prepare('UPDATE uis SET elements = ? WHERE id = ?').bind(JSON.stringify(elements), target.uiId).run()
+      statements.push(c.env.DB.prepare(`UPDATE uis SET elements = ? WHERE id = ? AND ${unchanged}`).bind(JSON.stringify(elements), target.uiId, id, run.results))
     }
   }
-
-  let status = run.status as RunStatus
-  if (status !== 'aborted') {
-    if (results.some((r) => r.status === 'failed' || r.heal?.state === 'rejected')) status = 'failed'
-    else if (results.some((r) => r.heal?.state === 'unresolved')) status = 'unresolved'
-    else status = 'succeeded'
-  }
   const line = `Repair of step ${result.number} (${heal.elementName}) ${heal.state} by reviewer.`
-  await c.env.DB.prepare("UPDATE runs SET results = ?, status = ?, log = log || CASE WHEN log = '' THEN '' ELSE char(10) END || ? WHERE id = ?").bind(JSON.stringify(results), status, line, id).run()
+  statements.push(
+    c.env.DB.prepare("UPDATE runs SET results = ?, status = ?, log = log || CASE WHEN log = '' THEN '' ELSE char(10) END || ? WHERE id = ? AND results = ? AND status = ?").bind(
+      JSON.stringify(results),
+      status,
+      line,
+      id,
+      run.results,
+      run.status,
+    ),
+  )
+  const outcome = await c.env.DB.batch(statements)
+  if (outcome[outcome.length - 1].meta.changes === 0) throw new HttpError(409, 'This run was changed by someone else in the meantime. Reload and try again.')
   if (run.batch_run_id) await refreshBatchRun(c.env.DB, run.batch_run_id)
   return c.json(toRun(await getRunRow(c.env.DB, id)))
 })
@@ -196,11 +224,19 @@ runs.post('/projects/:pid/batch-runs', async (c) => {
   }
   if (selected.length === 0) throw new HttpError(400, 'Select at least one test case to run')
 
+  // A test case without steps would be reported as succeeded without having tested anything. Asked for by
+  // id it is an error; in "run everything" it is left out.
+  const empty = selected.filter((t) => !hasEnabledSteps(JSON.parse(t.steps) as Step[]))
+  if (empty.length && body.testCaseIds) throw new HttpError(400, `#${empty[0].number} ${empty[0].name} has no steps to run`)
+  selected = selected.filter((t) => !empty.includes(t))
+  if (selected.length === 0) throw new HttpError(400, 'No test case in this project has steps to run')
+
   const origin = new URL(c.req.url).origin
+  const baseUrl = resolveBaseUrl(project.base_url, origin)
   const variables = JSON.parse(project.variables) as Record<string, string>
   for (const t of selected) {
     try {
-      assertNavigateTargetsAllowed(JSON.parse(t.steps) as Step[], project.base_url, variables, c.env, origin)
+      assertNavigateTargetsAllowed(JSON.parse(t.steps) as Step[], baseUrl, variables, c.env, origin)
     } catch (e) {
       if (e instanceof HttpError) throw new HttpError(400, `#${t.number} ${t.name} - ${e.message}`)
       throw e
@@ -209,7 +245,7 @@ runs.post('/projects/:pid/batch-runs', async (c) => {
 
   const id = newId()
   const ts = now()
-  const environment = environmentOf(project.base_url)
+  const environment = environmentOf(baseUrl)
   await c.env.DB.batch([
     c.env.DB.prepare('INSERT INTO batch_runs (id, project_id, number, status, trigger, created_at) SELECT ?, id, next_batch_number, ?, ?, ? FROM projects WHERE id = ?').bind(id, 'queued', trigger, ts, project.id),
     c.env.DB.prepare('UPDATE projects SET next_batch_number = next_batch_number + 1 WHERE id = ?').bind(project.id),

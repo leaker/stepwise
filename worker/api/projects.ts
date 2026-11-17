@@ -1,6 +1,5 @@
 import { Hono } from 'hono'
-import type { Step } from '../../shared/types'
-import { deleteShots, getProjectRow, newId, now, toProject, type ProjectRow } from '../db'
+import { deleteShots, getProjectRow, newId, now, storedBaseUrl, toProject, type ProjectRow } from '../db'
 import type { Env } from '../env'
 import { optionalBaseUrl, optionalText, optionalVariables, readBody, requireName } from '../validate'
 
@@ -11,38 +10,22 @@ const LIST_SQL = `SELECT p.*,
   (SELECT COUNT(*) FROM batch_runs b WHERE b.project_id = p.id) AS batch_run_count
   FROM projects p`
 
-/** First visit: create a demo project that points at the bundled sample site. Fixed ids keep this idempotent under concurrent requests. */
-async function seedDemo(db: D1Database, origin: string): Promise<void> {
-  const ts = now()
-  const steps: Step[] = [{ id: newId(), command: 'navigate', value: '${BASE_URL}/login.html' }]
-  await db.batch([
-    db
-      .prepare('INSERT OR IGNORE INTO projects (id, name, description, base_url, variables, next_case_number, created_at) VALUES (?, ?, ?, ?, ?, 2, ?)')
-      .bind('demo', 'Harbor Inn demo', 'Sample project that tests the bundled Harbor Inn demo site.', `${origin}/demo`, '{}', ts),
-    db
-      .prepare('INSERT OR IGNORE INTO test_cases (id, project_id, number, name, description, steps, created_at, updated_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?)')
-      .bind('demo-sign-in', 'demo', 'Sign in with valid credentials', 'Capture the login screen in the editor, then pick elements to add steps.', JSON.stringify(steps), ts, ts),
-  ])
-}
+const originOf = (c: { req: { url: string } }): string => new URL(c.req.url).origin
 
+// The demo project is created by migrations/0002_demo_project.sql, once; it is not re-created here.
 projects.get('/projects', async (c) => {
-  const list = () => c.env.DB.prepare(`${LIST_SQL} ORDER BY p.created_at, p.rowid`).all<ProjectRow>()
-  let { results } = await list()
-  if (results.length === 0) {
-    await seedDemo(c.env.DB, new URL(c.req.url).origin)
-    ;({ results } = await list())
-  }
-  return c.json(results.map(toProject))
+  const { results } = await c.env.DB.prepare(`${LIST_SQL} ORDER BY p.created_at, p.rowid`).all<ProjectRow>()
+  return c.json(results.map((r) => toProject(r, originOf(c))))
 })
 
 projects.post('/projects', async (c) => {
   const body = await readBody(c.req)
   const name = requireName(body.name, 'Project')
   const description = optionalText(body.description, 'description', 2000) ?? ''
-  const baseUrl = optionalBaseUrl(body.baseUrl) ?? ''
+  const baseUrl = storedBaseUrl(optionalBaseUrl(body.baseUrl) ?? '', originOf(c))
   const id = newId()
   await c.env.DB.prepare('INSERT INTO projects (id, name, description, base_url, created_at) VALUES (?, ?, ?, ?, ?)').bind(id, name, description, baseUrl, now()).run()
-  return c.json(toProject({ ...(await getProjectRow(c.env.DB, id)), test_case_count: 0, batch_run_count: 0 }), 201)
+  return c.json(toProject({ ...(await getProjectRow(c.env.DB, id)), test_case_count: 0, batch_run_count: 0 }, originOf(c)), 201)
 })
 
 async function getWithCounts(db: D1Database, id: string): Promise<ProjectRow> {
@@ -50,7 +33,7 @@ async function getWithCounts(db: D1Database, id: string): Promise<ProjectRow> {
   return row ?? (await getProjectRow(db, id)) // getProjectRow throws the 404
 }
 
-projects.get('/projects/:pid', async (c) => c.json(toProject(await getWithCounts(c.env.DB, c.req.param('pid')))))
+projects.get('/projects/:pid', async (c) => c.json(toProject(await getWithCounts(c.env.DB, c.req.param('pid')), originOf(c))))
 
 projects.patch('/projects/:pid', async (c) => {
   const id = c.req.param('pid')
@@ -58,12 +41,13 @@ projects.patch('/projects/:pid', async (c) => {
   const body = await readBody(c.req)
   const name = body.name === undefined ? current.name : requireName(body.name, 'Project')
   const description = optionalText(body.description, 'description', 2000) ?? current.description
-  const baseUrl = optionalBaseUrl(body.baseUrl) ?? current.base_url
+  const given = optionalBaseUrl(body.baseUrl)
+  const baseUrl = given === undefined ? current.base_url : storedBaseUrl(given, originOf(c))
   const variables = optionalVariables(body.variables)
   await c.env.DB.prepare('UPDATE projects SET name = ?, description = ?, base_url = ?, variables = ? WHERE id = ?')
     .bind(name, description, baseUrl, variables ? JSON.stringify(variables) : current.variables, id)
     .run()
-  return c.json(toProject(await getWithCounts(c.env.DB, id)))
+  return c.json(toProject(await getWithCounts(c.env.DB, id), originOf(c)))
 })
 
 projects.delete('/projects/:pid', async (c) => {

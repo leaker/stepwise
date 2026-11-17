@@ -85,12 +85,19 @@ export interface BatchRunRow {
 
 // ---- mappers ----
 
-export function toProject(r: ProjectRow): Project {
+/**
+ * A base URL on the deployment's own origin is stored as a path ("/demo") and resolved against the
+ * current origin when it is read, so such a project follows the app to another port or domain.
+ */
+export const storedBaseUrl = (baseUrl: string, origin: string): string => (baseUrl === origin ? '/' : baseUrl.startsWith(`${origin}/`) ? baseUrl.slice(origin.length) : baseUrl)
+export const resolveBaseUrl = (stored: string, origin: string): string => (stored.startsWith('/') ? (origin + stored).replace(/\/+$/, '') : stored)
+
+export function toProject(r: ProjectRow, origin: string): Project {
   const p: Project = {
     id: r.id,
     name: r.name,
     description: r.description,
-    baseUrl: r.base_url,
+    baseUrl: resolveBaseUrl(r.base_url, origin),
     variables: parseJson<Record<string, string>>(r.variables, {}),
     createdAt: r.created_at,
   }
@@ -236,8 +243,9 @@ const STALE_MS = 15 * 60 * 1000
 
 /**
  * Runs must never stay queued/running forever (a consumer can die without a trace). Called by the read
- * routes: anything unfinished with no sign of life for 15 minutes becomes failed. A run that is still
- * waiting its turn inside a batch that is making progress is left alone.
+ * routes. A run gets 15 minutes from the moment it starts (a queue consumer invocation does not live
+ * longer than that either); a queued run gets 15 minutes to be picked up. After that it becomes failed.
+ * A run that is still waiting its turn inside a batch that is making progress is left alone.
  */
 export async function sweepStaleRuns(db: D1Database): Promise<void> {
   const ts = now()
@@ -245,7 +253,7 @@ export async function sweepStaleRuns(db: D1Database): Promise<void> {
   const { results } = await db
     .prepare(
       `UPDATE runs SET status = 'failed', finished_at = ?1,
-         log = log || CASE WHEN log = '' THEN '' ELSE char(10) END || 'Run timed out: no progress for 15 minutes; marked as failed.'
+         log = log || CASE WHEN log = '' THEN '' ELSE char(10) END || CASE WHEN status = 'running' THEN 'Run timed out: it did not finish within the 15 minute limit; marked as failed.' ELSE 'Run timed out: it was not started within 15 minutes; marked as failed.' END
        WHERE status IN ('queued', 'running') AND COALESCE(started_at, created_at) < ?2
          AND (batch_run_id IS NULL OR status = 'running' OR NOT EXISTS (
            SELECT 1 FROM runs r2 WHERE r2.batch_run_id = runs.batch_run_id AND r2.id <> runs.id

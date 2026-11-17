@@ -128,7 +128,10 @@ export interface Project {
   id: string
   name: string
   description: string
-  /** Value of the built-in ${BASE_URL} variable; relative navigate URLs resolve against it. */
+  /**
+   * Value of the built-in ${BASE_URL} variable; relative navigate URLs resolve against it. A base URL on the
+   * app's own origin (the demo project's) follows the app: it is stored as a path and resolved on every read.
+   */
   baseUrl: string
   /** Project-wide variables available to every test case. */
   variables: Record<string, string>
@@ -178,7 +181,7 @@ export interface StepResult {
   /** The step rendered as a sentence, e.g. `Click "Sign in" button`. */
   sentence: string
   durationMs: number
-  /** Screenshot taken after the step. Absent for steps that do not touch the page. */
+  /** Screenshot taken after the step. Absent for steps that do not touch the page, unless they failed or were repaired. */
   screenshotKey?: string
   error?: string
   heal?: HealProposal
@@ -201,7 +204,7 @@ export interface Run {
   /** Console-style log, newline separated. */
   log: string
   environment: { browser: string; viewport: { width: number; height: number }; baseUrl: string }
-  /** Inclusive 1-based step range for partial runs. */
+  /** Inclusive 1-based step range for partial runs. The steps before it are replayed as set-up and not reported unless one fails. */
   range: { from: number; to: number } | null
   createdAt: string
   startedAt: string | null
@@ -224,7 +227,8 @@ export interface BatchRun {
 }
 
 // ---- HTTP API (all JSON, all under /api) ----
-// Errors: non-2xx with { error: string }.
+// Errors: non-2xx with { error: string }. A body that is not a JSON object is a 400, one over 1 MB a 413.
+// A request without a body is the same as {}.
 //
 // GET    /api/session                          -> { required: boolean, ok: boolean }
 // POST   /api/session { code }                 -> { ok: true } (sets cookie) | 401
@@ -251,7 +255,7 @@ export interface BatchRun {
 // GET    /api/test-cases/:tid/runs             -> Omit<Run,'steps'|'log'>[] (newest first, single runs only)
 // GET    /api/runs/:rid                        -> Run
 // POST   /api/runs/:rid/abort                  -> Run
-// POST   /api/runs/:rid/heals/:stepId { action: 'approve' | 'reject' } -> Run
+// POST   /api/runs/:rid/heals/:stepId { action: 'approve' | 'reject' } -> Run | 409 (run unfinished, or already decided)
 //
 // GET    /api/projects/:pid/batch-runs         -> BatchRun[] (newest first)
 // POST   /api/projects/:pid/batch-runs { testCaseIds?: string[], trigger?: 'manual' | 'api' } -> BatchRun

@@ -1,51 +1,30 @@
 // Everything that drives a real browser: UI capture and the queue consumer that executes runs.
 import { launch, type Browser, type BrowserContext } from '@cloudflare/playwright'
 import type { CaptureResponse, RunStatus, Step, StepResult, Ui } from '../shared/types'
-import { getProjectRow, newId, now, refreshBatchRun, toProject, toUi, type RunRow, type TestCaseRow, type UiRow } from './db'
+import { deleteShots, getProjectRow, newId, now, refreshBatchRun, toProject, toUi, type RunRow, type TestCaseRow, type UiRow } from './db'
 import { captureUi, runSteps, type RunOutcome } from './engine'
 import { errorMessage, HttpError, VIEWPORT, type Env, type QueueMessage } from './env'
-import { isHostAllowed, isPrivateHost, parseHttpUrl } from './validate'
+import { guardContext, type Guard } from './guard'
+
+/** Browser Run refused or failed to start a session (concurrency / rate limits, an outage). Not a test failure. */
+class BrowserLaunchError extends HttpError {
+  constructor(cause: unknown) {
+    super(503, `Could not start a browser: ${errorMessage(cause)}`)
+  }
+}
 
 async function openBrowser(env: Env): Promise<Browser> {
   try {
     return await launch(env.BROWSER)
   } catch (e) {
-    throw new HttpError(503, `Could not start a browser: ${errorMessage(e)}`)
+    throw new BrowserLaunchError(e)
   }
 }
 
-/**
- * Every browser context enforces the target policy (private hosts always blocked, plus ALLOWED_HOSTS when set):
- * - documents (top-level and iframes) must be on an allowed host;
- * - sub-resources may come from any public host, but never from a private one;
- * - redirects are not re-routed by Playwright, so every committed frame URL is re-checked and the page is
- *   blanked if a redirect or client-side navigation landed somewhere that is not allowed.
- */
-async function newGuardedContext(browser: Browser, env: Env, appOrigin: string): Promise<BrowserContext> {
+/** Every browser context enforces the target policy; see guard.ts. */
+async function newGuardedContext(browser: Browser, env: Env, appOrigin: string): Promise<{ context: BrowserContext; guard: Guard }> {
   const context = await browser.newContext({ viewport: { ...VIEWPORT } })
-  const documentAllowed = (raw: string): boolean => {
-    if (raw === 'about:blank' || raw.startsWith('about:srcdoc') || raw.startsWith('data:') || raw.startsWith('blob:')) return true
-    const url = parseHttpUrl(raw)
-    return url !== null && isHostAllowed(url, env, appOrigin)
-  }
-  await context.route('**/*', async (route) => {
-    const request = route.request()
-    const url = parseHttpUrl(request.url())
-    if (url) {
-      const ok = request.isNavigationRequest() ? isHostAllowed(url, env, appOrigin) : url.origin === appOrigin || !isPrivateHost(url.hostname)
-      if (!ok) return route.abort('blockedbyclient')
-    }
-    return route.fallback()
-  })
-  context.on('page', (page) => {
-    page.on('framenavigated', (frame) => {
-      if (documentAllowed(frame.url())) return
-      const blocked = frame.url()
-      console.warn(`Blocked navigation to disallowed host: ${blocked}`)
-      void page.goto('about:blank').catch(() => {})
-    })
-  })
-  return context
+  return { context, guard: await guardContext(context, env, appOrigin) }
 }
 
 // ---- capture ----
@@ -64,7 +43,7 @@ export interface CaptureInput {
 export async function captureScreen(env: Env, input: CaptureInput): Promise<CaptureResponse> {
   const browser = await openBrowser(env)
   try {
-    const context = await newGuardedContext(browser, env, input.appOrigin)
+    const { context, guard } = await newGuardedContext(browser, env, input.appOrigin)
     const page = await context.newPage()
     let replayError: CaptureResponse['replayError']
 
@@ -78,6 +57,7 @@ export async function captureScreen(env: Env, input: CaptureInput): Promise<Capt
           waitSeconds: 5,
           range: { from: 1, to: input.replayTo },
           saveShot: async () => '',
+          takeBlockedNavigation: guard.takeBlockedNavigation,
         })
         if (outcome.status === 'failed') {
           const failed = [...outcome.results].reverse().find((r) => r.status === 'failed')
@@ -90,8 +70,12 @@ export async function captureScreen(env: Env, input: CaptureInput): Promise<Capt
       try {
         await page.goto(input.url.href, { waitUntil: 'load', timeout: 30_000 })
       } catch (e) {
+        const refused = guard.takeBlockedNavigation()
+        if (refused) throw new HttpError(400, `${input.url.href} leads to ${refused}, which is not in this deployment's allowed hosts`)
         throw new HttpError(502, `Could not open ${input.url.href}: ${errorMessage(e).split('\n')[0]}`)
       }
+      const refused = guard.takeBlockedNavigation()
+      if (refused) throw new HttpError(400, `${input.url.href} leads to ${refused}, which is not in this deployment's allowed hosts`)
     }
 
     const capture = await captureUi(page)
@@ -112,9 +96,18 @@ export async function captureScreen(env: Env, input: CaptureInput): Promise<Capt
       elements: JSON.stringify(capture.elements),
       created_at: now(),
     }
-    await env.DB.prepare('INSERT INTO uis (id, test_case_id, name, url, title, width, height, screenshot_key, elements, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .bind(row.id, row.test_case_id, row.name, row.url, row.title, row.width, row.height, row.screenshot_key, row.elements, row.created_at)
-      .run()
+    try {
+      await env.DB.prepare('INSERT INTO uis (id, test_case_id, name, url, title, width, height, screenshot_key, elements, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .bind(row.id, row.test_case_id, row.name, row.url, row.title, row.width, row.height, row.screenshot_key, row.elements, row.created_at)
+        .run()
+    } catch (e) {
+      // The screenshot would be an orphan: nothing points at it.
+      await deleteShots(env.SHOTS, [screenshotKey])
+      // The test case was deleted while its capture was running (the insert fails on the foreign key).
+      const exists = await env.DB.prepare('SELECT 1 AS x FROM test_cases WHERE id = ?').bind(input.testCase.id).first()
+      if (!exists) throw new HttpError(404, 'Test case not found')
+      throw e
+    }
     const ui: Ui = toUi(row)
     return replayError ? { ui, replayError } : { ui }
   } finally {
@@ -155,7 +148,7 @@ async function executeRun(env: Env, browser: Browser, runId: string, heal: boole
     const steps = JSON.parse(run.steps ?? '[]') as Step[]
     const range = run.range ? (JSON.parse(run.range) as { from: number; to: number }) : null
     const environment = JSON.parse(run.environment) as { baseUrl?: string }
-    const project = toProject(await getProjectRow(env.DB, run.project_id))
+    const project = toProject(await getProjectRow(env.DB, run.project_id), appOrigin)
     const baseUrl = environment.baseUrl ?? project.baseUrl
 
     header = [
@@ -163,12 +156,13 @@ async function executeRun(env: Env, browser: Browser, runId: string, heal: boole
       `Environment: Cloudflare Browser Run`,
       `Platform: Chrome (${VIEWPORT.width}x${VIEWPORT.height})`,
       `Base URL: ${baseUrl || '(none)'}`,
-      `Self-healing: ${heal ? 'on' : 'off'}${range ? `, steps ${range.from}-${range.to}` : ''}`,
+      `Self-healing: ${heal ? 'on' : 'off'}${range ? `, steps ${range.from}-${range.to}${range.from > 1 ? ` (steps 1-${range.from - 1} are replayed first as set-up)` : ''}` : ''}`,
       `Started: ${startedAt}`,
     ].join('\n')
     await env.DB.prepare("UPDATE runs SET log = ? WHERE id = ? AND status = 'running'").bind(header, runId).run()
 
-    context = await newGuardedContext(browser, env, appOrigin)
+    const guarded = await newGuardedContext(browser, env, appOrigin)
+    context = guarded.context
     const page = await context.newPage()
     let shot = 0
     let engineLog = ''
@@ -180,6 +174,8 @@ async function executeRun(env: Env, browser: Browser, runId: string, heal: boole
         variables: project.variables,
         heal,
         range,
+        replaySetup: true,
+        takeBlockedNavigation: guarded.guard.takeBlockedNavigation,
         waitSeconds: 10,
         saveShot: async (bytes) => {
           const key = `run/${runId}/${++shot}.jpg`
@@ -197,7 +193,9 @@ async function executeRun(env: Env, browser: Browser, runId: string, heal: boole
         },
         shouldAbort: async () => {
           const row = await env.DB.prepare('SELECT status FROM runs WHERE id = ?').bind(runId).first<{ status: string }>()
-          return row?.status !== 'running'
+          if (row?.status === 'running') return false
+          // Aborted by the user, or failed from outside (the time limit); the log should say which.
+          return row?.status === 'aborted' ? true : 'Stopped: the run is no longer active (it ran into the time limit or was removed)'
         },
       })
     } catch (e) {
@@ -219,56 +217,76 @@ async function executeRun(env: Env, browser: Browser, runId: string, heal: boole
   }
 }
 
-async function processSingle(env: Env, runId: string, appOrigin: string): Promise<void> {
+const batchFailSql =
+  "UPDATE runs SET status = 'failed', started_at = COALESCE(started_at, ?1), finished_at = ?1, log = log || CASE WHEN log = '' THEN '' ELSE char(10) END || ?2 WHERE id = ?3 AND status IN ('queued', 'running')"
+
+/** `retry`: no browser could be started and the run(s) are still queued, so the message should be delivered again. */
+type Processed = 'done' | 'retry'
+
+async function processSingle(env: Env, runId: string, appOrigin: string, canRetry: boolean): Promise<Processed> {
   const row = await env.DB.prepare('SELECT status FROM runs WHERE id = ?').bind(runId).first<{ status: string }>()
-  if (!row || row.status !== 'queued') return
+  if (!row || row.status !== 'queued') return 'done'
   let browser: Browser | undefined
   try {
     browser = await openBrowser(env)
     await executeRun(env, browser, runId, false, appOrigin)
   } catch (e) {
+    // Nothing has run yet when the browser could not be started: that is not a test failure.
+    if (e instanceof BrowserLaunchError && canRetry) return 'retry'
     await failRun(env, runId, errorMessage(e))
   } finally {
     await browser?.close().catch(() => {})
   }
+  return 'done'
 }
 
-async function processBatch(env: Env, batchRunId: string, appOrigin: string): Promise<void> {
+async function processBatch(env: Env, batchRunId: string, appOrigin: string, canRetry: boolean): Promise<Processed> {
   const { results: runs } = await env.DB.prepare('SELECT id FROM runs WHERE batch_run_id = ? ORDER BY run_order').bind(batchRunId).all<{ id: string }>()
-  if (runs.length === 0) return
+  if (runs.length === 0) return 'done'
   let browser: Browser | undefined
   try {
     browser = await openBrowser(env)
     for (const { id } of runs) {
       // One browser for the whole batch; if it died mid-way, start another for the remaining cases.
       if (!browser.isConnected()) browser = await openBrowser(env)
-      await executeRun(env, browser, id, true, appOrigin)
+      await executeRun(env, browser, id, true, appOrigin) // only claims runs that are still queued
       await refreshBatchRun(env.DB, batchRunId)
     }
   } catch (e) {
+    // A launch can only fail between test cases, so every unfinished run is still queued and a later
+    // delivery of the same message picks up exactly where this one stopped.
+    if (e instanceof BrowserLaunchError && canRetry) return 'retry'
     const message = errorMessage(e)
-    await env.DB.batch(runs.map(({ id }) =>
-      env.DB.prepare(
-        "UPDATE runs SET status = 'failed', started_at = COALESCE(started_at, ?1), finished_at = ?1, log = log || CASE WHEN log = '' THEN '' ELSE char(10) END || ?2 WHERE id = ?3 AND status IN ('queued', 'running')",
-      ).bind(now(), message, id),
-    ))
+    await env.DB.batch(runs.map(({ id }) => env.DB.prepare(batchFailSql).bind(now(), message, id)))
   } finally {
     await browser?.close().catch(() => {})
     await refreshBatchRun(env.DB, batchRunId)
   }
+  return 'done'
 }
 
-/** Queue consumer. Messages are never retried (max_retries 0): a run either finishes or is marked failed. */
+/** Keep in step with `max_retries` of the queue consumer in wrangler.jsonc. */
+const LAUNCH_RETRIES = 3
+const LAUNCH_RETRY_DELAY_S = 30
+
+/**
+ * Queue consumer. A message is delivered again only when no browser could be started (Browser Run's
+ * concurrency and rate limits are transient); after the last attempt the run is marked failed with that
+ * reason. A run that started is never retried: it either finishes or is marked failed.
+ */
 export async function handleQueue(batch: MessageBatch<QueueMessage>, env: Env): Promise<void> {
   for (const message of batch.messages) {
     const body = message.body
+    let processed: Processed = 'done'
     try {
-      if ('batchRunId' in body) await processBatch(env, body.batchRunId, body.origin)
-      else await processSingle(env, body.runId, body.origin)
+      const canRetry = message.attempts <= LAUNCH_RETRIES
+      processed = 'batchRunId' in body ? await processBatch(env, body.batchRunId, body.origin, canRetry) : await processSingle(env, body.runId, body.origin, canRetry)
     } catch (e) {
       console.error('queue message failed', body, e)
-    } finally {
-      message.ack()
     }
+    if (processed === 'retry') {
+      console.warn(`No browser available (attempt ${message.attempts}); retrying in ${LAUNCH_RETRY_DELAY_S} s`, body)
+      message.retry({ delaySeconds: LAUNCH_RETRY_DELAY_S })
+    } else message.ack()
   }
 }

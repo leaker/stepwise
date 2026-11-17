@@ -1,18 +1,34 @@
 // Request body validation shared by the API routes.
 import { COMMAND_BY_ID } from '../shared/commands'
-import type { ElementRef, Locator, Step, UiElement } from '../shared/types'
+import type { Box, ElementRef, ElementType, Fingerprint, Locator, Step, UiElement } from '../shared/types'
 import { HttpError, type Env } from './env'
 import { newId } from './db'
 
 export type Body = Record<string, unknown>
 
-export async function readBody(req: { json(): Promise<unknown> }): Promise<Body> {
-  const body = await req.json().catch(() => null)
-  if (body === null || typeof body !== 'object' || Array.isArray(body)) return {}
-  return body as Body
+/** Largest request body the API accepts. D1 stores at most 2 MB per value, and steps are copied into every run. */
+export const MAX_BODY_BYTES = 1024 * 1024
+
+/**
+ * The JSON object of a request. No body at all is an empty object (e.g. POST .../abort); a body that is
+ * not a JSON object is an error, so a malformed request is never mistaken for "no options given".
+ */
+export async function readBody(req: { text(): Promise<string> }): Promise<Body> {
+  const text = await req.text()
+  if (text.trim() === '') return {}
+  let body: unknown
+  try {
+    body = JSON.parse(text)
+  } catch {
+    throw new HttpError(400, 'Request body is not valid JSON')
+  }
+  if (!isObject(body)) throw new HttpError(400, 'Request body must be a JSON object')
+  return body
 }
 
-const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v)
+function isObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v)
+}
 
 export function requireName(value: unknown, what: string): string {
   if (typeof value !== 'string' || value.trim() === '') throw new HttpError(400, `${what} name is required`)
@@ -35,29 +51,91 @@ export function optionalBaseUrl(value: unknown): string | undefined {
   return text.replace(/\/+$/, '')
 }
 
+const MAX_VARIABLES = 100
+const MAX_VARIABLE_LENGTH = 2000
+
 export function optionalVariables(value: unknown): Record<string, string> | undefined {
   if (value === undefined) return undefined
   if (!isObject(value)) throw new HttpError(400, 'variables must be an object of strings')
   const out: Record<string, string> = {}
-  for (const [k, v] of Object.entries(value)) {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new HttpError(400, `Invalid variable name "${k}" (letters, digits and _ only)`)
+  const entries = Object.entries(value)
+  if (entries.length > MAX_VARIABLES) throw new HttpError(400, `A project can have at most ${MAX_VARIABLES} variables`)
+  for (const [k, v] of entries) {
+    if (k.length > 60 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new HttpError(400, `Invalid variable name "${k.slice(0, 60)}" (letters, digits and _ only, 60 characters at most)`)
     if (typeof v !== 'string') throw new HttpError(400, `Variable "${k}" must be a string`)
+    if (v.length > MAX_VARIABLE_LENGTH) throw new HttpError(400, `Variable "${k}" must be ${MAX_VARIABLE_LENGTH} characters or fewer`)
     out[k] = v
   }
   return out
 }
 
-function isLocator(v: unknown): v is Locator {
-  return isObject(v) && (v.key === 'id' || v.key === 'css' || v.key === 'xpath') && typeof v.value === 'string'
+// Captured elements come back from the editor inside steps and UI element lists. They are rebuilt field by
+// field, so nothing but the known fields is stored, and bounded well above what a capture produces
+// (detect.ts: 300 elements, 8 locators, 120-character texts, 200-character attributes).
+const ELEMENT_TYPES = new Set<string>(['button', 'link', 'input', 'textarea', 'checkbox', 'radio', 'select', 'image', 'text', 'other'])
+const MAX_ELEMENTS = 1000
+const MAX_LOCATORS = 20
+const MAX_ATTRS = 40
+
+function text(v: unknown, max: number, what: string): string {
+  if (typeof v !== 'string') throw new HttpError(400, `${what} must be a string`)
+  if (v.length > max) throw new HttpError(400, `${what} is too long (${max} characters at most)`)
+  return v
+}
+
+function parseLocator(v: unknown, what: string): Locator {
+  if (!isObject(v) || (v.key !== 'id' && v.key !== 'css' && v.key !== 'xpath') || typeof v.value !== 'string' || v.value === '') throw new HttpError(400, `${what} is invalid`)
+  return { key: v.key, value: text(v.value, 2000, what) }
+}
+
+function parseLocators(v: unknown, what: string): Locator[] {
+  if (!Array.isArray(v)) throw new HttpError(400, `${what} is invalid`)
+  if (v.length > MAX_LOCATORS) throw new HttpError(400, `${what} can have at most ${MAX_LOCATORS} locators`)
+  return v.map((l) => parseLocator(l, what))
+}
+
+function parseBox(v: unknown, what: string): Box {
+  if (!isObject(v)) throw new HttpError(400, `${what} is invalid`)
+  const n = (x: unknown): number => {
+    if (typeof x !== 'number' || !Number.isFinite(x) || Math.abs(x) > 1_000_000) throw new HttpError(400, `${what} is invalid`)
+    return x
+  }
+  return { x: n(v.x), y: n(v.y), w: n(v.w), h: n(v.h) }
+}
+
+function parseElementType(v: unknown, what: string): ElementType {
+  if (typeof v !== 'string' || !ELEMENT_TYPES.has(v)) throw new HttpError(400, `${what} is invalid`)
+  return v as ElementType
+}
+
+function parseFingerprint(v: unknown, what: string): Fingerprint {
+  if (!isObject(v) || !isObject(v.attrs)) throw new HttpError(400, `${what} is invalid`)
+  const entries = Object.entries(v.attrs)
+  if (entries.length > MAX_ATTRS) throw new HttpError(400, `${what} has too many attributes`)
+  const attrs: Record<string, string> = {}
+  for (const [name, value] of entries) attrs[text(name, 60, `${what} attribute name`)] = text(value, 500, `${what} attribute ${name.slice(0, 60)}`)
+  return {
+    tag: text(v.tag, 60, `${what}.tag`),
+    type: parseElementType(v.type, `${what}.type`),
+    text: text(v.text, 300, `${what}.text`),
+    label: text(v.label, 300, `${what}.label`),
+    attrs,
+    path: text(v.path, 2000, `${what}.path`),
+    box: parseBox(v.box, `${what}.box`),
+  }
 }
 
 function parseTarget(v: unknown, at: string): ElementRef {
   if (!isObject(v)) throw new HttpError(400, `${at}: target must be an object`)
   if (typeof v.uiId !== 'string' || typeof v.elementId !== 'string' || typeof v.name !== 'string') throw new HttpError(400, `${at}: target needs uiId, elementId and name`)
-  if (!isLocator(v.locator)) throw new HttpError(400, `${at}: target.locator is invalid`)
-  if (!Array.isArray(v.candidates) || !v.candidates.every(isLocator)) throw new HttpError(400, `${at}: target.candidates is invalid`)
-  if (!isObject(v.fingerprint)) throw new HttpError(400, `${at}: target.fingerprint is invalid`)
-  return v as unknown as ElementRef
+  return {
+    uiId: text(v.uiId, 64, `${at}: target.uiId`),
+    elementId: text(v.elementId, 64, `${at}: target.elementId`),
+    name: text(v.name, 300, `${at}: target.name`),
+    locator: parseLocator(v.locator, `${at}: target.locator`),
+    candidates: parseLocators(v.candidates, `${at}: target.candidates`),
+    fingerprint: parseFingerprint(v.fingerprint, `${at}: target.fingerprint`),
+  }
 }
 
 /** Structural validation only; IF nesting problems are allowed while editing and reported at run time. */
@@ -94,17 +172,26 @@ export function parseSteps(value: unknown): Step[] {
 
 export function parseElements(value: unknown): UiElement[] {
   if (!Array.isArray(value)) throw new HttpError(400, 'elements must be an array')
+  if (value.length > MAX_ELEMENTS) throw new HttpError(400, `A captured screen can have at most ${MAX_ELEMENTS} elements`)
   const seen = new Set<string>()
-  for (const [i, el] of value.entries()) {
+  return value.map((el, i) => {
     const at = `Element ${i + 1}`
     if (!isObject(el) || typeof el.id !== 'string' || el.id === '') throw new HttpError(400, `${at}: id is required`)
     if (seen.has(el.id)) throw new HttpError(400, `${at}: duplicate element id`)
     seen.add(el.id)
     if (typeof el.name !== 'string' || typeof el.type !== 'string') throw new HttpError(400, `${at}: name and type are required`)
     if (!isObject(el.box) || !isObject(el.fingerprint)) throw new HttpError(400, `${at}: box and fingerprint are required`)
-    if (!Array.isArray(el.locators) || el.locators.length === 0 || !el.locators.every(isLocator)) throw new HttpError(400, `${at}: locators must be a non-empty list of locators`)
-  }
-  return value as UiElement[]
+    const locators = parseLocators(el.locators, `${at}: locators`)
+    if (locators.length === 0) throw new HttpError(400, `${at}: locators must be a non-empty list of locators`)
+    return {
+      id: text(el.id, 64, `${at}: id`),
+      name: text(el.name, 300, `${at}: name`),
+      type: parseElementType(el.type, `${at}: type`),
+      box: parseBox(el.box, `${at}: box`),
+      locators,
+      fingerprint: parseFingerprint(el.fingerprint, `${at}: fingerprint`),
+    }
+  })
 }
 
 // ---- URL rules ----

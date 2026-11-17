@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { Step } from '../../shared/types'
-import { deleteShots, getProjectRow, getTestCaseRow, lastRunsFor, newId, now, sweepStaleRuns, toTestCase, toUi, type TestCaseRow, type UiRow } from '../db'
+import { deleteShots, getProjectRow, getTestCaseRow, lastRunsFor, newId, now, resolveBaseUrl, sweepStaleRuns, toTestCase, toUi, type TestCaseRow, type UiRow } from '../db'
 import { HttpError, type Env } from '../env'
 import { captureScreen } from '../runner'
 import { assertNavigateTargetsAllowed, isHostAllowed, optionalText, parseElements, parseSteps, readBody, requireName, resolveUrl } from '../validate'
@@ -131,6 +131,7 @@ testCases.post('/test-cases/:tid/uis', async (c) => {
   const project = await getProjectRow(c.env.DB, testCase.project_id)
   const body = await readBody(c.req)
   const appOrigin = new URL(c.req.url).origin
+  const baseUrl = resolveBaseUrl(project.base_url, appOrigin)
   const steps = JSON.parse(testCase.steps) as Step[]
   const variables = JSON.parse(project.variables) as Record<string, string>
 
@@ -140,15 +141,15 @@ testCases.post('/test-cases/:tid/uis', async (c) => {
     const index = steps.findIndex((s) => s.id === body.afterStepId)
     if (index < 0) throw new HttpError(400, 'afterStepId does not match a step of this test case (save the test case first)')
     replayTo = index + 1
-    assertNavigateTargetsAllowed(steps.slice(0, replayTo), project.base_url, variables, c.env, appOrigin)
+    assertNavigateTargetsAllowed(steps.slice(0, replayTo), baseUrl, variables, c.env, appOrigin)
   } else {
     if (typeof body.url !== 'string' || body.url.trim() === '') throw new HttpError(400, 'Enter the URL of the screen to capture')
-    url = resolveUrl(body.url, project.base_url)
+    url = resolveUrl(body.url, baseUrl)
     if (!url) throw new HttpError(400, 'The URL must be an http(s) URL, or a path when the project has a base URL')
     if (!isHostAllowed(url, c.env, appOrigin)) throw new HttpError(400, `${url.hostname} is not in this deployment's allowed hosts`)
   }
 
-  const response = await captureScreen(c.env, { testCase, steps, baseUrl: project.base_url, variables, replayTo, url, appOrigin })
+  const response = await captureScreen(c.env, { testCase, steps, baseUrl, variables, replayTo, url, appOrigin })
   return c.json(response, 201)
 })
 
