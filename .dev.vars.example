@@ -1,0 +1,5 @@
+# Copy to .dev.vars for local development. Both are optional.
+# Require this code for the whole API (cookie login in the UI, "Authorization: Bearer <code>" for CI).
+# ACCESS_CODE=change-me
+# Only allow captures / navigate steps to these hostnames (the app's own origin is always allowed).
+# ALLOWED_HOSTS=example.com

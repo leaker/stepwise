@@ -6,8 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "typecheck": "tsc -b",
+    "test": "vitest run",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "db:migrate:local": "wrangler d1 migrations apply stepwise --local",
+    "db:migrate:remote": "wrangler d1 migrations apply stepwise --remote",
+    "deploy": "pnpm run build && wrangler deploy"
   },
   "dependencies": {
     "@cloudflare/playwright": "^1.4.0",

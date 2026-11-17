@@ -1,22 +1,60 @@
-import { launch } from '@cloudflare/playwright'
+// Stepwise Worker: JSON API under /api, the bundled demo site under /demo, and the run queue consumer.
+import { Hono } from 'hono'
+import { projects } from './api/projects'
+import { runs } from './api/runs'
+import { testCases } from './api/testCases'
+import { accessGate, getSession, postSession } from './auth'
+import { errorMessage, HttpError, type Env, type QueueMessage } from './env'
+import { handleQueue } from './runner'
+
+const app = new Hono<{ Bindings: Env }>()
+
+app.onError((err, c) => {
+  if (err instanceof HttpError) return c.json({ error: err.message }, err.status)
+  console.error(err)
+  return c.json({ error: errorMessage(err) || 'Internal error' }, 500)
+})
+
+app.use('/api/*', accessGate)
+app.get('/api/session', getSession)
+app.post('/api/session', postSession)
+
+app.route('/api', projects)
+app.route('/api', testCases)
+app.route('/api', runs)
+
+// Screenshot keys contain slashes (ui/<id>.jpg, run/<runId>/<n>.jpg), hence the wildcard.
+app.get('/api/shots/*', async (c) => {
+  const key = decodeURIComponent(c.req.path.slice('/api/shots/'.length))
+  if (!/^(ui|run)\/[A-Za-z0-9/_.-]+$/.test(key) || key.includes('..')) return c.json({ error: 'Screenshot not found' }, 404)
+  const object = await c.env.SHOTS.get(key)
+  if (!object) return c.json({ error: 'Screenshot not found' }, 404)
+  return new Response(object.body, {
+    headers: {
+      'Content-Type': object.httpMetadata?.contentType ?? 'image/jpeg',
+      // Keys are never rewritten, so the browser may keep them forever (private: the API can be gated).
+      'Cache-Control': 'private, max-age=31536000, immutable',
+      ETag: object.httpEtag,
+    },
+  })
+})
+
+app.all('/api/*', (c) => c.json({ error: 'Not found' }, 404))
+
+// The demo site is plain static files. It is routed through the Worker so that a missing page is a real
+// 404 instead of the single-page-app fallback (a test must see a broken link as broken).
+app.all('/demo/*', async (c) => {
+  const res = await c.env.ASSETS.fetch(c.req.raw)
+  if (!res.ok || !res.headers.get('Content-Type')?.includes('text/html')) return res
+  const html = await res.text()
+  // The fallback serves the app shell (index.html), which is the only page with the React mount point.
+  if (html.includes('<div id="root">')) return c.text('Not found', 404)
+  return new Response(html, res)
+})
+
+app.all('*', (c) => c.env.ASSETS.fetch(c.req.raw))
 
 export default {
-  async fetch(req: Request, env: any): Promise<Response> {
-    const url = new URL(req.url)
-    if (url.pathname === '/api/smoke') {
-      const browser = await launch(env.BROWSER)
-      try {
-        const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
-        await page.goto(url.searchParams.get('u') ?? 'https://example.com')
-        const title = await page.title()
-        const shot = await page.screenshot({ type: 'jpeg', quality: 60 })
-        await env.SHOTS.put('smoke.jpg', shot)
-        const row = await env.DB.prepare('select 1 as ok').first()
-        return Response.json({ title, bytes: shot.byteLength, row })
-      } finally {
-        await browser.close()
-      }
-    }
-    return new Response('not found', { status: 404 })
-  },
-}
+  fetch: app.fetch,
+  queue: (batch: MessageBatch<QueueMessage>, env: Env) => handleQueue(batch, env),
+} satisfies ExportedHandler<Env, QueueMessage>

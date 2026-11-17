@@ -5,6 +5,7 @@
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
+    "binding": "ASSETS",
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*", "/demo/*"]
   },
@@ -17,5 +18,8 @@
     "producers": [{ "binding": "RUN_QUEUE", "queue": "stepwise-runs" }],
     "consumers": [{ "queue": "stepwise-runs", "max_batch_size": 1, "max_retries": 0 }]
   },
+  // Optional: restrict which sites captures and navigate steps may open (the app's own origin is always allowed).
+  // "vars": { "ALLOWED_HOSTS": "example.com,staging.example.com" },
+  // Optional: `wrangler secret put ACCESS_CODE` to require an access code for the whole API.
   "observability": { "enabled": true }
 }
