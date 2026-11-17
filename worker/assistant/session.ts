@@ -1,11 +1,12 @@
 // Runs one assistant session in the queue consumer: wires the loop to D1, the browser and the model.
 import type { AssistantUsage } from '../../shared/types'
 import { now } from '../db'
-import { errorMessage, type Env } from '../env'
+import { errorMessage, type AssistantOverride, type Env } from '../env'
 import { leaseBrowser } from '../runner'
 import { anthropicClient } from './client'
 import { runAssistant, type LoopResult, type ModelClient, type SessionSink } from './loop'
-import { ASSISTANT_MODEL, firstMessage } from './prompt'
+import { sessionModel } from './models'
+import { firstMessage } from './prompt'
 import { appendEvent } from './store'
 import { assistantTools } from './tools'
 
@@ -18,7 +19,7 @@ const finish = async (env: Env, id: string, result: LoopResult): Promise<void> =
 }
 
 /** `model` is injectable for tests; by default it is Claude with the deployment's API key. */
-export async function processAssistantSession(env: Env, sessionId: string, appOrigin: string, model?: ModelClient): Promise<void> {
+export async function processAssistantSession(env: Env, sessionId: string, appOrigin: string, model?: ModelClient, override?: AssistantOverride): Promise<void> {
   const claimed = await env.DB.prepare("UPDATE assistant_sessions SET status = 'running', started_at = ?1 WHERE id = ?2 AND status = 'queued' RETURNING test_case_id, events").bind(now(), sessionId).first<{ test_case_id: string; events: string }>()
   if (!claimed) return // aborted, deleted, or delivered twice
 
@@ -40,12 +41,13 @@ export async function processAssistantSession(env: Env, sessionId: string, appOr
     if (!model && !env.ANTHROPIC_API_KEY) throw new Error('The assistant is not configured on this deployment (ANTHROPIC_API_KEY is not set).')
     const instruction = (JSON.parse(claimed.events) as { kind: string; text: string }[]).find((e) => e.kind === 'user')?.text ?? ''
     const tools = assistantTools(env, { testCaseId: claimed.test_case_id, sessionId }, appOrigin, browser, active)
+    const chosen = sessionModel(env, override)
     result = await runAssistant({
-      model: model ?? anthropicClient(env.ANTHROPIC_API_KEY!),
+      model: model ?? anthropicClient(env.ANTHROPIC_API_KEY!, chosen.model, chosen.effort),
       host: tools,
       sink,
       task: firstMessage(await tools.context(), instruction),
-      modelName: ASSISTANT_MODEL,
+      modelName: chosen.model,
     })
   } catch (e) {
     console.error(`assistant session ${sessionId} crashed`, e)

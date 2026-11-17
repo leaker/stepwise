@@ -1,9 +1,9 @@
 import { Hono } from 'hono'
 import type { AssistantEvent, AssistantStatus } from '../../shared/types'
-import { ASSISTANT_MODEL } from '../assistant/prompt'
+import { overrideAllowed, resolveModel } from '../assistant/models'
 import { appendEvent, dailyLimits, dailyUse, DAY_MS, getSessionRow, sweepStaleSessions, toSession, type AssistantSessionRow } from '../assistant/store'
 import { getTestCaseRow, newId, now } from '../db'
-import { HttpError, type Env } from '../env'
+import { HttpError, type AssistantOverride, type Env } from '../env'
 import { readBody } from '../validate'
 
 export const assistant = new Hono<{ Bindings: Env }>()
@@ -14,7 +14,11 @@ function requireEnabled(env: Env): void {
   if (!env.ANTHROPIC_API_KEY) throw new HttpError(503, 'The AI assistant is not configured on this deployment. Set the ANTHROPIC_API_KEY secret to enable it.')
 }
 
-assistant.get('/assistant/status', (c) => c.json({ enabled: !!c.env.ANTHROPIC_API_KEY, model: ASSISTANT_MODEL } satisfies AssistantStatus))
+assistant.get('/assistant/status', (c) => {
+  const { model, invalid } = resolveModel(c.env.ASSISTANT_MODEL)
+  if (invalid) console.warn(`ASSISTANT_MODEL "${invalid}" is not a supported model; using ${model}`)
+  return c.json({ enabled: !!c.env.ANTHROPIC_API_KEY, model } satisfies AssistantStatus)
+})
 
 assistant.post('/test-cases/:tid/assistant', async (c) => {
   requireEnabled(c.env)
@@ -54,7 +58,11 @@ assistant.post('/test-cases/:tid/assistant', async (c) => {
     )
   }
   try {
-    await c.env.RUN_QUEUE.send({ assistantSessionId: id, origin: new URL(c.req.url).origin })
+    // Local development only: the benchmark compares models by naming one per session (see overrideAllowed).
+    const override: AssistantOverride | undefined = overrideAllowed(c.env, c.req.url)
+      ? { model: c.req.header('x-assistant-model'), effort: c.req.header('x-assistant-effort') }
+      : undefined
+    await c.env.RUN_QUEUE.send({ assistantSessionId: id, origin: new URL(c.req.url).origin, ...(override?.model || override?.effort ? { override } : {}) })
   } catch (e) {
     await c.env.DB.prepare('DELETE FROM assistant_sessions WHERE id = ?').bind(id).run()
     throw e

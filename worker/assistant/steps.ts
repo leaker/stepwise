@@ -1,7 +1,7 @@
 // Turning the model's tool input into a Step, with every rule the editor and the engine enforce checked
 // up front so a mistake comes back as a message the model can act on. Pure: no database, no browser.
 import { COMMAND_BY_ID, isBuiltInVariable, KEYS, SWIPE_DIRECTIONS } from '../../shared/commands'
-import type { CommandId, ElementRef, Step, Ui } from '../../shared/types'
+import type { CommandId, ElementRef, Step, Ui, UiElement } from '../../shared/types'
 
 export class ToolInputError extends Error {}
 
@@ -190,4 +190,38 @@ export function maskVariables(text: string, variables: Record<string, string>): 
     for (const form of new Set([value, encodeURIComponent(value), JSON.stringify(value).slice(1, -1)])) out = out.split(form).join(`\${${name}}`)
   }
   return out
+}
+
+// ---- what a capture tells the model ----
+
+const clipText = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
+
+/** Elements listed for the model per capture. A page with more keeps its controls first; see listElements. */
+export const MAX_LISTED_ELEMENTS = 200
+
+/**
+ * The element list of a capture as the model reads it: one line per element, `e12 "Add breakfast" checkbox`.
+ * An element's name already holds its text (or label) and its type, so the line is the id and the name; the
+ * text is added only when the name does not contain it. As JSON objects with separate name, type and text
+ * fields the same list took about three times the tokens, and it is re-read on every later turn.
+ * Left out: elements without a locator (a step cannot use them) and, on a page with more than `max`
+ * elements, the plain texts that do not fit after the controls (links, buttons, fields). Page order is kept.
+ */
+export function listElements(elements: UiElement[], max = MAX_LISTED_ELEMENTS): { lines: string[]; omitted: number } {
+  const usable = elements.filter((e) => e.locators.length > 0)
+  let keep = new Set(usable)
+  if (usable.length > max) {
+    const controls = usable.filter((e) => e.type !== 'text')
+    const texts = usable.filter((e) => e.type === 'text')
+    keep = new Set([...controls.slice(0, max), ...texts.slice(0, Math.max(0, max - controls.length))])
+  }
+  const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim()
+  const lines = usable
+    .filter((e) => keep.has(e))
+    .map((e) => {
+      const name = oneLine(e.name)
+      const text = oneLine(e.fingerprint.text)
+      return `${e.id} ${name}${text && !name.includes(clipText(text, 40)) ? ` | text: ${clipText(text, 100)}` : ''}`
+    })
+  return { lines, omitted: usable.length - keep.size }
 }

@@ -4,6 +4,7 @@
 import type Anthropic from '@anthropic-ai/sdk'
 import type { AssistantEvent, AssistantToolName, AssistantUsage } from '../../shared/types'
 import { errorMessage } from '../env'
+import { costOf, hasPrice, isSupportedModel, type Tokens } from './models'
 
 export type ModelMessage = Anthropic.Beta.BetaMessageParam
 /** The parts of a model response the loop reads. */
@@ -77,30 +78,6 @@ export const MAX_SESSION_COST_USD = 5
 const REQUEST_TIMEOUT_MS = 4 * 60 * 1000
 
 /**
- * USD per million tokens (list prices, platform.claude.com/docs/en/about-claude/pricing). Cache writes are
- * billed at 1.25x input (5 minute TTL). Besides the assistant's own model this lists the models a declined
- * request can be re-run on (`fallbacks: "default"`), which bill at their own rates.
- */
-const PRICES: Record<string, { input: number; output: number; cacheRead: number }> = {
-  'claude-opus-5-5': { input: 4, output: 20, cacheRead: 0.2 },
-  'claude-opus-5': { input: 5, output: 25, cacheRead: 0.5 },
-  'claude-opus-4-8': { input: 5, output: 25, cacheRead: 0.5 },
-  'claude-sonnet-5-5': { input: 2, output: 10, cacheRead: 0.1 },
-  'claude-sonnet-5': { input: 2, output: 10, cacheRead: 0.2 },
-}
-const DEFAULT_PRICE = PRICES['claude-opus-5-5']
-
-export const hasPrice = (model: string): boolean => Object.hasOwn(PRICES, model)
-
-type Tokens = Pick<AssistantUsage, 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens'>
-
-/** A model without a known price is charged like the assistant's own model; the caller marks the estimate incomplete. */
-export function costOf(model: string, u: Tokens): number {
-  const p = hasPrice(model) ? PRICES[model] : DEFAULT_PRICE
-  return (u.inputTokens * p.input + u.cacheWriteTokens * p.input * 1.25 + u.cacheReadTokens * p.cacheRead + u.outputTokens * p.output) / 1_000_000
-}
-
-/**
  * What one response used, per model that worked on it. With server-side fallbacks a response can be the work
  * of two models: the top-level usage then covers only the attempt that produced the message, while
  * `usage.iterations` has one entry per attempt, each with its own model (a declined attempt is billed too).
@@ -157,7 +134,7 @@ export async function runAssistant(o: LoopOptions): Promise<LoopResult> {
       usage.outputTokens += part.outputTokens
       usage.cacheReadTokens += part.cacheReadTokens
       usage.cacheWriteTokens += part.cacheWriteTokens
-      usage.costUsd += costOf(part.model, part)
+      usage.costUsd += costOf(part.model, part, isSupportedModel(o.modelName) ? o.modelName : undefined)
       if (part.model !== o.modelName && !usage.otherModels?.includes(part.model)) usage.otherModels = [...(usage.otherModels ?? []), part.model]
       if (!hasPrice(part.model)) usage.costIncomplete = true
     }

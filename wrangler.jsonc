@@ -23,10 +23,18 @@
     // below the account's concurrent browser limit so a capture can still get a session.
     "consumers": [{ "queue": "stepwise-runs", "max_batch_size": 1, "max_retries": 3, "max_concurrency": 2 }]
   },
-  // Optional: restrict which sites captures and navigate steps may open (the app's own origin is always allowed).
-  // "vars": { "ALLOWED_HOSTS": "example.com,staging.example.com" },
+  "vars": {
+    // The Claude model the AI assistant asks: claude-haiku-5-5, claude-sonnet-5-5 or claude-opus-5-5
+    // (worker/assistant/models.ts). Haiku is the cheapest one that passed every run of the benchmark
+    // (scripts/bench-assistant.mjs; results in the README).
+    "ASSISTANT_MODEL": "claude-haiku-5-5",
+    // The assistant's estimated spend limit in USD for the whole deployment per 24 hours. The number of
+    // sessions per 24 hours can be set too: ASSISTANT_DAILY_SESSIONS (default "100").
+    "ASSISTANT_DAILY_BUDGET_USD": "40"
+    // Optional: restrict which sites captures and navigate steps may open (the app's own origin is always allowed).
+    // "ALLOWED_HOSTS": "example.com,staging.example.com"
+  },
   // Optional: `wrangler secret put ACCESS_CODE` to require an access code for the whole API.
-  // Optional: `wrangler secret put ANTHROPIC_API_KEY` to enable the AI assistant in the editor. Its budget per
-  // 24 hours can be set under "vars": ASSISTANT_DAILY_SESSIONS (default "100"), ASSISTANT_DAILY_BUDGET_USD ("20").
+  // Optional: `wrangler secret put ANTHROPIC_API_KEY` to enable the AI assistant in the editor.
   "observability": { "enabled": true }
 }

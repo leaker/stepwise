@@ -4,7 +4,8 @@ import { describe, expect, it } from 'vitest'
 import { stepSentence } from '../../shared/commands'
 import type { AssistantEvent, AssistantUsage, Step, Ui } from '../../shared/types'
 import { describeModelError } from '../../worker/assistant/client'
-import { costOf, runAssistant, type ModelClient, type ModelMessage, type ModelTurn, type SessionSink, type ToolHost, type ToolOutcome } from '../../worker/assistant/loop'
+import { runAssistant, type ModelClient, type ModelMessage, type ModelTurn, type SessionSink, type ToolHost, type ToolOutcome } from '../../worker/assistant/loop'
+import { costOf, DEFAULT_MODEL } from '../../worker/assistant/models'
 import { firstMessage, SYSTEM_PROMPT, TOOLS } from '../../worker/assistant/prompt'
 import { asInput, checkStep, commandOf, optionalString, targetFrom, ToolInputError } from '../../worker/assistant/steps'
 import { DEVICES } from '../../shared/devices'
@@ -167,8 +168,7 @@ describe('assistant loop', () => {
     expect(toolResults(requests[2][4]).map((r) => r.tool_use_id)).toEqual(ids)
 
     expect(state.usage).toMatchObject({ turns: 4, inputTokens: 400, outputTokens: 80, cacheReadTokens: 4000, cacheWriteTokens: 200 })
-    expect(state.usage!.costUsd).toBeCloseTo(costOf('claude-opus-5-5', state.usage!), 10)
-    expect(state.usage!.costUsd).toBeCloseTo((400 * 4 + 200 * 5 + 4000 * 0.2 + 80 * 20) / 1e6, 10)
+        expect(state.usage!.costUsd).toBeCloseTo((400 * 4 + 200 * 5 + 4000 * 0.2 + 80 * 20) / 1e6, 10)
   })
 
   it('returns invalid tool input as an error result and keeps going', async () => {
@@ -371,7 +371,7 @@ describe('assistant loop', () => {
 describe('assistant prompt', () => {
   it('keeps the cached prefix free of per-request content', () => {
     // Tools render first and are cached with the system prompt: both must be byte-identical between requests.
-    expect(TOOLS.map((t) => t.name)).toEqual([...TOOLS.map((t) => t.name)].sort())
+    expect(TOOLS.map((t) => t.name)).toEqual(TOOLS.map((t) => t.name).toSorted())
     for (const tool of TOOLS) {
       expect(tool.strict).toBe(true)
       expect(tool.input_schema.additionalProperties).toBe(false)
@@ -400,7 +400,12 @@ describe('assistant routes without an API key', () => {
     const { assistant } = await import('../../worker/api/assistant')
     const env = {} as never
     const status = await assistant.request('/assistant/status', {}, env)
-    expect(await status.json()).toEqual({ enabled: false, model: 'claude-opus-5-5' })
+    expect(await status.json()).toEqual({ enabled: false, model: DEFAULT_MODEL })
+    // The configured model is reported when it is a supported one; anything else falls back to the default.
+    const configured = await assistant.request('/assistant/status', {}, { ANTHROPIC_API_KEY: 'k', ASSISTANT_MODEL: 'claude-opus-5-5' } as never)
+    expect(await configured.json()).toEqual({ enabled: true, model: 'claude-opus-5-5' })
+    const unknown = await assistant.request('/assistant/status', {}, { ASSISTANT_MODEL: 'gpt-x' } as never)
+    expect(await unknown.json()).toEqual({ enabled: false, model: DEFAULT_MODEL })
     const { HttpError } = await import('../../worker/env')
     assistant.onError((err, c) => (err instanceof HttpError ? c.json({ error: err.message }, err.status) : c.json({ error: 'Internal error' }, 500)))
     for (const [method, path] of [['POST', '/test-cases/t1/assistant'], ['GET', '/test-cases/t1/assistant'], ['GET', '/assistant/s1'], ['POST', '/assistant/s1/abort']]) {

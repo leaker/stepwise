@@ -5,6 +5,12 @@
 # ALLOWED_HOSTS=example.com
 # Enable the AI assistant in the editor (build test steps by chatting). Uses the Claude API.
 # ANTHROPIC_API_KEY=sk-ant-...
-# The assistant's budget for the whole deployment per 24 hours (defaults: 100 sessions, 20 USD estimated).
+# The model the assistant asks: claude-haiku-5-5 (default), claude-sonnet-5-5 or claude-opus-5-5.
+# ASSISTANT_MODEL=claude-haiku-5-5
+# The assistant's budget for the whole deployment per 24 hours (defaults: 100 sessions, 40 USD estimated).
+# Values here override the ones under "vars" in wrangler.jsonc for local development.
 # ASSISTANT_DAILY_SESSIONS=100
-# ASSISTANT_DAILY_BUDGET_USD=20
+# ASSISTANT_DAILY_BUDGET_USD=40
+# Local development only, for scripts/bench-assistant.mjs: lets a request to localhost choose the model of
+# one assistant session (X-Assistant-Model header). Never set this on a deployment.
+# ASSISTANT_DEV_OVERRIDE=1

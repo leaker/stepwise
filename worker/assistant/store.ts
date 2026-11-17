@@ -81,7 +81,7 @@ export async function sweepStaleSessions(db: D1Database, nowMs = Date.now()): Pr
 // ---- deployment-wide budget ----
 
 export const DEFAULT_DAILY_SESSIONS = 100
-export const DEFAULT_DAILY_BUDGET_USD = 20
+export const DEFAULT_DAILY_BUDGET_USD = 40
 export const DAY_MS = 24 * 60 * 60 * 1000
 
 const limitOf = (text: string | undefined, fallback: number): number => {

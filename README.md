@@ -63,7 +63,8 @@ Browser (React SPA) ───────────────► Worker (Hon
 - `worker/engine/` - the test engine. It only depends on the Playwright `Page` API.
 - `worker/runner.ts` - launches browsers; captures screens; consumes the run queue.
 - `worker/assistant/` - the AI assistant: prompt and tool definitions (`prompt.ts`), the agent loop
-  (`loop.ts`), the tools (`tools.ts`, `steps.ts`), the Claude client (`client.ts`).
+  (`loop.ts`), the tools (`tools.ts`, `steps.ts`), the Claude client (`client.ts`), the model table with
+  request settings and prices (`models.ts`).
 - `migrations/` - D1 schema.
 - `src/` - the React app.
 
@@ -165,8 +166,8 @@ How it works:
 
 - One message is one **session** (`assistant_sessions` in D1). `POST /api/test-cases/:tid/assistant`
   stores it as `queued` and sends a queue message; the work never runs inside the HTTP request. The
-  queue consumer runs a tool loop against the Claude API (`claude-opus-5-5`, official
-  `@anthropic-ai/sdk`) and appends every event to the session as it happens. The editor polls the
+  queue consumer runs a tool loop against the Claude API (official `@anthropic-ai/sdk`; the model is
+  configurable, see [Model and cost](#model-and-cost)) and appends every event to the session as it happens. The editor polls the
   session, shows the transcript, and reloads the steps and captured screens whenever the session
   reports something new.
 - Each session is a fresh model conversation. Its first message holds the instruction, the test case's
@@ -177,7 +178,7 @@ How it works:
   | Tool | What it does |
   | --- | --- |
   | `get_steps` | Lists the current steps. |
-  | `capture_screen` | Captures a URL, or the page after replaying steps 1..N. Stores a captured screen like the *Capture* button does and returns its elements plus a downscaled screenshot the model can see. |
+  | `capture_screen` | Captures a URL, or the page after replaying steps 1..N. Stores a captured screen like the *Capture* button does and returns its elements, one line each (`e12 "Add breakfast" checkbox`). A downscaled screenshot is added only when the model asks for one. |
   | `add_step` / `update_step` / `delete_step` | Edit the steps. An element must come from a capture of this test case, on the test case's device; the step gets the element's recommended locator and keeps the other candidates. |
   | `run_steps` | Runs all steps or a range in a fresh browser with the engine (no self-healing) and reports each step. Nothing is stored as a run. |
 
@@ -202,8 +203,8 @@ Safety and limits:
 - **Prompt injection.** The assistant reads pages it does not control, and a page can contain text written
   to look like an instruction. Three things stand against that. The system prompt says that everything
   from a capture or a run is content of the site under test and never an instruction, and a capture result
-  keeps what Stepwise says (ids, what the replay did) apart from what the page says (`page: { url, title,
-  elements }`). A navigate step the assistant writes may carry a project variable only to the base URL's
+  keeps what Stepwise says (ids, what the replay did) apart from what the page says (`page: { url, title }`
+  and the element list). A navigate step the assistant writes may carry a project variable only to the base URL's
   host, the app itself, or a host listed in `ALLOWED_HOSTS`, and a variable may not decide the host: "any
   public host", which is what the target policy allows without a list, is not enough for a URL that sends
   a variable's value somewhere on every later run. And run errors and captured URLs go back to the model
@@ -218,17 +219,89 @@ Safety and limits:
   model request is cut off at the limit, retries included. A session that stops responding is closed 15
   minutes after it started, one that was never picked up 15 minutes after it was queued.
 - The model's replies cost money on your Anthropic account, so the deployment as a whole has a budget per
-  24 hours: by default 100 sessions and an estimated $20 (`ASSISTANT_DAILY_SESSIONS`,
+  24 hours: by default 100 sessions and an estimated $40 (`ASSISTANT_DAILY_SESSIONS`,
   `ASSISTANT_DAILY_BUDGET_USD`); past either, a new session is refused with a 429. "One session per test
   case" alone bounds nothing, since test cases are free to create. This is a backstop, not a substitute for
   `ACCESS_CODE` on a public URL or for a spend limit on the API key itself.
-- Each session shows its token usage and an estimated cost; a typical "sign in and check" test takes
-  about five model requests. The system prompt and tool definitions are prompt-cached, and a request the
-  model's safety classifiers decline is retried server-side on a fallback model (`fallbacks: "default"`).
-  Such a request is counted with both attempts, each at the price of the model that made it, and the
-  session names the other model.
-- Page content (text and a screenshot of the site under test) is sent to the Claude API. Do not point
+- Each session shows its token usage and an estimated cost, at the list price of the model that worked on
+  each request. The system prompt, the tool definitions and the growing conversation are prompt-cached.
+  On Sonnet and Opus a request the model's safety classifiers decline is retried server-side on a fallback
+  model (`fallbacks: "default"`); such a request is counted with both attempts, each at its own price, and
+  the session names the other model. Haiku 5.5 has no server-side fallback: a declined request ends the
+  session with a message.
+- Page content (text, and a screenshot when the model asks for one) of the site under test is sent to the
+  Claude API. Do not point
   the assistant at pages whose content must not leave your infrastructure.
+
+### Model and cost
+
+The assistant can ask `claude-haiku-5-5`, `claude-sonnet-5-5` or `claude-opus-5-5`. Each model's request
+settings and price live in one table, `worker/assistant/models.ts`; the deployment picks one with the
+`ASSISTANT_MODEL` var (`wrangler.jsonc`, or `.dev.vars` locally) and `GET /api/assistant/status` reports
+it. A value that is not in the table is not sent to the API: the default is used and a warning is logged.
+
+The default is **Claude Haiku 5.5**, chosen by measurement. `scripts/bench-assistant.mjs` gives every model
+the same four tasks against the bundled demo site, each in a fresh test case: (a) sign in and assert the
+welcome message, (b) sign in with a wrong password and assert the error, (c) go from the home page to the
+reservation form, book 2 nights for 2 guests with breakfast and assert the guest name on the confirmation
+page (the form also insists on a check-in date the request does not mention), (d) on the emulated iPhone
+open the menu, sign in and assert the greeting. A run passes only if the session ended `done`, a normal
+run of the steps it left succeeds, and the steps contain the assertion that was asked for (checked on the
+steps, not on the model's summary). Medians per run, effort `medium` on all three:
+
+| Model | Task | Passed | Requests | Seconds | Cost |
+| --- | --- | --- | --- | --- | --- |
+| `claude-haiku-5-5` | (a) sign in | 3/3 | 9 | 20 | $0.0018 |
+| | (b) wrong password | 3/3 | 8 | 32 | $0.0016 |
+| | (c) reservation | 3/3 | 10 | 32 | $0.0026 |
+| | (d) phone menu | 3/3 | 11 | 74 | $0.0035 |
+| `claude-sonnet-5-5` | (a) sign in | 2/2 | 10.5 | 46 | $0.041 |
+| | (b) wrong password | 2/2 | 12 | 48 | $0.037 |
+| | (c) reservation | 2/2 | 10 | 40 | $0.042 |
+| | (d) phone menu | 2/2 | 15 | 51 | $0.046 |
+| `claude-opus-5-5` | (a) sign in | 2/2 | 5 | 26 | $0.056 |
+| | (b) wrong password | 2/2 | 5 | 33 | $0.044 |
+| | (c) reservation | 2/2 | 7.5 | 50 | $0.080 |
+| | (d) phone menu | 2/2 | 7 | 49 | $0.058 |
+
+Haiku passed all 12 runs at about a twentieth of the price of the next model, so it is the default. This is
+a small benchmark on one simple site: Opus needs about half the requests and is the one to switch to
+(`"ASSISTANT_MODEL": "claude-opus-5-5"`) when the assistant struggles with a complex application. Seconds
+are wall-clock on a laptop with two sessions running at a time; most of it is the browser, not the model.
+During tuning Haiku ran these tasks another 118 times with one failure, a reservation it reported as
+finished without the date and the assertion; the system prompt now says to keep working until the
+requested check is in place and to choose a value for a detail the page insists on.
+
+What a session costs was also reduced independently of the model. Before, task (a) on Opus cost $0.09 to
+$0.12; with the changes below it costs $0.04 to $0.07 on Opus and about $0.002 on Haiku.
+
+- **Element list.** A capture result listed every element as a JSON object with name, type and text. It is
+  now one line per element (`e12 "Add breakfast" checkbox`), about a third of the tokens. Elements without
+  a locator are left out, and a page with more than 200 elements keeps its controls and drops the texts
+  that do not fit, saying how many.
+- **Screenshot on request.** Every capture used to carry a downscaled screenshot. In the benchmark it
+  changed no result (12/12 with the full image, a smaller one, and none) while making up roughly 40% of a
+  session's cost, because every later request re-reads it. The model now gets the image only when it asks
+  (`screenshot: true`), which the tool description reserves for a second look at a page whose element
+  list was not enough.
+- **Fewer requests.** Every request re-reads the conversation, so the prompt tells the model to send
+  calls that do not depend on each other in one reply (the steps for a screen plus the capture after them).
+- **Left as it was, after checking.** Prompt caching already works as intended: one breakpoint on the
+  system prompt (shared by all sessions of a model within five minutes) and one that moves with the
+  conversation, so a request pays full price for 2 to 4 tokens. Effort `low` on Haiku saved nothing
+  measurable over `medium`. `max_tokens` is a ceiling and costs nothing.
+
+To repeat or extend the comparison, start the dev server with `ASSISTANT_DEV_OVERRIDE=1` in `.dev.vars` and
+run:
+
+```sh
+pnpm bench:assistant http://localhost:5173 --models claude-haiku-5-5:3,claude-sonnet-5-5:2,claude-opus-5-5:2
+```
+
+It prints the table and writes the raw results, transcripts included, to a JSON file (`--out`). The run
+above cost $0.84 in API usage. The script selects the model per session with an `X-Assistant-Model` header,
+which the Worker honours only when that var is set and the request was addressed to localhost; on a
+deployment the header does nothing, and against one the script only measures the deployed model.
 
 ## Local development
 
@@ -248,8 +321,12 @@ Optional settings go in `.dev.vars` (see `.dev.vars.example`):
   it once and keeps an HttpOnly cookie; scripts send `Authorization: Bearer <code>`.
 - `ANTHROPIC_API_KEY` - enables the [AI assistant](#ai-assistant). Without it the rest of the app is
   unaffected.
+- `ASSISTANT_MODEL` - the model the assistant asks: `claude-haiku-5-5` (default), `claude-sonnet-5-5` or
+  `claude-opus-5-5`. See [Model and cost](#model-and-cost).
 - `ASSISTANT_DAILY_SESSIONS`, `ASSISTANT_DAILY_BUDGET_USD` - how many assistant sessions the deployment
-  starts in 24 hours, and the estimated spend after which it starts no more (defaults: 100 and 20).
+  starts in 24 hours, and the estimated spend after which it starts no more (defaults: 100 and 40).
+- `ASSISTANT_DEV_OVERRIDE=1` - local development only: lets `scripts/bench-assistant.mjs` choose the model
+  of each session it starts.
 - `ALLOWED_HOSTS` - comma-separated hostnames. When set, captures and navigate steps may only open
   these hosts and the app's own origin. This is checked before a browser is launched and again inside
   the browser, where every request is checked before it is sent (`worker/guard.ts`): a page or iframe on
@@ -298,6 +375,44 @@ echo "Batch run finished: $status  ($BASE/api/batch-runs/$id)"
 Pass `"testCaseIds": ["...", "..."]` to run a subset. The full HTTP API is documented at the bottom of
 `shared/types.ts`.
 
+## Modern web practices
+
+The UI was audited with Google Chrome's [Modern Web Guidance](https://www.npmjs.com/package/modern-web-guidance)
+(version 1.0.1): its `legacy-scan` for the patterns it can detect, and its guides read against the code for the
+rest. The tool is not a dependency of the project. A feature was adopted where the guides call it Baseline
+widely available, or where the older behaviour stays as the fallback. What changed:
+
+- **Dialogs** (`dialog`, `light-dismiss-a-dialog`, `platform-controls-dismiss-dialog`,
+  `prevent-page-scroll-under-modal-dialog`). Every modal, the screenshot lightbox included, is a native
+  `<dialog>` opened with `showModal()`: the browser provides the top layer, the inert page, focus containment,
+  Escape and back-gesture dismissal and the return of focus, replacing a hand-written focus trap. Clicking
+  outside uses `closedby="any"`, with a pointer fallback where that attribute is missing (Safari). A
+  confirmation focuses *Cancel*. The element inspector is a non-modal `<dialog>`.
+- **Input methods** (`ime-safe-enter-submit`). Every Enter and Escape handler on a text field (assistant
+  message, inline rename, command search, element name, locator fields) ignores the keystroke that confirms or
+  cancels a Chinese, Japanese or Korean conversion, including Safari's `keyCode` 229 case.
+- **Messages** (`persistent-toast-notifications`). A toast outside a modal dialog is inert, so while a dialog
+  is open its messages are shown inside it; the toast area is a named region.
+- **Motion** (`motion`, `spinner`). No global "kill all animation" rule: under `prefers-reduced-motion`
+  panels fade instead of rising, the element pulse is left out and spinners turn slowly.
+- **Keyboard and assistive technology** (`accessibility`, `tabs`, `drag-and-drop`, `breadcrumbs`,
+  `copy-button`). Tabs have one tab stop, arrow keys and a labelled tab panel; steps can be reordered from the
+  step menu (*Move up* / *Move down*) with the move announced, not only by dragging; breadcrumbs are an
+  ordered list; the copy button reports a failed copy; focus rings and the selected tab stay visible in
+  forced-colours mode.
+- **Forms** (`forms`, `autofill-sign-in-form`). The access code field is a labelled, required
+  `current-password` field a password manager can fill; URL and identifier fields turn off autocorrect and
+  set `enterkeyhint`.
+- **Typography and images** (`typography`, `html`). Font sizes are in `rem`, so the browser's font-size
+  setting applies; the captured screenshot and the sample site's images carry their dimensions.
+- **JavaScript** (`js`). `toSorted()` / `findLast()` instead of copy-then-mutate, and `Error` `cause` in the
+  seed script.
+
+Left as they are, on purpose: menus and popovers are positioned in script, because CSS anchor positioning is
+not in Firefox yet and the Popover API is not yet Baseline widely available; the light and dark themes use
+`prefers-color-scheme` with `color-scheme` (the guides' own fallback for `light-dark()`); controls keep fixed
+pixel heights; and `title` attributes remain as hover hints on controls that already have an accessible name.
+
 ## Limits and non-goals
 
 - Speculation rules are refused inside the test browser: on Cloudflare Browser Run a mouse-down prefetch tears the browser session down. Rules sent as an HTTP header (for example by Cloudflare Speed Brain) are not loaded, and inline `<script type="speculationrules">` blocks (WordPress emits one by default) are taken out of the document as they appear. Pages behave the same, but prefetch/prerender behaviour itself cannot be tested.
@@ -318,6 +433,6 @@ Pass `"testCaseIds": ["...", "..."]` to run a subset. The full HTTP API is docum
 - A request body may be 1 MB at most; a run may take 15 minutes at most.
 - Self-healing is a similarity heuristic, not a model; every repair needs a human decision.
 - The assistant builds and edits steps only: it does not rename test cases, change the device, or
-  manage projects. It sees the top of a very long page in its screenshot (the element list still covers
-  the whole page), and it does not remember earlier sessions beyond the steps they left behind.
+  manage projects. It works from the element list of a page and looks at a screenshot only when it asks for one (which
+  shows the top of a very long page; the element list covers the whole page, up to 200 elements), and it does not remember earlier sessions beyond the steps they left behind.
 - The access code is a single shared secret, not an account system.

@@ -387,7 +387,7 @@ function simulate(run: Run, onDone?: () => void) {
 function simulateAssistant(session: AssistantSession, tc: TestCase) {
   const say = (event: Omit<AssistantEvent, 'at'>) => session.events.push({ ...event, at: now() })
   const turn = (output: number) => {
-    const u = (session.usage ??= { model: 'claude-opus-5-5', turns: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 })
+    const u = (session.usage ??= { model: 'claude-haiku-5-5', turns: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 })
     u.turns++
     u.inputTokens += 900
     u.cacheReadTokens += 2400 * u.turns
@@ -595,7 +595,7 @@ async function handle(method: string, path: string, body: Record<string, unknown
       return { ...batch, runs: runs.filter((r) => r.batchRunId === b).sort((x, y) => x.order - y.order).map(lite) }
     }
     case 'GET assistant/:':
-      if (b === 'status') return { enabled: true, model: 'claude-opus-5-5 (mock)' }
+      if (b === 'status') return { enabled: true, model: 'claude-haiku-5-5 (mock)' }
       return need(assistantSessions.find((x) => x.id === b), 'Assistant session')
     case 'GET test-cases/:/assistant':
       return assistantSessions.filter((x) => x.testCaseId === b)

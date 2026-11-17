@@ -104,7 +104,7 @@ export async function captureScreen(env: Env, input: CaptureInput, shared?: Brow
           shouldAbort: input.shouldAbort,
         })
         if (outcome.status === 'failed') {
-          const failed = [...outcome.results].reverse().find((r) => r.status === 'failed')
+          const failed = outcome.results.findLast((r) => r.status === 'failed')
           replayError = { stepId: failed?.stepId ?? lastStep.id, message: failed?.error ?? 'A step failed during the replay' }
         } else if (outcome.status === 'aborted') {
           const next = input.steps.slice(0, input.replayTo).find((s) => !s.disabled && !outcome.results.some((r) => r.stepId === s.id))
@@ -368,7 +368,7 @@ export async function handleQueue(batch: MessageBatch<QueueMessage>, env: Env): 
     let processed: Processed = 'done'
     try {
       const canRetry = message.attempts <= LAUNCH_RETRIES
-      if ('assistantSessionId' in body) await processAssistantSession(env, body.assistantSessionId, body.origin)
+      if ('assistantSessionId' in body) await processAssistantSession(env, body.assistantSessionId, body.origin, undefined, body.override)
       else processed = 'batchRunId' in body ? await processBatch(env, body.batchRunId, body.origin, canRetry) : await processSingle(env, body.runId, body.origin, canRetry)
     } catch (e) {
       console.error('queue message failed', body, e)
