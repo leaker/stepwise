@@ -4,6 +4,9 @@
   "main": "worker/index.ts",
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
+  "routes": [{ "pattern": "stepwise.keworks.dev", "custom_domain": true }],
+  "workers_dev": false,
+  "preview_urls": false,
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
@@ -11,7 +14,7 @@
   },
   "browser": { "binding": "BROWSER" },
   "d1_databases": [
-    { "binding": "DB", "database_name": "stepwise", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+    { "binding": "DB", "database_name": "stepwise", "database_id": "95974136-5029-4a3d-a0b0-a10838c406d5", "migrations_dir": "migrations" }
   ],
   "r2_buckets": [{ "binding": "SHOTS", "bucket_name": "stepwise-screenshots" }],
   "queues": {
