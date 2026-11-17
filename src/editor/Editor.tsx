@@ -187,7 +187,9 @@ function EditorInner({ tid }: { tid: string }) {
       setSelectedId(pickFor.id)
       setFocusId(pickFor.id)
     } else {
-      const step = newStep(DEFAULT_COMMAND[el.type] ?? 'click', { target })
+      const command = DEFAULT_COMMAND[el.type] ?? 'click'
+      // Text assertions start from what the screen showed at capture time, so the step is runnable as-is.
+      const step = newStep(command, command === 'assert_text_equals' ? { target, value: el.fingerprint.text } : { target })
       insertAt(insertIndex(), step)
       setFocusId(step.id)
     }
