@@ -1,7 +1,10 @@
 // Typed client for the Worker API documented at the bottom of shared/types.ts.
 import type {
+  AssistantSession,
+  AssistantStatus,
   BatchRun,
   CaptureRequest,
+  DeviceId,
   CaptureResponse,
   Project,
   Run,
@@ -79,7 +82,7 @@ export const api = {
   createTestCase: (pid: string, b: { name?: string; description?: string } = {}) =>
     post<TestCase>(`/projects/${pid}/test-cases`, b),
   testCase: (tid: string) => get<TestCase>(`/test-cases/${tid}`),
-  updateTestCase: (tid: string, b: { name?: string; description?: string; steps?: Step[] }) =>
+  updateTestCase: (tid: string, b: { name?: string; description?: string; device?: DeviceId; steps?: Step[] }) =>
     patch<TestCase>(`/test-cases/${tid}`, b),
   deleteTestCase: (tid: string) => del<{ ok: true }>(`/test-cases/${tid}`),
   duplicateTestCase: (tid: string) => post<TestCase>(`/test-cases/${tid}/duplicate`),
@@ -105,6 +108,11 @@ export const api = {
     }),
   batchRun: (bid: string) => get<BatchRun>(`/batch-runs/${bid}`),
   abortBatchRun: (bid: string) => post<BatchRun>(`/batch-runs/${bid}/abort`),
+
+  assistantStatus: () => get<AssistantStatus>('/assistant/status'),
+  assistantSessions: (tid: string) => get<AssistantSession[]>(`/test-cases/${tid}/assistant`),
+  askAssistant: (tid: string, message: string) => post<AssistantSession>(`/test-cases/${tid}/assistant`, { message }),
+  abortAssistant: (sid: string) => post<AssistantSession>(`/assistant/${sid}/abort`),
 }
 
 let shotResolver: (key: string) => string = (key) => `/api/shots/${encodeURIComponent(key)}`
@@ -126,4 +134,6 @@ export const qk = {
   runs: (tid: string) => ['test-case', tid, 'runs'] as const,
   run: (rid: string) => ['run', rid] as const,
   batchRun: (bid: string) => ['batch-run', bid] as const,
+  assistantStatus: ['assistant-status'] as const,
+  assistant: (tid: string) => ['test-case', tid, 'assistant'] as const,
 }

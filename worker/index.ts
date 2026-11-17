@@ -1,6 +1,7 @@
 // Stepwise Worker: JSON API under /api, the bundled demo site under /demo, and the run queue consumer.
 import { Hono } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
+import { assistant } from './api/assistant'
 import { projects } from './api/projects'
 import { runs } from './api/runs'
 import { testCases } from './api/testCases'
@@ -37,6 +38,7 @@ app.post('/api/session', postSession)
 app.route('/api', projects)
 app.route('/api', testCases)
 app.route('/api', runs)
+app.route('/api', assistant)
 
 // Screenshot keys contain slashes (ui/<id>.jpg, run/<runId>/<n>.jpg), hence the wildcard.
 app.get('/api/shots/*', async (c) => {

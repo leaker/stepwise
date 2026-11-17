@@ -4,7 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { stepSentence } from '../../shared/commands'
 import type { TestCase } from '../../shared/types'
 import { api, qk } from '../api'
-import { Empty, ErrorState, InlineEdit, Loading, Shell, StatusIcon } from '../components/ui'
+import { DeviceChip, Empty, ErrorState, InlineEdit, Loading, Shell, StatusIcon } from '../components/ui'
 import { dateTime, duration, isTerminal, plural, STATUS_LABEL } from '../lib/format'
 
 export function TestCasePage() {
@@ -39,6 +39,7 @@ export function TestCasePage() {
           <h1 className="title-row">
             <InlineEdit label="test case name" value={t.name} onSave={(name) => update.mutate({ name })} />
             <span className="hash">#{t.number}</span>
+            <DeviceChip device={t.device} />
           </h1>
           <div className="page-sub">
             <InlineEdit label="description" multiline value={t.description} placeholder="Add a description" onSave={(description) => update.mutate({ description })} />

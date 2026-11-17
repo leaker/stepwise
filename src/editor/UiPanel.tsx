@@ -9,6 +9,7 @@ import {
   Globe,
   ImageOff,
   Maximize2,
+  MonitorSmartphone,
   MousePointerClick,
   Pencil,
   Plus,
@@ -17,9 +18,10 @@ import {
   X,
 } from 'lucide-react'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { locatorToString, type Locator, type LocatorKey, type Step, type Ui, type UiElement } from '../../shared/types'
+import { deviceOf } from '../../shared/devices'
+import { locatorToString, type DeviceId, type Locator, type LocatorKey, type Step, type Ui, type UiElement } from '../../shared/types'
 import { api, qk, shotUrl } from '../api'
-import { Button, Confirm, Dialog, Field, IconButton, Menu, Popover, Spinner, type MenuItem } from '../components/ui'
+import { Button, Confirm, DeviceChip, Dialog, Field, IconButton, Menu, Popover, Spinner, type MenuItem } from '../components/ui'
 import { cx } from '../lib/format'
 import { sameLocator } from './model'
 
@@ -32,6 +34,8 @@ export interface Inspect {
 export interface UiPanelProps {
   tid: string
   baseUrl: string
+  /** The device the test case runs (and captures) on. */
+  device: DeviceId
   uis: Ui[]
   loading: boolean
   currentUiId: string | null
@@ -90,6 +94,8 @@ export function UiPanel(p: UiPanelProps) {
   const target = p.selectedStep?.target ?? null
   const targetHere = target && ui && target.uiId === ui.id ? target : null
   const targetUiGone = !!target && !p.uis.some((u) => u.id === target.uiId)
+  // A phone capture is shown at its own width inside a device frame; stretching it would misrepresent the screen.
+  const phone = !!ui && deviceOf(ui.device).isMobile
 
   // Draw big boxes first so small elements stay clickable on top of their containers.
   const ordered = useMemo(() => (ui ? [...ui.elements].sort((a, b) => b.box.w * b.box.h - a.box.w * a.box.h) : []), [ui])
@@ -140,15 +146,18 @@ export function UiPanel(p: UiPanelProps) {
             {ui.url}
           </span>
         )}
+        {ui && <DeviceChip device={ui.device} />}
         <span className="uip-gap" />
         {ui && (
           <>
             <IconButton label={overlays ? 'Hide element outlines' : 'Show element outlines'} active={overlays} onClick={() => setOverlays(!overlays)}>
               {overlays ? <Eye size={16} /> : <EyeOff size={16} />}
             </IconButton>
-            <IconButton label={fit ? 'Show at 100%' : 'Fit to panel width'} active={!fit} onClick={() => setFit(!fit)}>
-              {fit ? <Maximize2 size={15} /> : <Scan size={16} />}
-            </IconButton>
+            {!phone && (
+              <IconButton label={fit ? 'Show at 100%' : 'Fit to panel width'} active={!fit} onClick={() => setFit(!fit)}>
+                {fit ? <Maximize2 size={15} /> : <Scan size={16} />}
+              </IconButton>
+            )}
           </>
         )}
         {p.uis.length > 0 && (
@@ -187,6 +196,15 @@ export function UiPanel(p: UiPanelProps) {
           </IconButton>
         </div>
       )}
+      {ui && ui.device !== p.device && !p.capturing && (
+        <div className="banner banner-quiet">
+          <MonitorSmartphone size={16} />
+          <span>
+            This screen was captured on {deviceOf(ui.device).label}, and the test case now runs on {deviceOf(p.device).label}. The page may look different there; capture it again to pick elements from
+            the layout the test will see.
+          </span>
+        </div>
+      )}
       {targetUiGone && !p.pickFor && (
         <div className="banner banner-quiet">
           <ImageOff size={16} />
@@ -203,7 +221,7 @@ export function UiPanel(p: UiPanelProps) {
           <LaunchForm key={p.baseUrl} baseUrl={p.baseUrl} busy={!!p.capturing} onLaunch={p.onLaunch} hasSteps={p.steps.length > 0} />
         ) : (
           <div className="uip-scroll" ref={scrollRef}>
-            <div className={cx('uip-stage', p.pickFor && 'is-picking', !overlays && 'no-overlays')} style={fit ? { width: '100%' } : { width: ui.width }}>
+            <div className={cx('uip-stage', phone && 'is-phone', p.pickFor && 'is-picking', !overlays && 'no-overlays')} style={phone || !fit ? { width: ui.width } : { width: '100%' }}>
               <div className="uip-canvas" style={{ aspectRatio: `${ui.width} / ${ui.height}` }}>
                 <img key={ui.screenshotKey} src={shotUrl(ui.screenshotKey)} alt={`Screenshot of ${ui.title || ui.url}`} draggable={false} />
                 {ordered.map((el) => (
@@ -311,7 +329,9 @@ export function UiPanel(p: UiPanelProps) {
                         <span className="ui-item-url truncate" title={u.url}>
                           {u.url}
                         </span>
-                        <span className="ui-item-url">{u.elements.length} elements</span>
+                        <span className="ui-item-url">
+                          {u.elements.length} elements · {deviceOf(u.device).label}
+                        </span>
                       </span>
                     </button>
                     <IconButton label={`Rename ${u.name}`} onClick={() => setRenaming({ id: u.id, name: u.name })}>

@@ -4,9 +4,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useParams } from 'react-router-dom'
 import { stepSentence } from '../../shared/commands'
+import { deviceOf } from '../../shared/devices'
 import { locatorToString, type Box, type HealProposal, type Run, type StepResult, type Ui } from '../../shared/types'
 import { api, qk, shotUrl } from '../api'
-import { Button, Dialog, ErrorState, IconButton, Loading, Shell, Spinner, StatusIcon, Tabs } from '../components/ui'
+import { Button, DeviceChip, Dialog, ErrorState, IconButton, Loading, Shell, Spinner, StatusIcon, Tabs } from '../components/ui'
 import { cx, dateTime, duration, isTerminal, ms, STATUS_LABEL } from '../lib/format'
 import { useTick } from '../lib/hooks'
 
@@ -59,6 +60,7 @@ export function RunPage() {
             <div className="chips">
               <span className="chip num">{duration(r.startedAt, r.finishedAt)}</span>
               <span className="chip">{r.environment.browser}</span>
+              <DeviceChip device={r.environment.device} />
               <span className="chip num">
                 {r.environment.viewport.width} × {r.environment.viewport.height}
               </span>
@@ -228,6 +230,7 @@ function InfoTab({ run }: { run: Run }) {
     ['Status', STATUS_LABEL[run.status]],
     ['Test case', `${run.testCaseName} (#${run.testCaseNumber})`],
     ['Browser', run.environment.browser],
+    ['Device', `${deviceOf(run.environment.device).label}${deviceOf(run.environment.device).isMobile ? ' (emulated: phone viewport, user agent and touch)' : ''}`],
     ['Viewport', `${run.environment.viewport.width} × ${run.environment.viewport.height}`],
     ['Base URL', run.environment.baseUrl || '–'],
     ['Step range', run.range ? `${run.range.from}–${run.range.to} of ${run.steps.length}` : `All ${run.steps.length} steps`],

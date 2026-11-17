@@ -1,4 +1,4 @@
-import { COMMAND_BY_ID, COMMANDS, validateSteps, type CommandDef } from '../../shared/commands'
+import { COMMAND_BY_ID, COMMANDS, SWIPE_DIRECTIONS, validateSteps, type CommandDef } from '../../shared/commands'
 import type { CommandId, ElementRef, Locator, Step, Ui, UiElement } from '../../shared/types'
 import { uid } from '../lib/format'
 
@@ -19,6 +19,7 @@ export const ROW_PARTS: Record<CommandId, Part[]> = {
   input: [V, w('to'), T],
   select: [V, w('in'), T],
   press_key: [V],
+  swipe: [V],
   screenshot: [w('named'), V],
   comment: [V],
   assert_text_equals: [T, w('is'), V],
@@ -45,7 +46,7 @@ export const ROW_PARTS: Record<CommandId, Part[]> = {
 const NUMERIC: CommandId[] = ['wait_seconds', 'wait_visible']
 export const isNumeric = (c: CommandId) => NUMERIC.includes(c)
 
-const DEFAULT_VALUE: Partial<Record<CommandId, string>> = { wait_seconds: '1', wait_visible: '10', press_key: 'Enter' }
+const DEFAULT_VALUE: Partial<Record<CommandId, string>> = { wait_seconds: '1', wait_visible: '10', press_key: 'Enter', swipe: 'up' }
 
 export function newStep(command: CommandId, patch: Partial<Step> = {}): Step {
   const step: Step = { id: uid(), command, ...patch }
@@ -61,9 +62,9 @@ export function commandChoices(step: Step): CommandDef[] {
   return COMMANDS.filter((c) => !c.target)
 }
 
-/** What a command's value is: free text, a number of seconds, a key name, or nothing at all. */
-type ValueKind = 'none' | 'text' | 'seconds' | 'key'
-const valueKind = (command: CommandId): ValueKind => (!COMMAND_BY_ID[command]?.value ? 'none' : isNumeric(command) ? 'seconds' : command === 'press_key' ? 'key' : 'text')
+/** What a command's value is: free text, a number of seconds, a key name, a swipe direction, or nothing at all. */
+type ValueKind = 'none' | 'text' | 'seconds' | 'key' | 'direction'
+const valueKind = (command: CommandId): ValueKind => (!COMMAND_BY_ID[command]?.value ? 'none' : isNumeric(command) ? 'seconds' : command === 'press_key' ? 'key' : command === 'swipe' ? 'direction' : 'text')
 
 /** Parameters only carry over to a command that reads them the same way: a text is not a number of seconds. */
 export function changeCommand(step: Step, command: CommandId): Step {
@@ -91,6 +92,7 @@ function parameterError(s: Step): string | null {
   }
   if (s.command === 'navigate' && !value.trim()) return 'Enter the URL to open.'
   if (s.command === 'press_key' && !value.trim()) return 'Choose a key.'
+  if (s.command === 'swipe' && !value.includes('${') && !SWIPE_DIRECTIONS.includes(value.trim().toLowerCase())) return 'Choose a direction: up, down, left or right.'
   if (isNumeric(s.command) && !value.includes('${')) {
     // "Wait until visible" falls back to 10 s when left empty; a fixed wait needs a number.
     if (!value.trim()) return s.command === 'wait_seconds' ? 'Enter the number of seconds to wait.' : null

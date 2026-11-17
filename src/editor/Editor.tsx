@@ -1,18 +1,22 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Check, CloudAlert, ListPlus, Play, Plus, Redo2, Square, Undo2 } from 'lucide-react'
+import { ArrowLeft, Check, ChevronDown, CloudAlert, ListPlus, Play, Plus, Redo2, Sparkles, Square, Undo2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { COMMAND_BY_ID, DEFAULT_COMMAND, stepSentence } from '../../shared/commands'
-import type { CommandId, Step, StepResult, Ui, UiElement } from '../../shared/types'
+import { DEVICE_IDS, DEVICES, deviceOf } from '../../shared/devices'
+import type { AssistantSession, CommandId, DeviceId, Step, StepResult, Ui, UiElement } from '../../shared/types'
 import { api, qk } from '../api'
-import { Button, ErrorState, IconButton, Loading, Spinner, StatusIcon, toast, toastError } from '../components/ui'
+import { Button, Confirm, DeviceIcon, ErrorState, IconButton, Loading, MenuButton, Spinner, StatusIcon, toast, toastError } from '../components/ui'
 import { cx, isTerminal, STATUS_LABEL, uid } from '../lib/format'
+import { AssistantPanel } from './AssistantPanel'
 import { changeCommand, makeTarget, newStep, sameStep, stepErrors } from './model'
 import { CommandPalette, StepList } from './StepList'
 import { UiPanel, type Inspect } from './UiPanel'
 
 type SaveState = 'saved' | 'unsaved' | 'saving' | 'error'
 const SPLIT_KEY = 'stepwise.editor.split'
+const ASSISTANT_KEY = 'stepwise.editor.assistant'
+const isActiveSession = (s: AssistantSession) => s.status === 'queued' || s.status === 'running'
 
 export function Editor() {
   const { tid = '' } = useParams()
@@ -34,6 +38,8 @@ function EditorInner({ tid }: { tid: string }) {
   const hist = useRef<{ undo: Step[][]; redo: Step[][]; key: string | null }>({ undo: [], redo: [], key: null })
   const [saveState, setSaveState] = useState<SaveState>('saved')
   const save = useRef<{ dirty: boolean; timer: number; inflight: Promise<boolean> | null }>({ dirty: false, timer: 0, inflight: null })
+  // While the assistant edits the steps on the server, the editor only follows: nothing here may change or save them.
+  const lockedRef = useRef(false)
 
   useEffect(() => {
     if (ready || !tc.data || !tc.isFetchedAfterMount) return
@@ -82,6 +88,7 @@ function EditorInner({ tid }: { tid: string }) {
 
   const apply = useCallback(
     (next: Step[]) => {
+      if (lockedRef.current) return
       stepsRef.current = next
       setSteps(next)
       const s = save.current
@@ -96,6 +103,7 @@ function EditorInner({ tid }: { tid: string }) {
   /** Record an undo point and apply. Edits sharing a `coalesce` key (typing in one field) form one undo step. */
   const commit = useCallback(
     (next: Step[], coalesce?: string) => {
+      if (lockedRef.current) return
       const h = hist.current
       if (!coalesce || coalesce !== h.key) {
         h.undo.push(stepsRef.current)
@@ -108,6 +116,7 @@ function EditorInner({ tid }: { tid: string }) {
     [apply],
   )
   const undo = useCallback(() => {
+    if (lockedRef.current) return
     const h = hist.current
     const prev = h.undo.pop()
     if (!prev) return
@@ -116,6 +125,7 @@ function EditorInner({ tid }: { tid: string }) {
     apply(prev)
   }, [apply])
   const redo = useCallback(() => {
+    if (lockedRef.current) return
     const h = hist.current
     const next = h.redo.pop()
     if (!next) return
@@ -180,6 +190,7 @@ function EditorInner({ tid }: { tid: string }) {
 
   const insertAt = useCallback(
     (index: number, step: Step) => {
+      if (lockedRef.current) return
       const next = [...stepsRef.current]
       next.splice(index, 0, step)
       commit(next)
@@ -193,6 +204,10 @@ function EditorInner({ tid }: { tid: string }) {
   }
 
   const pickElement = (u: Ui, el: UiElement) => {
+    if (lockedRef.current) {
+      toast('The assistant is editing the steps. Wait for it to finish, or abort it.', 'error')
+      return
+    }
     const target = makeTarget(u, el)
     if (pickFor) {
       commit(stepsRef.current.map((s) => (s.id === pickFor.id ? { ...s, target } : s)))
@@ -228,6 +243,7 @@ function EditorInner({ tid }: { tid: string }) {
 
   const removeStep = useCallback(
     (id: string) => {
+      if (lockedRef.current) return
       const cur = stepsRef.current
       const i = cur.findIndex((s) => s.id === id)
       if (i < 0) return
@@ -288,8 +304,105 @@ function EditorInner({ tid }: { tid: string }) {
     if (failed) setSelectedId(failed.stepId)
   }, [finished?.id, finished?.status]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ----- assistant -----
+  const [assistantOpen, setAssistantOpen] = useState(() => {
+    try {
+      return localStorage.getItem(ASSISTANT_KEY) === '1'
+    } catch {
+      return false
+    }
+  })
+  const toggleAssistant = (open: boolean) => {
+    setAssistantOpen(open)
+    try {
+      localStorage.setItem(ASSISTANT_KEY, open ? '1' : '0')
+    } catch {
+      /* storage unavailable */
+    }
+  }
+  const assistantStatus = useQuery({ queryKey: qk.assistantStatus, queryFn: api.assistantStatus, staleTime: 60_000 })
+  const sessionsQuery = useQuery({
+    queryKey: qk.assistant(tid),
+    queryFn: () => api.assistantSessions(tid),
+    enabled: assistantStatus.data?.enabled === true,
+    staleTime: 0,
+    refetchInterval: (q) => (q.state.data?.some(isActiveSession) ? 1500 : false),
+  })
+  const sessions = useMemo(() => sessionsQuery.data ?? [], [sessionsQuery.data])
+  const activeSession = sessions.find(isActiveSession)
+  // The session whose edits the editor is following; it stays set until the final state has been loaded.
+  const [following, setFollowing] = useState<string | null>(null)
+  const beforeAssistant = useRef<Step[] | null>(null)
+  const ask = useMutation({
+    mutationFn: async (message: string) => {
+      if (!(await flush())) throw new Error('The steps could not be saved, so the assistant was not started.')
+      const before = stepsRef.current
+      const session = await api.askAssistant(tid, message)
+      beforeAssistant.current = before
+      return session
+    },
+    onSuccess: (session) => {
+      qc.setQueryData<AssistantSession[]>(qk.assistant(tid), (old) => [...(old ?? []).filter((s) => s.id !== session.id), session])
+      setFollowing(session.id)
+    },
+    onError: toastError,
+  })
+  const abortAssistant = useMutation({
+    mutationFn: (sid: string) => api.abortAssistant(sid),
+    onSuccess: (session) => qc.setQueryData<AssistantSession[]>(qk.assistant(tid), (old) => (old ?? []).map((s) => (s.id === session.id ? session : s))),
+    onError: toastError,
+  })
+  useEffect(() => {
+    if (activeSession) setFollowing(activeSession.id)
+  }, [activeSession?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  const locked = ask.isPending || !!activeSession || !!following
+  lockedRef.current = locked
+
+  // Whenever the followed session reports something new, load the steps and screens it left on the server.
+  const followed = sessions.find((s) => s.id === following)
+  const followedState = followed ? `${followed.events.length}:${followed.status}` : ''
+  const syncSeq = useRef(0)
+  useEffect(() => {
+    if (!followed) return
+    const ended = !isActiveSession(followed)
+    const seq = ++syncSeq.current
+    void (async () => {
+      try {
+        const [nextCase, nextUis] = await Promise.all([api.testCase(tid), api.uis(tid)])
+        if (seq !== syncSeq.current) return
+        const known = new Set(stepsRef.current.map((s) => s.id))
+        const added = nextCase.steps.filter((s) => !known.has(s.id))
+        const hadUis = qc.getQueryData<Ui[]>(qk.uis(tid))?.length ?? 0
+        qc.setQueryData(qk.testCase(tid), nextCase)
+        qc.setQueryData(qk.uis(tid), nextUis)
+        if (JSON.stringify(nextCase.steps) !== JSON.stringify(stepsRef.current)) {
+          stepsRef.current = nextCase.steps
+          setSteps(nextCase.steps)
+        }
+        // Selecting a row scrolls it into view: follow the newest step and the newest screen.
+        if (added.length) setSelectedId(added[added.length - 1].id)
+        if (nextUis.length > hadUis) setCurrentUiId(nextUis[nextUis.length - 1].id)
+      } catch (err) {
+        if (seq !== syncSeq.current) return
+        if (ended) toast(`The assistant finished, but its steps could not be loaded (${err instanceof Error ? err.message : 'unknown error'}). Reload the page before editing.`, 'error')
+      }
+      if (!ended || seq !== syncSeq.current) return
+      // One undo entry for the whole session: undo puts the steps back to what they were before it.
+      const before = beforeAssistant.current
+      beforeAssistant.current = null
+      if (before && JSON.stringify(before) !== JSON.stringify(stepsRef.current)) {
+        const h = hist.current
+        h.undo.push(before)
+        h.redo = []
+        h.key = null
+      }
+      setPickForId(null)
+      setFollowing(null)
+    })()
+  }, [following, followedState]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const enabledCount = steps.filter((s) => !s.disabled).length
-  const blocked = errors.size > 0 ? 'Fix the highlighted steps before running.' : enabledCount === 0 ? 'Add a step before running.' : null
+  const blocked = locked ? 'The assistant is editing the steps. Wait for it to finish, or abort it.' : errors.size > 0 ? 'Fix the highlighted steps before running.' : enabledCount === 0 ? 'Add a step before running.' : null
   const startRun = (range: { from: number; to: number } | null) => {
     if (running) return
     if (blocked) {
@@ -299,6 +412,27 @@ function EditorInner({ tid }: { tid: string }) {
       return
     }
     start.mutate(range)
+  }
+
+  // ----- device -----
+  const [pendingDevice, setPendingDevice] = useState<DeviceId | null>(null)
+  const setDevice = useMutation({
+    mutationFn: async (device: DeviceId) => {
+      if (!(await flush())) throw new Error('The steps could not be saved, so the device was not changed.')
+      return api.updateTestCase(tid, { device })
+    },
+    onSuccess: (next) => {
+      qc.setQueryData(qk.testCase(tid), next)
+      setPendingDevice(null)
+      toast(`This test case now runs on ${DEVICES[next.device].label}`)
+    },
+    onError: toastError,
+  })
+  const chooseDevice = (device: DeviceId) => {
+    if (device === tc.data?.device) return
+    // Screens captured on another device may show a different layout than the test will run on.
+    if (uis.some((u) => u.device !== device)) setPendingDevice(device)
+    else setDevice.mutate(device)
   }
 
   // ----- capture -----
@@ -455,6 +589,32 @@ function EditorInner({ tid }: { tid: string }) {
           <span className="ed-hash num">#{t.number}</span>
         </nav>
         <SaveBadge state={saveState} onRetry={() => void flush()} />
+        <MenuButton
+          className="ed-device"
+          label="Device this test case is captured and run on"
+          disabled={running || setDevice.isPending || locked}
+          items={DEVICE_IDS.map((id) => ({
+            label: DEVICES[id].label,
+            desc: `${DEVICES[id].viewport.width} × ${DEVICES[id].viewport.height}${DEVICES[id].isMobile ? ', emulated phone with touch' : ''}`,
+            icon: <DeviceIcon device={id} size={15} />,
+            checked: id === t.device,
+            onSelect: () => chooseDevice(id),
+          }))}
+        >
+          {setDevice.isPending ? <Spinner size={13} /> : <DeviceIcon device={t.device} size={14} />}
+          <span>{deviceOf(t.device).label}</span>
+          <ChevronDown size={13} />
+        </MenuButton>
+        <button
+          type="button"
+          className={cx('ed-device ed-asst-toggle', assistantOpen && 'is-active')}
+          aria-pressed={assistantOpen}
+          title={assistantOpen ? 'Close the assistant' : 'Build steps by describing the test'}
+          onClick={() => toggleAssistant(!assistantOpen)}
+        >
+          {locked ? <Spinner size={13} /> : <Sparkles size={14} />}
+          <span>Assistant</span>
+        </button>
         <span className="ed-gap" />
         <div className="ed-run" aria-live="polite">
           {runData ? (
@@ -500,7 +660,7 @@ function EditorInner({ tid }: { tid: string }) {
         )}
       </header>
 
-      <div className="ed-body" ref={bodyRef} style={{ gridTemplateColumns: `minmax(400px, ${split}%) 5px minmax(0, 1fr)` }}>
+      <div className="ed-body" ref={bodyRef} style={{ gridTemplateColumns: `minmax(400px, ${split}%) 5px minmax(0, 1fr)${assistantOpen ? ' 380px' : ''}` }}>
         <section className="ed-left" aria-label="Steps">
           <div className="ed-left-head">
             <h2>
@@ -508,14 +668,20 @@ function EditorInner({ tid }: { tid: string }) {
             </h2>
             {errors.size > 0 && <span className="ed-errcount">{errors.size} to fix</span>}
             <span className="ed-gap" />
-            <IconButton label="Undo (⌘Z)" disabled={hist.current.undo.length === 0} onClick={undo}>
+            <IconButton label="Undo (⌘Z)" disabled={locked || hist.current.undo.length === 0} onClick={undo}>
               <Undo2 size={16} />
             </IconButton>
-            <IconButton label="Redo (⇧⌘Z)" disabled={hist.current.redo.length === 0} onClick={redo}>
+            <IconButton label="Redo (⇧⌘Z)" disabled={locked || hist.current.redo.length === 0} onClick={redo}>
               <Redo2 size={16} />
             </IconButton>
           </div>
-          <div className="ed-left-scroll">
+          {locked && (
+            <div className="ed-locked" role="status">
+              <Sparkles size={14} aria-hidden />
+              <span>The assistant is editing the steps. They are read-only until it finishes.</span>
+            </div>
+          )}
+          <div className={cx('ed-left-scroll', locked && 'is-locked')} inert={locked}>
             {steps.length === 0 ? (
               <div className="steps-empty">
                 <ListPlus size={22} />
@@ -559,7 +725,7 @@ function EditorInner({ tid }: { tid: string }) {
             )}
           </div>
           <div className="ed-left-foot">
-            <Button icon={<Plus size={15} />} onClick={() => setPalette({ index: insertIndex() })}>
+            <Button icon={<Plus size={15} />} disabled={locked} onClick={() => setPalette({ index: insertIndex() })}>
               Add command
             </Button>
             <span className="muted truncate">or click an element on the screen</span>
@@ -571,6 +737,7 @@ function EditorInner({ tid }: { tid: string }) {
         <UiPanel
           tid={tid}
           baseUrl={project.data?.baseUrl ?? ''}
+          device={t.device}
           uis={uis}
           loading={uisQuery.isPending}
           currentUiId={ui?.id ?? null}
@@ -604,7 +771,36 @@ function EditorInner({ tid }: { tid: string }) {
             if (changed) commit(next)
           }}
         />
+
+        {assistantOpen && (
+          <AssistantPanel
+            status={assistantStatus.data}
+            sessions={sessions}
+            loading={assistantStatus.isPending || (assistantStatus.data?.enabled === true && sessionsQuery.isPending)}
+            sending={ask.isPending}
+            aborting={abortAssistant.isPending}
+            onSend={(message) => ask.mutate(message)}
+            onAbort={(sid) => abortAssistant.mutate(sid)}
+            onClose={() => toggleAssistant(false)}
+          />
+        )}
       </div>
+
+      {pendingDevice && (
+        <Confirm
+          title={`Switch to ${DEVICES[pendingDevice].label}?`}
+          confirmLabel={`Switch to ${DEVICES[pendingDevice].label}`}
+          busy={setDevice.isPending}
+          onConfirm={() => setDevice.mutate(pendingDevice)}
+          onClose={() => setPendingDevice(null)}
+        >
+          {(() => {
+            const others = uis.filter((u) => u.device !== pendingDevice)
+            const from = [...new Set(others.map((u) => DEVICES[u.device].label))].join(' and ')
+            return `${others.length === 1 ? 'One captured screen of this test case was' : `${others.length} captured screens of this test case were`} taken on ${from}. They are kept and stay marked with their device, but on ${DEVICES[pendingDevice].label} the page can be laid out differently, and elements can move or hide (for example behind a menu button). Capture the screens again before picking more elements, and run the test to check the existing steps.`
+          })()}
+        </Confirm>
+      )}
 
       {palette && (
         <CommandPalette

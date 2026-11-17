@@ -1,7 +1,10 @@
 // In-browser stand-in for the Worker API. Loaded only when VITE_MOCK is set (see main.tsx);
 // it exists so the UI can be exercised before, or without, the real backend.
 import { COMMAND_BY_ID, stepSentence } from '../../shared/commands'
+import { DEVICES } from '../../shared/devices'
 import type {
+  AssistantEvent,
+  AssistantSession,
   BatchRun,
   Box,
   CaptureRequest,
@@ -188,6 +191,7 @@ const cases: TestCase[] = []
 const uis: Ui[] = []
 const runs: Run[] = []
 const batches: BatchRun[] = []
+const assistantSessions: AssistantSession[] = []
 const counters = new Map<string, { tc: number; batch: number }>()
 
 function makeUi(tcId: string, page: PageSpec, name: string): Ui {
@@ -197,6 +201,7 @@ function makeUi(tcId: string, page: PageSpec, name: string): Ui {
     name,
     url: ORIGIN + page.path,
     title: page.title,
+    device: 'desktop',
     width: page.width,
     height: page.height,
     screenshotKey: page.key,
@@ -265,7 +270,7 @@ function makeRun(tc: TestCase, status: RunStatus, opts: { failAt?: number; healA
     steps,
     results,
     log: done ? logFor(results, status) : '',
-    environment: { browser: 'Chromium 142', viewport: { width: 1280, height: 800 }, baseUrl: ORIGIN },
+    environment: { browser: 'Chromium 142', device: tc.device, viewport: { ...DEVICES[tc.device].viewport }, baseUrl: ORIGIN },
     range: null,
     createdAt: started,
     startedAt: status === 'queued' ? null : started,
@@ -294,7 +299,7 @@ function seed() {
   counters.set(p.id, { tc: 4, batch: 3 })
   counters.set('p_empty', { tc: 1, batch: 1 })
 
-  const tc1: TestCase = { id: 'tc_signin', projectId: p.id, number: 1, name: 'Sign in with a valid account', description: 'Happy path: a registered customer signs in and lands on the catalog.', steps: [], createdAt: ago(5000), updatedAt: ago(40), lastRun: null }
+  const tc1: TestCase = { id: 'tc_signin', projectId: p.id, number: 1, name: 'Sign in with a valid account', description: 'Happy path: a registered customer signs in and lands on the catalog.', device: 'desktop', steps: [], createdAt: ago(5000), updatedAt: ago(40), lastRun: null }
   const login = makeUi(tc1.id, PAGES[0], 'Sign in page')
   const catalog = makeUi(tc1.id, PAGES[1], 'Catalog after sign-in')
   uis.push(login, catalog)
@@ -309,8 +314,8 @@ function seed() {
     { id: 's8', command: 'assert_url_contains', value: '/demo/catalog' },
     { id: 's9', command: 'comment', value: 'Cart checks live in test case #2', disabled: true },
   ]
-  const tc2: TestCase = { id: 'tc_cart', projectId: p.id, number: 2, name: 'Add a book to the cart', description: '', steps: [{ id: 'c1', command: 'navigate', value: '/demo/catalog' }, { id: 'c2', command: 'click', target: ref(catalog, 8) }, { id: 'c3', command: 'assert_text_contains', value: 'Cart (1)', target: ref(catalog, 2) }], createdAt: ago(4000), updatedAt: ago(90), lastRun: null }
-  const tc3: TestCase = { id: 'tc_new', projectId: p.id, number: 3, name: 'New test', description: '', steps: [], createdAt: ago(10), updatedAt: ago(10), lastRun: null }
+  const tc2: TestCase = { id: 'tc_cart', projectId: p.id, number: 2, name: 'Add a book to the cart', description: '', device: 'desktop', steps: [{ id: 'c1', command: 'navigate', value: '/demo/catalog' }, { id: 'c2', command: 'click', target: ref(catalog, 8) }, { id: 'c3', command: 'assert_text_contains', value: 'Cart (1)', target: ref(catalog, 2) }], createdAt: ago(4000), updatedAt: ago(90), lastRun: null }
+  const tc3: TestCase = { id: 'tc_new', projectId: p.id, number: 3, name: 'New test', description: '', device: 'desktop', steps: [], createdAt: ago(10), updatedAt: ago(10), lastRun: null }
   cases.push(tc1, tc2, tc3)
 
   makeRun(tc1, 'succeeded', { minutesAgo: 300 })
@@ -378,6 +383,58 @@ function simulate(run: Run, onDone?: () => void) {
   setTimeout(tick, 600)
 }
 
+/** A scripted assistant session: one capture, two steps, a trial run, a summary. Honours an abort between beats. */
+function simulateAssistant(session: AssistantSession, tc: TestCase) {
+  const say = (event: Omit<AssistantEvent, 'at'>) => session.events.push({ ...event, at: now() })
+  const turn = (output: number) => {
+    const u = (session.usage ??= { model: 'claude-opus-5-5', turns: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 })
+    u.turns++
+    u.inputTokens += 900
+    u.cacheReadTokens += 2400 * u.turns
+    u.outputTokens += output
+    u.costUsd = (u.inputTokens * 4 + u.cacheReadTokens * 0.2 + u.outputTokens * 20) / 1e6
+  }
+  let ui: Ui | undefined
+  const beats: (() => void)[] = [
+    () => {
+      session.status = 'running'
+    },
+    () => {
+      turn(120)
+      ui = makeUi(tc.id, PAGES[0], `UI${uis.filter((u) => u.testCaseId === tc.id).length + 1}`)
+      uis.push(ui)
+      say({ kind: 'tool', tool: 'capture_screen', text: `Captured screen of ${ui.url} (${ui.name}, ${ui.elements.length} elements)` })
+    },
+    () => {
+      turn(260)
+      if (tc.steps.length === 0) {
+        tc.steps = [{ id: id('st'), command: 'navigate', value: '${BASE_URL}/' }]
+        say({ kind: 'tool', tool: 'add_step', text: `Added step 1: ${stepSentence(tc.steps[0])}` })
+      }
+      const step: Step = { id: id('st'), command: 'click', target: ref(ui!, 0) }
+      tc.steps = [...tc.steps, step]
+      tc.updatedAt = now()
+      say({ kind: 'tool', tool: 'add_step', text: `Added step ${tc.steps.length}: ${stepSentence(step)}` })
+    },
+    () => {
+      turn(80)
+      say({ kind: 'tool', tool: 'run_steps', text: `Ran steps 1-${tc.steps.length}: all passed` })
+    },
+    () => {
+      turn(180)
+      say({ kind: 'assistant', text: `The test now has **${tc.steps.length} steps** and the trial run passed.\n\n- This is the mock assistant: it always adds a click on the first element of \`${ui!.name}\`.\n- Use undo to remove everything it added.` })
+      session.status = 'done'
+      session.finishedAt = now()
+    },
+  ]
+  const tick = () => {
+    if (session.status === 'aborted') return
+    beats.shift()?.()
+    if (beats.length) setTimeout(tick, 1300)
+  }
+  setTimeout(tick, 500)
+}
+
 // ---------- router ----------
 
 class HttpError extends Error {
@@ -430,7 +487,7 @@ async function handle(method: string, path: string, body: Record<string, unknown
       return cases.filter((x) => x.projectId === b).sort((x, y) => x.number - y.number)
     case 'POST projects/:/test-cases': {
       const ctr = need(counters.get(b), 'Project')
-      const tc: TestCase = { id: id('tc'), projectId: b, number: ctr.tc++, name: String(body.name ?? 'New test'), description: String(body.description ?? ''), steps: [], createdAt: now(), updatedAt: now(), lastRun: null }
+      const tc: TestCase = { id: id('tc'), projectId: b, number: ctr.tc++, name: String(body.name ?? 'New test'), description: String(body.description ?? ''), device: 'desktop', steps: [], createdAt: now(), updatedAt: now(), lastRun: null }
       cases.push(tc)
       return tc
     }
@@ -536,6 +593,30 @@ async function handle(method: string, path: string, body: Record<string, unknown
       const batch = need(batches.find((x) => x.id === b), 'Batch run')
       recount(batch)
       return { ...batch, runs: runs.filter((r) => r.batchRunId === b).sort((x, y) => x.order - y.order).map(lite) }
+    }
+    case 'GET assistant/:':
+      if (b === 'status') return { enabled: true, model: 'claude-opus-5-5 (mock)' }
+      return need(assistantSessions.find((x) => x.id === b), 'Assistant session')
+    case 'GET test-cases/:/assistant':
+      return assistantSessions.filter((x) => x.testCaseId === b)
+    case 'POST test-cases/:/assistant': {
+      const tc = need(cases.find((x) => x.id === b), 'Test case')
+      const message = typeof body.message === 'string' ? body.message.trim() : ''
+      if (!message) throw new HttpError(400, 'Describe what the test should do')
+      if (message.length > 2000) throw new HttpError(400, 'The message must be 2000 characters or fewer')
+      if (assistantSessions.some((x) => x.testCaseId === b && (x.status === 'queued' || x.status === 'running'))) throw new HttpError(409, 'The assistant is still working on this test case. Wait for it to finish, or abort it.')
+      const session: AssistantSession = { id: id('as'), testCaseId: tc.id, status: 'queued', events: [{ kind: 'user', text: message, at: now() }], usage: null, error: null, createdAt: now(), finishedAt: null }
+      assistantSessions.push(session)
+      simulateAssistant(session, tc)
+      return session
+    }
+    case 'POST assistant/:/abort': {
+      const session = need(assistantSessions.find((x) => x.id === b), 'Assistant session')
+      if (session.status === 'queued' || session.status === 'running') {
+        Object.assign(session, { status: 'aborted', finishedAt: now() })
+        session.events.push({ kind: 'error', text: 'Aborted. The steps built so far are kept.', at: now() })
+      }
+      return session
     }
     case 'POST batch-runs/:/abort': {
       const batch = need(batches.find((x) => x.id === b), 'Batch run')

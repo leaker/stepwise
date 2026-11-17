@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
-import type { Step } from '../../shared/types'
+import { DEFAULT_DEVICE, isDeviceId } from '../../shared/devices'
+import type { DeviceId, Step } from '../../shared/types'
 import { deleteShots, getProjectRow, getTestCaseRow, lastRunsFor, newId, now, resolveBaseUrl, sweepStaleRuns, toTestCase, toUi, type TestCaseRow, type UiRow } from '../db'
 import { HttpError, type Env } from '../env'
 import { captureScreen } from '../runner'
@@ -13,16 +14,22 @@ async function withLastRun(db: D1Database, row: TestCaseRow) {
 }
 
 /** Take the next sequential number of the project and insert the test case in one atomic batch. */
-async function insertTestCase(db: D1Database, projectId: string, fields: { name: string; description: string; steps: Step[] }): Promise<string> {
+async function insertTestCase(db: D1Database, projectId: string, fields: { name: string; description: string; device: string; steps: Step[] }): Promise<string> {
   const id = newId()
   const ts = now()
   await db.batch([
     db
-      .prepare('INSERT INTO test_cases (id, project_id, number, name, description, steps, created_at, updated_at) SELECT ?1, id, next_case_number, ?2, ?3, ?4, ?5, ?5 FROM projects WHERE id = ?6')
-      .bind(id, fields.name, fields.description, JSON.stringify(fields.steps), ts, projectId),
+      .prepare('INSERT INTO test_cases (id, project_id, number, name, description, steps, created_at, updated_at, device) SELECT ?1, id, next_case_number, ?2, ?3, ?4, ?5, ?5, ?7 FROM projects WHERE id = ?6')
+      .bind(id, fields.name, fields.description, JSON.stringify(fields.steps), ts, projectId, fields.device),
     db.prepare('UPDATE projects SET next_case_number = next_case_number + 1 WHERE id = ?').bind(projectId),
   ])
   return id
+}
+
+function optionalDevice(value: unknown): DeviceId | undefined {
+  if (value === undefined || value === null) return undefined
+  if (!isDeviceId(value)) throw new HttpError(400, "device must be 'desktop', 'iphone' or 'pixel'")
+  return value
 }
 
 testCases.get('/projects/:pid/test-cases', async (c) => {
@@ -42,7 +49,7 @@ testCases.post('/projects/:pid/test-cases', async (c) => {
   const body = await readBody(c.req)
   const name = body.name === undefined || body.name === null || body.name === '' ? 'New test' : requireName(body.name, 'Test case')
   const description = optionalText(body.description, 'description', 2000) ?? ''
-  const id = await insertTestCase(c.env.DB, pid, { name, description, steps: [] })
+  const id = await insertTestCase(c.env.DB, pid, { name, description, device: optionalDevice(body.device) ?? DEFAULT_DEVICE, steps: [] })
   return c.json(toTestCase(await getTestCaseRow(c.env.DB, id)), 201)
 })
 
@@ -58,8 +65,9 @@ testCases.patch('/test-cases/:tid', async (c) => {
   const body = await readBody(c.req)
   const name = body.name === undefined ? current.name : requireName(body.name, 'Test case')
   const description = optionalText(body.description, 'description', 2000) ?? current.description
+  const device = optionalDevice(body.device) ?? current.device
   const steps = body.steps === undefined ? current.steps : JSON.stringify(parseSteps(body.steps))
-  await c.env.DB.prepare('UPDATE test_cases SET name = ?, description = ?, steps = ?, updated_at = ? WHERE id = ?').bind(name, description, steps, now(), id).run()
+  await c.env.DB.prepare('UPDATE test_cases SET name = ?, description = ?, device = ?, steps = ?, updated_at = ? WHERE id = ?').bind(name, description, device, steps, now(), id).run()
   return c.json(await withLastRun(c.env.DB, await getTestCaseRow(c.env.DB, id)))
 })
 
@@ -95,11 +103,11 @@ testCases.post('/test-cases/:tid/duplicate', async (c) => {
     ...(s.target ? { target: { ...s.target, uiId: uiIds.get(s.target.uiId) ?? s.target.uiId } } : {}),
   }))
   const name = `${source.name} (copy)`.slice(0, 120)
-  const id = await insertTestCase(c.env.DB, source.project_id, { name, description: source.description, steps })
+  const id = await insertTestCase(c.env.DB, source.project_id, { name, description: source.description, device: source.device, steps })
   if (uis.length) {
     await c.env.DB.batch(
       uis.map((u) =>
-        c.env.DB.prepare('INSERT INTO uis (id, test_case_id, name, url, title, width, height, screenshot_key, elements, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(
+        c.env.DB.prepare('INSERT INTO uis (id, test_case_id, name, url, title, width, height, screenshot_key, elements, created_at, device) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(
           uiIds.get(u.id)!,
           id,
           u.name,
@@ -110,6 +118,7 @@ testCases.post('/test-cases/:tid/duplicate', async (c) => {
           u.screenshot_key,
           u.elements,
           u.created_at,
+          u.device,
         ),
       ),
     )

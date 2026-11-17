@@ -1059,3 +1059,308 @@ body.is-resizing .ed-resize {
   padding-left: 6px;
   font-size: 14px;
 }
+
+/* ---------- Devices ---------- */
+.ed-device {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--rail-2);
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--rail-ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.ed-device:hover:not(:disabled) {
+  background: var(--rail-2);
+}
+.ed-device:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.ed-device svg:last-child {
+  color: var(--rail-ink-2);
+}
+.uip-bar .device-chip {
+  flex-shrink: 0;
+}
+/* A phone capture keeps its own width (the stage's content box) inside a plain device frame. */
+.uip-stage.is-phone {
+  position: relative;
+  box-sizing: content-box;
+  max-width: calc(100% - 20px);
+  padding: 26px 10px 20px;
+  border-radius: 30px;
+  background: #1b2130;
+  box-shadow: 0 6px 20px rgb(22 27 38 / 0.18);
+}
+.uip-stage.is-phone::before {
+  content: '';
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  width: 56px;
+  height: 6px;
+  border-radius: 3px;
+  background: #39425a;
+  transform: translateX(-50%);
+}
+.uip-stage.is-phone .uip-canvas {
+  box-shadow: none;
+}
+
+/* ---------- Assistant ---------- */
+.ed-asst-toggle.is-active {
+  border-color: #6f86d6;
+  background: var(--rail-2);
+  color: #fff;
+}
+.ed-locked {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.ed-locked svg {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+.ed-left-scroll.is-locked .step {
+  opacity: 0.78;
+}
+.asst {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+}
+.asst-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  height: 40px;
+  padding: 0 6px 0 14px;
+  border-bottom: 1px solid var(--line);
+}
+.asst-head > svg {
+  color: var(--accent);
+}
+.asst-head h2 {
+  font-size: 14px;
+}
+.asst-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px;
+  background: var(--bg);
+}
+.asst-empty {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+  color: var(--ink-2);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.asst-empty strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+.asst-empty > svg {
+  color: var(--review);
+}
+.asst-cmd {
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  user-select: all;
+}
+.asst-chips {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  margin-top: 4px;
+}
+.asst-chip {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+.asst-chip:hover {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+.asst-log {
+  display: grid;
+  gap: 18px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.asst-session {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.asst-user {
+  justify-self: end;
+  max-width: 92%;
+  margin-bottom: 4px;
+  padding: 8px 11px;
+  border-radius: 10px 10px 2px 10px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 13.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.asst-text {
+  margin: 4px 0;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 2px 10px 10px 10px;
+  background: var(--surface);
+  font-size: 13.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.asst-text > * + * {
+  margin-top: 8px;
+}
+.asst-text ul,
+.asst-text ol {
+  padding-left: 20px;
+}
+.asst-text li + li {
+  margin-top: 3px;
+}
+.asst-text code,
+.asst-tool-text code {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.asst-tool {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.asst-tool-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 18px;
+  color: var(--ink-3);
+}
+.asst-tool-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.asst-tool.is-failed .asst-tool-icon,
+.asst-tool.is-failed .asst-tool-text {
+  color: var(--review);
+}
+.asst-tool-detail {
+  display: block;
+  color: var(--ink-3);
+}
+.asst-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--r-card);
+  background: var(--fail-soft);
+  color: var(--fail);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.asst-error svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.asst-usage {
+  margin-top: 2px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+.asst-working {
+  position: sticky;
+  bottom: -14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 14px -14px -14px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.asst-form {
+  flex-shrink: 0;
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+}
+.asst-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-control);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13.5px;
+  line-height: 1.45;
+  resize: none;
+}
+.asst-input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.asst-input:disabled {
+  background: var(--surface-2);
+}
+.asst-form-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}

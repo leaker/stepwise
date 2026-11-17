@@ -784,3 +784,12 @@ button.message:hover {
   font-size: 12.5px;
   min-width: 0;
 }
+
+.device-chip svg {
+  flex-shrink: 0;
+  color: var(--ink-3);
+}
+.title-row .device-chip {
+  align-self: center;
+  font-weight: 400;
+}

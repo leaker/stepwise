@@ -15,7 +15,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CATEGORIES, COMMAND_BY_ID, COMMANDS, KEYS, type Category, type CommandDef } from '../../shared/commands'
+import { CATEGORIES, COMMAND_BY_ID, COMMANDS, KEYS, SWIPE_DIRECTIONS, type Category, type CommandDef } from '../../shared/commands'
 import type { CommandId, Step, StepResult } from '../../shared/types'
 import { Dialog, Menu, StatusIcon, type Anchor, type MenuItem } from '../components/ui'
 import { cx } from '../lib/format'
@@ -301,6 +301,25 @@ function StepRow(p: RowProps) {
                   {keys.map((k) => (
                     <option key={k} value={k}>
                       {k}
+                    </option>
+                  ))}
+                </select>
+              )
+            }
+            if (step.command === 'swipe') {
+              const directions = step.value && !SWIPE_DIRECTIONS.includes(step.value) ? [step.value, ...SWIPE_DIRECTIONS] : SWIPE_DIRECTIONS
+              return (
+                <select
+                  key={i}
+                  className="step-input step-key"
+                  aria-label="Direction"
+                  title="The direction the finger moves: swiping up shows what is further down the page"
+                  value={step.value ?? 'up'}
+                  onChange={(e) => p.onChange({ value: e.target.value })}
+                >
+                  {directions.map((d) => (
+                    <option key={d} value={d}>
+                      {d}
                     </option>
                   ))}
                 </select>

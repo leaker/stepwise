@@ -1,9 +1,13 @@
-// Everything that drives a real browser: UI capture and the queue consumer that executes runs.
+// Everything that drives a real browser: UI capture, trial runs, and the queue consumer that executes
+// runs and assistant sessions.
 import { launch, type Browser, type BrowserContext } from '@cloudflare/playwright'
+import { deviceOf, type DeviceProfile } from '../shared/devices'
+import { makePreview, type Preview } from './assistant/preview'
+import { processAssistantSession } from './assistant/session'
 import type { CaptureResponse, RunStatus, Step, StepResult, Ui } from '../shared/types'
 import { deleteShots, getProjectRow, newId, now, refreshBatchRun, toProject, toUi, type RunRow, type TestCaseRow, type UiRow } from './db'
 import { captureUi, runSteps, type RunOutcome } from './engine'
-import { errorMessage, HttpError, VIEWPORT, type Env, type QueueMessage } from './env'
+import { errorMessage, HttpError, type Env, type QueueMessage } from './env'
 import { guardContext, type Guard } from './guard'
 
 /** Browser Run refused or failed to start a session (concurrency / rate limits, an outage). Not a test failure. */
@@ -21,10 +25,38 @@ async function openBrowser(env: Env): Promise<Browser> {
   }
 }
 
-/** Every browser context enforces the target policy; see guard.ts. */
-async function newGuardedContext(browser: Browser, env: Env, appOrigin: string): Promise<{ context: BrowserContext; guard: Guard }> {
-  const context = await browser.newContext({ viewport: { ...VIEWPORT } })
+/** A context emulates the test case's device, and every context enforces the target policy; see guard.ts. */
+async function newGuardedContext(browser: Browser, env: Env, appOrigin: string, device: DeviceProfile): Promise<{ context: BrowserContext; guard: Guard }> {
+  const context = await browser.newContext({
+    viewport: { ...device.viewport },
+    isMobile: device.isMobile,
+    hasTouch: device.hasTouch,
+    deviceScaleFactor: device.deviceScaleFactor,
+    ...(device.userAgent ? { userAgent: device.userAgent } : {}),
+  })
   return { context, guard: await guardContext(context, env, appOrigin) }
+}
+
+/**
+ * One browser for a piece of work that needs it now and then (an assistant session): started on first
+ * use and again when it went away in between (Browser Run closes a session that sits idle).
+ */
+export interface BrowserLease {
+  get(): Promise<Browser>
+  close(): Promise<void>
+}
+
+export function leaseBrowser(env: Env): BrowserLease {
+  let browser: Browser | undefined
+  return {
+    get: async () => {
+      if (!browser?.isConnected()) browser = await openBrowser(env)
+      return browser
+    },
+    close: async () => {
+      await browser?.close().catch(() => {})
+    },
+  }
 }
 
 // ---- capture ----
@@ -38,12 +70,19 @@ export interface CaptureInput {
   replayTo: number | null
   url: URL | null
   appOrigin: string
+  /** Also return a downscaled copy of the screenshot. */
+  preview?: boolean
 }
 
-export async function captureScreen(env: Env, input: CaptureInput): Promise<CaptureResponse> {
-  const browser = await openBrowser(env)
+/** `shared`: use this browser and leave it open (the capture gets its own context); otherwise one is started for the capture. */
+export async function captureScreen(env: Env, input: CaptureInput, shared?: Browser): Promise<CaptureResponse & { preview?: Preview }> {
+  const device = deviceOf(input.testCase.device)
+  const browser = shared ?? (await openBrowser(env))
+  let context: BrowserContext | undefined
   try {
-    const { context, guard } = await newGuardedContext(browser, env, input.appOrigin)
+    const guarded = await newGuardedContext(browser, env, input.appOrigin, device)
+    context = guarded.context
+    const guard = guarded.guard
     const page = await context.newPage()
     let replayError: CaptureResponse['replayError']
 
@@ -53,6 +92,8 @@ export async function captureScreen(env: Env, input: CaptureInput): Promise<Capt
         const outcome = await runSteps(page, input.steps, {
           baseUrl: input.baseUrl,
           variables: input.variables,
+          device: device.id,
+          touch: device.hasTouch,
           heal: false,
           waitSeconds: 5,
           range: { from: 1, to: input.replayTo },
@@ -79,6 +120,7 @@ export async function captureScreen(env: Env, input: CaptureInput): Promise<Capt
     }
 
     const capture = await captureUi(page)
+    const preview = input.preview ? await makePreview(context, capture.screenshot) : undefined
     const id = newId()
     const screenshotKey = `ui/${id}.jpg`
     await env.SHOTS.put(screenshotKey, capture.screenshot, { httpMetadata: { contentType: 'image/jpeg' } })
@@ -93,12 +135,13 @@ export async function captureScreen(env: Env, input: CaptureInput): Promise<Capt
       width: Math.round(capture.width),
       height: Math.round(capture.height),
       screenshot_key: screenshotKey,
+      device: device.id,
       elements: JSON.stringify(capture.elements),
       created_at: now(),
     }
     try {
-      await env.DB.prepare('INSERT INTO uis (id, test_case_id, name, url, title, width, height, screenshot_key, elements, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        .bind(row.id, row.test_case_id, row.name, row.url, row.title, row.width, row.height, row.screenshot_key, row.elements, row.created_at)
+      await env.DB.prepare('INSERT INTO uis (id, test_case_id, name, url, title, width, height, screenshot_key, elements, created_at, device) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .bind(row.id, row.test_case_id, row.name, row.url, row.title, row.width, row.height, row.screenshot_key, row.elements, row.created_at, row.device)
         .run()
     } catch (e) {
       // The screenshot would be an orphan: nothing points at it.
@@ -109,9 +152,45 @@ export async function captureScreen(env: Env, input: CaptureInput): Promise<Capt
       throw e
     }
     const ui: Ui = toUi(row)
-    return replayError ? { ui, replayError } : { ui }
+    return { ui, ...(replayError ? { replayError } : {}), ...(preview ? { preview } : {}) }
   } finally {
-    await browser.close().catch(() => {})
+    if (shared) await context?.close().catch(() => {})
+    else await browser.close().catch(() => {})
+  }
+}
+
+// ---- trial runs (the assistant checking its own work) ----
+
+export interface TrialInput {
+  device: DeviceProfile
+  steps: Step[]
+  baseUrl: string
+  variables: Record<string, string>
+  range: { from: number; to: number } | null
+  appOrigin: string
+  shouldAbort(): Promise<boolean>
+}
+
+/** Run steps the way a single run does (same waits, no self-healing), but keep nothing: no Run row, no screenshots. */
+export async function trialRun(env: Env, browser: Browser, input: TrialInput): Promise<RunOutcome> {
+  const { context, guard } = await newGuardedContext(browser, env, input.appOrigin, input.device)
+  try {
+    const page = await context.newPage()
+    return await runSteps(page, input.steps, {
+      baseUrl: input.baseUrl,
+      variables: input.variables,
+      device: input.device.id,
+      touch: input.device.hasTouch,
+      heal: false,
+      range: input.range,
+      replaySetup: true,
+      waitSeconds: 10,
+      saveShot: async () => '',
+      takeBlockedNavigation: guard.takeBlockedNavigation,
+      shouldAbort: input.shouldAbort,
+    })
+  } finally {
+    await context.close().catch(() => {})
   }
 }
 
@@ -147,21 +226,22 @@ async function executeRun(env: Env, browser: Browser, runId: string, heal: boole
     if (!run) return
     const steps = JSON.parse(run.steps ?? '[]') as Step[]
     const range = run.range ? (JSON.parse(run.range) as { from: number; to: number }) : null
-    const environment = JSON.parse(run.environment) as { baseUrl?: string }
+    const environment = JSON.parse(run.environment) as { baseUrl?: string; device?: string }
+    const device = deviceOf(environment.device)
     const project = toProject(await getProjectRow(env.DB, run.project_id), appOrigin)
     const baseUrl = environment.baseUrl ?? project.baseUrl
 
     header = [
       `Run ${run.id} - test case #${run.test_case_number} ${run.test_case_name}`,
       `Environment: Cloudflare Browser Run`,
-      `Platform: Chrome (${VIEWPORT.width}x${VIEWPORT.height})`,
+      `Platform: Chrome (${device.viewport.width}x${device.viewport.height}${device.isMobile ? `, ${device.label} emulation` : ''})`,
       `Base URL: ${baseUrl || '(none)'}`,
       `Self-healing: ${heal ? 'on' : 'off'}${range ? `, steps ${range.from}-${range.to}${range.from > 1 ? ` (steps 1-${range.from - 1} are replayed first as set-up)` : ''}` : ''}`,
       `Started: ${startedAt}`,
     ].join('\n')
     await env.DB.prepare("UPDATE runs SET log = ? WHERE id = ? AND status = 'running'").bind(header, runId).run()
 
-    const guarded = await newGuardedContext(browser, env, appOrigin)
+    const guarded = await newGuardedContext(browser, env, appOrigin, device)
     context = guarded.context
     const page = await context.newPage()
     let shot = 0
@@ -172,6 +252,8 @@ async function executeRun(env: Env, browser: Browser, runId: string, heal: boole
       outcome = await runSteps(page, steps, {
         baseUrl,
         variables: project.variables,
+        device: device.id,
+        touch: device.hasTouch,
         heal,
         range,
         replaySetup: true,
@@ -280,7 +362,8 @@ export async function handleQueue(batch: MessageBatch<QueueMessage>, env: Env): 
     let processed: Processed = 'done'
     try {
       const canRetry = message.attempts <= LAUNCH_RETRIES
-      processed = 'batchRunId' in body ? await processBatch(env, body.batchRunId, body.origin, canRetry) : await processSingle(env, body.runId, body.origin, canRetry)
+      if ('assistantSessionId' in body) await processAssistantSession(env, body.assistantSessionId, body.origin)
+      else processed = 'batchRunId' in body ? await processBatch(env, body.batchRunId, body.origin, canRetry) : await processSingle(env, body.runId, body.origin, canRetry)
     } catch (e) {
       console.error('queue message failed', body, e)
     }

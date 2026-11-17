@@ -1,5 +1,7 @@
-# Copy to .dev.vars for local development. Both are optional.
+# Copy to .dev.vars for local development. All are optional.
 # Require this code for the whole API (cookie login in the UI, "Authorization: Bearer <code>" for CI).
 # ACCESS_CODE=change-me
 # Only allow captures / navigate steps to these hostnames (the app's own origin is always allowed).
 # ALLOWED_HOSTS=example.com
+# Enable the AI assistant in the editor (build test steps by chatting). Uses the Claude API.
+# ANTHROPIC_API_KEY=sk-ant-...

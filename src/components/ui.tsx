@@ -7,6 +7,8 @@ import {
   CircleMinus,
   CircleX,
   Loader2,
+  Monitor,
+  Smartphone,
   Wrench,
   X,
 } from 'lucide-react'
@@ -24,7 +26,8 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
-import type { RunStatus, StepStatus } from '../../shared/types'
+import { deviceOf } from '../../shared/devices'
+import type { DeviceId, RunStatus, StepStatus } from '../../shared/types'
 import { cx, STATUS_LABEL } from '../lib/format'
 
 // ---------- Buttons ----------
@@ -110,6 +113,21 @@ export function StatusText({ status }: { status: RunStatus }) {
 }
 
 // ---------- Page scaffolding ----------
+
+export function DeviceIcon({ device, size = 13 }: { device: DeviceId; size?: number }) {
+  return deviceOf(device).isMobile ? <Smartphone size={size} aria-hidden /> : <Monitor size={size} aria-hidden />
+}
+
+/** Which device profile something was captured or run on. */
+export function DeviceChip({ device }: { device: DeviceId }) {
+  const d = deviceOf(device)
+  return (
+    <span className="chip device-chip" title={`${d.label}, ${d.viewport.width} × ${d.viewport.height}${d.isMobile ? ' (emulated phone, touch)' : ''}`}>
+      <DeviceIcon device={d.id} />
+      {d.label}
+    </span>
+  )
+}
 
 export function Logo() {
   return (

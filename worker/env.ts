@@ -10,12 +10,12 @@ export interface Env {
   ACCESS_CODE?: string
   /** Optional comma-separated hostnames that captures and navigate steps may open. */
   ALLOWED_HOSTS?: string
+  /** Optional secret. When set, the AI assistant is available (worker/assistant). */
+  ANTHROPIC_API_KEY?: string
 }
 
 /** `origin` is the app's own origin at enqueue time; it is always an allowed navigation target. */
-export type QueueMessage = { runId: string; origin: string } | { batchRunId: string; origin: string }
-
-export const VIEWPORT = { width: 1280, height: 800 } as const
+export type QueueMessage = { runId: string; origin: string } | { batchRunId: string; origin: string } | { assistantSessionId: string; origin: string }
 
 export class HttpError extends Error {
   readonly status: 400 | 401 | 404 | 409 | 502 | 503

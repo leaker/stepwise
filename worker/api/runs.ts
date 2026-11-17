@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { validateSteps } from '../../shared/commands'
 import type { BatchRun, RunStatus, Step, StepResult, UiElement } from '../../shared/types'
 import {
+  environmentOf,
   getBatchRunRow,
   getProjectRow,
   getRunRow,
@@ -20,15 +21,13 @@ import {
   type RunRow,
   type TestCaseRow,
 } from '../db'
-import { HttpError, VIEWPORT, type Env } from '../env'
+import { HttpError, type Env } from '../env'
 import { assertNavigateTargetsAllowed, readBody } from '../validate'
 
 export const runs = new Hono<{ Bindings: Env }>()
 
 const INSERT_RUN =
   'INSERT INTO runs (id, project_id, test_case_id, test_case_number, test_case_name, batch_run_id, run_order, status, steps, environment, range, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-
-const environmentOf = (baseUrl: string) => JSON.stringify({ browser: 'chrome', viewport: { ...VIEWPORT }, baseUrl })
 
 function parseRange(value: unknown, stepCount: number): { from: number; to: number } | null {
   if (value === undefined || value === null) return null
@@ -66,7 +65,7 @@ runs.post('/test-cases/:tid/runs', async (c) => {
 
   const id = newId()
   await c.env.DB.prepare(INSERT_RUN)
-    .bind(id, project.id, testCase.id, testCase.number, testCase.name, null, 0, 'queued', testCase.steps, environmentOf(baseUrl), range ? JSON.stringify(range) : null, now())
+    .bind(id, project.id, testCase.id, testCase.number, testCase.name, null, 0, 'queued', testCase.steps, JSON.stringify(environmentOf(baseUrl, testCase.device)), range ? JSON.stringify(range) : null, now())
     .run()
   try {
     await c.env.RUN_QUEUE.send({ runId: id, origin })
@@ -245,11 +244,10 @@ runs.post('/projects/:pid/batch-runs', async (c) => {
 
   const id = newId()
   const ts = now()
-  const environment = environmentOf(baseUrl)
   await c.env.DB.batch([
     c.env.DB.prepare('INSERT INTO batch_runs (id, project_id, number, status, trigger, created_at) SELECT ?, id, next_batch_number, ?, ?, ? FROM projects WHERE id = ?').bind(id, 'queued', trigger, ts, project.id),
     c.env.DB.prepare('UPDATE projects SET next_batch_number = next_batch_number + 1 WHERE id = ?').bind(project.id),
-    ...selected.map((t, i) => c.env.DB.prepare(INSERT_RUN).bind(newId(), project.id, t.id, t.number, t.name, id, i + 1, 'queued', t.steps, environment, null, ts)),
+    ...selected.map((t, i) => c.env.DB.prepare(INSERT_RUN).bind(newId(), project.id, t.id, t.number, t.name, id, i + 1, 'queued', t.steps, JSON.stringify(environmentOf(baseUrl, t.device)), null, ts)),
   ])
   try {
     await c.env.RUN_QUEUE.send({ batchRunId: id, origin })

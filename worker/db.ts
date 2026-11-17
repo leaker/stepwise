@@ -1,4 +1,5 @@
 // D1 access helpers: row <-> shared type mapping and the queries used by more than one route.
+import { DEVICES, deviceOf } from '../shared/devices'
 import type { BatchRun, Project, Run, RunStatus, Step, StepResult, TestCase, Ui, UiElement } from '../shared/types'
 import { HttpError } from './env'
 
@@ -35,6 +36,7 @@ export interface TestCaseRow {
   number: number
   name: string
   description: string
+  device: string
   steps: string
   created_at: string
   updated_at: string
@@ -49,6 +51,7 @@ export interface UiRow {
   width: number
   height: number
   screenshot_key: string
+  device: string
   elements: string
   created_at: string
 }
@@ -113,6 +116,7 @@ export function toTestCase(r: TestCaseRow, lastRun: TestCase['lastRun'] = null):
     number: r.number,
     name: r.name,
     description: r.description,
+    device: deviceOf(r.device).id,
     steps: parseJson<Step[]>(r.steps, []),
     createdAt: r.created_at,
     updatedAt: r.updated_at,
@@ -130,12 +134,25 @@ export function toUi(r: UiRow): Ui {
     width: r.width,
     height: r.height,
     screenshotKey: r.screenshot_key,
+    device: deviceOf(r.device).id,
     elements: parseJson<UiElement[]>(r.elements, []),
     createdAt: r.created_at,
   }
 }
 
-const DEFAULT_ENVIRONMENT: Run['environment'] = { browser: 'chrome', viewport: { width: 1280, height: 800 }, baseUrl: '' }
+const DEFAULT_ENVIRONMENT: Run['environment'] = { browser: 'chrome', device: 'desktop', viewport: { ...DEVICES.desktop.viewport }, baseUrl: '' }
+
+/** What a run records about where it runs. */
+export function environmentOf(baseUrl: string, device: unknown): Run['environment'] {
+  const profile = deviceOf(device)
+  return { browser: 'chrome', device: profile.id, viewport: { ...profile.viewport }, baseUrl }
+}
+
+/** Runs queued before device profiles existed have no `device`: they were desktop runs. */
+function toEnvironment(text: string): Run['environment'] {
+  const stored = parseJson<Partial<Run['environment']>>(text, {})
+  return { ...DEFAULT_ENVIRONMENT, ...stored, device: deviceOf(stored.device).id }
+}
 
 export function toRunSummary(r: RunRow): Omit<Run, 'steps' | 'log'> {
   return {
@@ -148,7 +165,7 @@ export function toRunSummary(r: RunRow): Omit<Run, 'steps' | 'log'> {
     order: r.run_order,
     status: r.status as RunStatus,
     results: parseJson<StepResult[]>(r.results, []),
-    environment: parseJson<Run['environment']>(r.environment, DEFAULT_ENVIRONMENT),
+    environment: toEnvironment(r.environment),
     range: parseJson<Run['range']>(r.range, null),
     createdAt: r.created_at,
     startedAt: r.started_at,

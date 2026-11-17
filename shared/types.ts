@@ -54,6 +54,9 @@ export interface UiElement {
   fingerprint: Fingerprint
 }
 
+/** Where a test case runs: the desktop browser or an emulated phone. Profiles are in shared/devices.ts. */
+export type DeviceId = 'desktop' | 'iphone' | 'pixel'
+
 /** A captured screen: screenshot + detected elements. */
 export interface Ui {
   id: string
@@ -65,6 +68,8 @@ export interface Ui {
   width: number
   height: number
   screenshotKey: string
+  /** The device the screen was captured on. */
+  device: DeviceId
   elements: UiElement[]
   createdAt: string
 }
@@ -85,6 +90,7 @@ export type CommandId =
   | 'hover'
   | 'input'
   | 'press_key'
+  | 'swipe'
   | 'check'
   | 'uncheck'
   | 'select'
@@ -147,6 +153,8 @@ export interface TestCase {
   number: number
   name: string
   description: string
+  /** Device profile captures and runs of this test case use. */
+  device: DeviceId
   steps: Step[]
   createdAt: string
   updatedAt: string
@@ -203,7 +211,8 @@ export interface Run {
   results: StepResult[]
   /** Console-style log, newline separated. */
   log: string
-  environment: { browser: string; viewport: { width: number; height: number }; baseUrl: string }
+  /** As it was when the run was queued. `device` is the test case's device profile at that time. */
+  environment: { browser: string; device: DeviceId; viewport: { width: number; height: number }; baseUrl: string }
   /** Inclusive 1-based step range for partial runs. The steps before it are replayed as set-up and not reported unless one fails. */
   range: { from: number; to: number } | null
   createdAt: string
@@ -240,9 +249,9 @@ export interface BatchRun {
 // DELETE /api/projects/:pid                    -> { ok: true }
 //
 // GET    /api/projects/:pid/test-cases         -> TestCase[] (ordered by number)
-// POST   /api/projects/:pid/test-cases { name?, description? } -> TestCase
+// POST   /api/projects/:pid/test-cases { name?, description?, device? } -> TestCase
 // GET    /api/test-cases/:tid                  -> TestCase
-// PATCH  /api/test-cases/:tid { name?, description?, steps? } -> TestCase
+// PATCH  /api/test-cases/:tid { name?, description?, device?, steps? } -> TestCase
 // DELETE /api/test-cases/:tid                  -> { ok: true }
 // POST   /api/test-cases/:tid/duplicate        -> TestCase
 //
@@ -263,6 +272,14 @@ export interface BatchRun {
 // POST   /api/batch-runs/:bid/abort            -> BatchRun
 //
 // GET    /api/shots/:key                       -> image/jpeg
+//
+// AI assistant (optional; needs the ANTHROPIC_API_KEY secret, otherwise every route but status is a 503):
+// GET    /api/assistant/status                 -> AssistantStatus
+// POST   /api/test-cases/:tid/assistant { message } -> AssistantSession (status queued)
+//          400 when message is empty or over 2000 characters, 409 while another session of the test case is queued or running
+// GET    /api/test-cases/:tid/assistant        -> AssistantSession[] (oldest first)
+// GET    /api/assistant/:sid                   -> AssistantSession
+// POST   /api/assistant/:sid/abort             -> AssistantSession
 
 export interface CaptureRequest {
   /**
@@ -277,4 +294,58 @@ export interface CaptureResponse {
   ui: Ui
   /** Set when the replay stopped early because a step failed; the capture shows the page at that point. */
   replayError?: { stepId: string; message: string }
+}
+
+// ---- AI assistant ----
+
+export interface AssistantStatus {
+  /** False when the deployment has no ANTHROPIC_API_KEY. */
+  enabled: boolean
+  model: string
+}
+
+export type AssistantSessionStatus = 'queued' | 'running' | 'done' | 'failed' | 'aborted'
+
+/** Tools the assistant can call; see worker/assistant/prompt.ts. */
+export type AssistantToolName = 'get_steps' | 'capture_screen' | 'add_step' | 'update_step' | 'delete_step' | 'run_steps'
+
+/** One line of a session's transcript. */
+export interface AssistantEvent {
+  /** `user`: the instruction. `assistant`: text the model wrote. `tool`: something it did. `error`: why the session stopped early. */
+  kind: 'user' | 'assistant' | 'tool' | 'error'
+  /** Markdown for `assistant`; a plain sentence otherwise, e.g. `Added step 4: Click "Sign in" button`. */
+  text: string
+  at: string
+  /** More about a tool event, e.g. the error of the step that failed. */
+  detail?: string
+  /** `tool` events: which tool, and whether the call was rejected or its run failed. */
+  tool?: AssistantToolName
+  failed?: boolean
+}
+
+export interface AssistantUsage {
+  model: string
+  /** Model requests made so far. */
+  turns: number
+  /** Tokens that were not read from the prompt cache. */
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  /** Estimate from the list price of `model`. */
+  costUsd: number
+}
+
+/** One instruction to the assistant and everything it did for it. */
+export interface AssistantSession {
+  id: string
+  testCaseId: string
+  status: AssistantSessionStatus
+  /** Grows while the session is queued or running. */
+  events: AssistantEvent[]
+  usage: AssistantUsage | null
+  /** Why the session failed. */
+  error: string | null
+  createdAt: string
+  finishedAt: string | null
 }

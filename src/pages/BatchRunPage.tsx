@@ -3,7 +3,7 @@ import { ChevronRight, Square } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import type { RunStatus } from '../../shared/types'
 import { api, qk } from '../api'
-import { Button, Empty, ErrorState, Loading, Shell, StatusIcon } from '../components/ui'
+import { Button, DeviceChip, Empty, ErrorState, Loading, Shell, StatusIcon } from '../components/ui'
 import { clock, dateTime, isTerminal, STATUS_LABEL } from '../lib/format'
 import { useTick } from '../lib/hooks'
 
@@ -95,6 +95,7 @@ export function BatchRunPage() {
                 <th className="col-fit">Status</th>
                 <th className="col-fit">#</th>
                 <th>Test case</th>
+                <th className="col-fit">Device</th>
                 <th className="col-fit">Duration</th>
                 <th className="col-fit">Started</th>
                 <th className="col-fit" />
@@ -117,6 +118,9 @@ export function BatchRunPage() {
                       </Link>
                       <span className="hash">#{r.testCaseNumber}</span>
                     </div>
+                  </td>
+                  <td className="col-fit">
+                    <DeviceChip device={r.environment.device} />
                   </td>
                   <td className="col-fit num">{clock(r.startedAt, r.finishedAt)}</td>
                   <td className="col-fit num">{dateTime(r.startedAt)}</td>

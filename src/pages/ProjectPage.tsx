@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import type { BatchRun, Project, TestCase } from '../../shared/types'
 import { api, qk } from '../api'
-import { Button, Confirm, Empty, ErrorState, Field, IconButton, Loading, MenuButton, Shell, StatusIcon, Tabs, toast } from '../components/ui'
+import { Button, Confirm, DeviceChip, Empty, ErrorState, Field, IconButton, Loading, MenuButton, Shell, StatusIcon, Tabs, toast } from '../components/ui'
 import { clock, dateTime, isTerminal, plural, STATUS_LABEL } from '../lib/format'
 
 type TabId = 'cases' | 'batches' | 'settings'
@@ -141,6 +141,7 @@ function TestCasesTab({ pid, cases }: { pid: string; cases: TestCase[] }) {
                 />
               </th>
               <th>Name</th>
+              <th className="col-fit">Device</th>
               <th className="col-fit">Steps</th>
               <th className="col-fit">Last run</th>
               <th className="col-fit" />
@@ -164,6 +165,9 @@ function TestCasesTab({ pid, cases }: { pid: string; cases: TestCase[] }) {
                       {c.description}
                     </div>
                   )}
+                </td>
+                <td className="col-fit">
+                  <DeviceChip device={c.device} />
                 </td>
                 <td className="col-fit num">{c.steps.length}</td>
                 <td className="col-fit">
