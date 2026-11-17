@@ -42,12 +42,14 @@ export function ProjectPage() {
           { id: 'batches', label: 'Batch runs', count: batches.data?.length ?? p.batchRunCount ?? 0 },
           { id: 'settings', label: 'Settings' },
         ]}
-      />
+        label="Project sections"
+      >
       {tab === 'cases' &&
         (cases.isPending ? <Loading /> : cases.isError ? <ErrorState error={cases.error} onRetry={() => cases.refetch()} /> : <TestCasesTab pid={pid} cases={cases.data} />)}
       {tab === 'batches' &&
         (batches.isPending ? <Loading /> : batches.isError ? <ErrorState error={batches.error} onRetry={() => batches.refetch()} /> : <BatchRunsTab batches={batches.data} />)}
       {tab === 'settings' && <SettingsTab key={p.id} project={p} />}
+      </Tabs>
     </Shell>
   )
 }
@@ -297,7 +299,8 @@ function SettingsTab({ project }: { project: Project }) {
   const [description, setDescription] = useState(project.description)
   const [baseUrl, setBaseUrl] = useState(project.baseUrl)
   const [rows, setRows] = useState<VarRow[]>(() => toRows(project.variables))
-  const [copied, setCopied] = useState(false)
+  // What the last copy did, for a moment: shown on the button and announced to screen readers.
+  const [copied, setCopied] = useState<{ ok: boolean; n: number } | null>(null)
 
   const names = rows.map((r) => r.name.trim()).filter(Boolean)
   const badRow = rows.find((r) => r.name.trim() && !VAR_NAME.test(r.name.trim()))
@@ -331,7 +334,7 @@ function SettingsTab({ project }: { project: Project }) {
   const curl = `curl -X POST "${location.origin}/api/projects/${project.id}/batch-runs" \\\n  -H "content-type: application/json" \\\n  -d '{"trigger":"api"}'`
   useEffect(() => {
     if (!copied) return
-    const t = window.setTimeout(() => setCopied(false), 1500)
+    const t = window.setTimeout(() => setCopied(null), 1500)
     return () => window.clearTimeout(t)
   }, [copied])
 
@@ -411,13 +414,20 @@ function SettingsTab({ project }: { project: Project }) {
           <pre>{curl}</pre>
           <Button
             size="sm"
-            icon={copied ? <Check size={14} /> : <Copy size={14} />}
+            icon={copied?.ok ? <Check size={14} /> : <Copy size={14} />}
             onClick={() => {
-              void navigator.clipboard.writeText(curl).then(() => setCopied(true))
+              // Clipboard access can be denied; say so instead of failing silently. A new object restarts the timer.
+              navigator.clipboard.writeText(curl).then(
+                () => setCopied((c) => ({ ok: true, n: (c?.n ?? 0) + 1 })),
+                () => setCopied((c) => ({ ok: false, n: (c?.n ?? 0) + 1 })),
+              )
             }}
           >
-            {copied ? 'Copied' : 'Copy'}
+            {copied ? (copied.ok ? 'Copied' : 'Copy failed') : 'Copy'}
           </Button>
+          <span className="sr-only" role="status">
+            {copied ? (copied.ok ? 'Copied' : 'Copy failed') : ''}
+          </span>
         </div>
       </section>
     </div>

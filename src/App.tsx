@@ -53,23 +53,31 @@ function AccessGate({ children }: { children: ReactNode }) {
         <Logo />
         <h1>Enter the access code</h1>
         <p className="muted">This workspace is private. Ask whoever shared the link for its code.</p>
+        <label className="sr-only" htmlFor="access-code">
+          Access code
+        </label>
         <input
           className="input"
           type="password"
+          id="access-code"
+          name="access-code"
           autoFocus
-          autoComplete="off"
-          aria-label="Access code"
+          required
+          // The code is this workspace's password: let the browser's password manager save and fill it.
+          autoComplete="current-password"
+          enterKeyHint="go"
           placeholder="Access code"
           value={code}
           onChange={(e) => setCode(e.target.value)}
           aria-invalid={signIn.isError}
+          aria-describedby={signIn.isError ? 'access-code-error' : undefined}
         />
         {signIn.isError && (
-          <p className="gate-error" role="alert">
+          <p className="gate-error" id="access-code-error" role="alert">
             {signIn.error instanceof ApiError && signIn.error.status === 401 ? 'That code is not correct.' : signIn.error.message}
           </p>
         )}
-        <Button type="submit" variant="primary" icon={<KeyRound size={16} />} busy={signIn.isPending} disabled={!code.trim()}>
+        <Button type="submit" variant="primary" icon={<KeyRound size={16} />} busy={signIn.isPending} >
           Open workspace
         </Button>
       </form>

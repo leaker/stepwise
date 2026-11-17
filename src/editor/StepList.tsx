@@ -1,5 +1,7 @@
 import {
+  ArrowDown,
   ArrowDownToLine,
+  ArrowUp,
   ArrowUpToLine,
   Ban,
   ChevronDown,
@@ -17,8 +19,9 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { CATEGORIES, COMMAND_BY_ID, COMMANDS, KEYS, SWIPE_DIRECTIONS, type Category, type CommandDef } from '../../shared/commands'
 import type { CommandId, Step, StepResult } from '../../shared/types'
-import { Dialog, Menu, StatusIcon, type Anchor, type MenuItem } from '../components/ui'
+import { Dialog, Menu, onTablistKeyDown, StatusIcon, type Anchor, type MenuItem } from '../components/ui'
 import { cx } from '../lib/format'
+import { isComposing } from '../lib/hooks'
 import { commandChoices, isNumeric, ROW_PARTS, stepDepths } from './model'
 
 export interface StepListProps {
@@ -70,6 +73,14 @@ export function StepList(p: StepListProps) {
     return rows.length
   }
 
+  // Announced to screen readers, which do not see a row change places.
+  const [moved, setMoved] = useState('')
+  const move = (step: Step, toIndex: number) => {
+    p.onMove(step.id, toIndex)
+    const at = toIndex > p.steps.indexOf(step) ? toIndex : toIndex + 1
+    setMoved(`Step moved to position ${at} of ${p.steps.length}.`)
+  }
+
   const menuStep = menu ? p.steps.find((s) => s.id === menu.id) : undefined
   const menuIndex = menuStep ? p.steps.indexOf(menuStep) : -1
   const menuItems: MenuItem[] = menuStep
@@ -77,6 +88,9 @@ export function StepList(p: StepListProps) {
         { label: 'Insert command above', icon: <ArrowUpToLine size={15} />, onSelect: () => p.onInsert(menuIndex) },
         { label: 'Insert command below', icon: <ArrowDownToLine size={15} />, onSelect: () => p.onInsert(menuIndex + 1) },
         { type: 'separator' },
+        // The keyboard and screen reader way to reorder; dragging the grip does the same with a pointer.
+        { label: 'Move up', icon: <ArrowUp size={15} />, disabled: menuIndex === 0, onSelect: () => move(menuStep, menuIndex - 1) },
+        { label: 'Move down', icon: <ArrowDown size={15} />, disabled: menuIndex === p.steps.length - 1, onSelect: () => move(menuStep, menuIndex + 2) },
         { label: 'Duplicate', icon: <CopyPlus size={15} />, onSelect: () => p.onDuplicate(menuStep.id) },
         {
           label: menuStep.disabled ? 'Enable' : 'Disable',
@@ -123,6 +137,7 @@ export function StepList(p: StepListProps) {
   }, [cmdStep, p])
 
   return (
+    <>
     <div
       ref={listRef}
       className="steps"
@@ -178,6 +193,10 @@ export function StepList(p: StepListProps) {
       {menu && menuStep && <Menu anchor={menu.anchor} items={menuItems} onClose={() => setMenu(null)} />}
       {cmdMenu && cmdStep && <Menu anchor={cmdMenu.anchor} items={cmdItems} onClose={() => setCmdMenu(null)} />}
     </div>
+    <span className="sr-only" role="status">
+      {moved}
+    </span>
+    </>
   )
 }
 
@@ -404,8 +423,10 @@ export function CommandPalette({ onPick, onClose, position }: { onPick: (id: Com
           } else if (e.key === 'ArrowUp') {
             e.preventDefault()
             setActive(Math.max(0, current - 1))
-          } else if (e.key === 'Enter' && list[current]) {
+          } else if (e.key === 'Enter' && list[current] && !(e.target as HTMLElement).closest('[role="tab"]')) {
             e.preventDefault()
+            // Not the Enter that confirms an input method's conversion in the search field.
+            if (isComposing(e)) return
             onPick(list[current].id)
           }
         }}
@@ -416,6 +437,11 @@ export function CommandPalette({ onPick, onClose, position }: { onPick: (id: Com
             data-autofocus
             aria-label="Search commands"
             placeholder="Search commands"
+            enterKeyHint="search"
+            autoComplete="off"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
             value={query}
             onChange={(e) => {
               setQuery(e.target.value)
@@ -423,13 +449,14 @@ export function CommandPalette({ onPick, onClose, position }: { onPick: (id: Com
             }}
           />
         </div>
-        <div className="palette-tabs" role="tablist">
+        <div className="palette-tabs" role="tablist" aria-label="Command categories" onKeyDown={onTablistKeyDown}>
           {(['All', ...CATEGORIES] as PaletteTab[]).map((t) => (
             <button
               key={t}
               type="button"
               role="tab"
               aria-selected={!q && t === tab}
+              tabIndex={t === tab ? 0 : -1}
               className={cx('palette-tab', !q && t === tab && 'is-active')}
               onClick={() => {
                 setTab(t)

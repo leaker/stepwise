@@ -76,7 +76,7 @@ body.is-resizing {
   border: 0;
   background: none;
   color: var(--rail-ink-2);
-  font-size: 13px;
+  font-size: 0.8125rem;
   white-space: nowrap;
 }
 .ed-save.is-unsaved {
@@ -100,7 +100,7 @@ body.is-resizing {
   align-items: center;
   gap: 12px;
   min-width: 0;
-  font-size: 13.5px;
+  font-size: 0.84375rem;
 }
 .ed-run-status {
   display: inline-flex;
@@ -206,7 +206,7 @@ body.is-resizing {
   border-bottom: 1px solid var(--line);
 }
 .ed-left-head h2 {
-  font-size: 14px;
+  font-size: 0.875rem;
 }
 .ed-left-head h2 .num {
   margin-left: 4px;
@@ -217,7 +217,7 @@ body.is-resizing {
   border-radius: 9px;
   background: var(--review-soft);
   color: var(--review);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   font-weight: 500;
 }
 .ed-left-scroll {
@@ -235,7 +235,7 @@ body.is-resizing {
   flex-shrink: 0;
   padding: 8px 12px;
   border-top: 1px solid var(--line);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .ed-resize {
   position: relative;
@@ -300,7 +300,7 @@ body.is-resizing .ed-resize {
   background: var(--rail);
   color: var(--rail-ink);
   text-align: right;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 500;
   line-height: 20px;
   /* The rail hides the row's bottom border so it reads as one continuous strip. */
@@ -482,12 +482,12 @@ body.is-resizing .ed-resize {
   border-radius: 9px;
   background: var(--surface-3);
   color: var(--ink-2);
-  font-size: 12px;
+  font-size: 0.75rem;
   white-space: nowrap;
 }
 .step-msg {
   margin: 2px 0 4px;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
@@ -573,7 +573,7 @@ body.is-resizing .ed-resize {
   border-radius: 13px;
   background: none;
   color: var(--ink-2);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .palette-tab:hover {
   background: var(--surface-2);
@@ -618,12 +618,12 @@ body.is-resizing .ed-resize {
   align-items: center;
   gap: 4px;
   color: var(--ink-3);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
 }
 .palette-cat {
   margin-left: auto;
   color: var(--ink-3);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   white-space: nowrap;
 }
 .palette-empty {
@@ -687,7 +687,7 @@ body.is-resizing .ed-resize {
 .uip-picker-count {
   color: var(--ink-3);
   font-weight: 400;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   white-space: nowrap;
 }
 .uip-picker svg {
@@ -698,7 +698,7 @@ body.is-resizing .ed-resize {
   flex: 0 1 auto;
   min-width: 0;
   color: var(--ink-3);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
 }
 .split-btn {
   display: inline-flex;
@@ -757,7 +757,7 @@ body.is-resizing .ed-resize {
   border-radius: var(--r-card);
   background: var(--rail);
   color: var(--rail-ink);
-  font-size: 13px;
+  font-size: 0.8125rem;
   white-space: nowrap;
 }
 
@@ -797,7 +797,10 @@ body.is-resizing .ed-resize {
   outline: 2px solid #e0241b;
   outline-offset: 1px;
   background: rgb(224 36 27 / 0.08);
-  animation: el-pulse 0.7s ease-out 3;
+  /* The outline marks the target either way; the pulse is extra and is left out under reduced motion. */
+  @media (prefers-reduced-motion: no-preference) {
+    animation: el-pulse 0.7s ease-out 3;
+  }
 }
 .el-box.is-ghost {
   outline-style: dashed;
@@ -813,7 +816,7 @@ body.is-resizing .ed-resize {
   padding-bottom: 5px;
   white-space: nowrap;
   cursor: default;
-  font: 500 12.5px/1 var(--font-sans);
+  font: 500 0.78125rem/1 var(--font-sans);
 }
 .el-tip.is-below {
   top: 100%;
@@ -887,7 +890,7 @@ body.is-resizing .ed-resize {
 }
 .uip-progress-card p {
   margin-top: 2px;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .uip-progress-time {
   min-width: 36px;
@@ -901,7 +904,7 @@ body.is-resizing .ed-resize {
   padding: 24px;
 }
 .launch h2 {
-  font-size: 19px;
+  font-size: 1.1875rem;
   letter-spacing: -0.01em;
 }
 .launch > p {
@@ -919,7 +922,7 @@ body.is-resizing .ed-resize {
   height: 36px;
 }
 .launch .launch-hint {
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--ink-3);
 }
 /* A small staircase: the product's mark, drawn from three outlined "elements". */
@@ -961,7 +964,16 @@ body.is-resizing .ed-resize {
   border: 1px solid var(--line);
   border-radius: var(--r-card);
   box-shadow: var(--shadow-pop);
-  animation: rise 0.12s ease-out;
+  animation: fade 0.12s ease-out;
+  /* It is a non-modal <dialog>; these undo the browser's dialog defaults. */
+  left: auto;
+  height: auto;
+  margin: 0;
+  padding: 0;
+  color: inherit;
+  @media (prefers-reduced-motion: no-preference) {
+    animation-name: rise;
+  }
 }
 .inspector.is-left {
   right: auto;
@@ -992,7 +1004,7 @@ body.is-resizing .ed-resize {
   margin: 0;
 }
 .inspector-note {
-  font-size: 12.5px;
+  font-size: 0.78125rem;
 }
 .locator-btn {
   display: flex;
@@ -1087,7 +1099,7 @@ body.is-resizing .ed-resize {
 }
 .ui-item-url {
   color: var(--ink-3);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
 }
 .ui-rename {
   flex: 1;
@@ -1104,7 +1116,7 @@ body.is-resizing .ed-resize {
 
 .uip-title {
   padding-left: 6px;
-  font-size: 14px;
+  font-size: 0.875rem;
 }
 
 /* ---------- Devices ---------- */
@@ -1120,7 +1132,7 @@ body.is-resizing .ed-resize {
   background: transparent;
   color: var(--rail-ink);
   font: inherit;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 500;
   cursor: pointer;
 }
@@ -1177,7 +1189,7 @@ body.is-resizing .ed-resize {
   border-bottom: 1px solid var(--accent-line);
   background: var(--accent-soft);
   color: var(--ink-2);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .ed-locked svg {
   flex-shrink: 0;
@@ -1218,7 +1230,7 @@ body.is-resizing .ed-resize {
   color: var(--accent);
 }
 .asst-head h2 {
-  font-size: 14px;
+  font-size: 0.875rem;
 }
 .asst-scroll {
   flex: 1;
@@ -1232,7 +1244,7 @@ body.is-resizing .ed-resize {
   gap: 10px;
   justify-items: start;
   color: var(--ink-2);
-  font-size: 13.5px;
+  font-size: 0.84375rem;
   line-height: 1.5;
 }
 .asst-empty strong {
@@ -1249,7 +1261,7 @@ body.is-resizing .ed-resize {
   background: var(--surface);
   color: var(--ink);
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   user-select: all;
 }
 .asst-chips {
@@ -1265,7 +1277,7 @@ body.is-resizing .ed-resize {
   background: var(--surface);
   color: var(--ink);
   font: inherit;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.4;
   text-align: left;
   cursor: pointer;
@@ -1294,7 +1306,7 @@ body.is-resizing .ed-resize {
   border-radius: 10px 10px 2px 10px;
   background: var(--accent);
   color: var(--accent-ink);
-  font-size: 13.5px;
+  font-size: 0.84375rem;
   line-height: 1.45;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1305,7 +1317,7 @@ body.is-resizing .ed-resize {
   border: 1px solid var(--line);
   border-radius: 2px 10px 10px 10px;
   background: var(--surface);
-  font-size: 13.5px;
+  font-size: 0.84375rem;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -1324,7 +1336,7 @@ body.is-resizing .ed-resize {
   border-radius: 6px;
   background: var(--surface-2);
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   line-height: 1.45;
   white-space: pre;
   overflow-x: auto;
@@ -1339,14 +1351,14 @@ body.is-resizing .ed-resize {
   border-radius: 3px;
   background: var(--surface-2);
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
 }
 .asst-tool {
   display: flex;
   align-items: flex-start;
   gap: 8px;
   color: var(--ink-2);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   line-height: 1.45;
 }
 .asst-tool-icon {
@@ -1377,7 +1389,7 @@ body.is-resizing .ed-resize {
   border-radius: var(--r-card);
   background: var(--fail-soft);
   color: var(--fail);
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.45;
 }
 .asst-error svg {
@@ -1387,7 +1399,7 @@ body.is-resizing .ed-resize {
 .asst-usage {
   margin-top: 2px;
   color: var(--ink-3);
-  font-size: 11.5px;
+  font-size: 0.71875rem;
 }
 .asst-working {
   position: sticky;
@@ -1400,7 +1412,7 @@ body.is-resizing .ed-resize {
   border-top: 1px solid var(--line);
   background: var(--surface);
   color: var(--ink-2);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .asst-form {
   flex-shrink: 0;
@@ -1417,7 +1429,7 @@ body.is-resizing .ed-resize {
   background: var(--surface);
   color: var(--ink);
   font: inherit;
-  font-size: 13.5px;
+  font-size: 0.84375rem;
   line-height: 1.45;
   resize: none;
 }
@@ -1434,5 +1446,5 @@ body.is-resizing .ed-resize {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  font-size: 12px;
+  font-size: 0.75rem;
 }

@@ -13,7 +13,6 @@ import {
   X,
 } from 'lucide-react'
 import {
-  useCallback,
   useEffect,
   useId,
   useLayoutEffect,
@@ -29,6 +28,7 @@ import { Link } from 'react-router-dom'
 import { deviceOf } from '../../shared/devices'
 import type { DeviceId, RunStatus, StepStatus } from '../../shared/types'
 import { cx, STATUS_LABEL } from '../lib/format'
+import { isComposing, useModalDialog } from '../lib/hooks'
 
 // ---------- Buttons ----------
 
@@ -153,22 +153,21 @@ export function Shell({ crumbs = [], children }: { crumbs?: Crumb[]; children: R
         <Logo />
         {crumbs.length > 0 && (
           <nav className="crumbs" aria-label="Breadcrumb">
-            {crumbs.map((c, i) => (
-              <span key={i} className="crumb">
-                <span className="crumb-sep" aria-hidden>
-                  /
-                </span>
-                {c.to ? (
-                  <Link to={c.to} title={c.label}>
-                    {c.label}
-                  </Link>
-                ) : (
-                  <span aria-current="page" title={c.label}>
-                    {c.label}
-                  </span>
-                )}
-              </span>
-            ))}
+            <ol>
+              {crumbs.map((c, i) => (
+                <li key={i} className="crumb">
+                  {c.to ? (
+                    <Link to={c.to} title={c.label}>
+                      {c.label}
+                    </Link>
+                  ) : (
+                    <span aria-current="page" title={c.label}>
+                      {c.label}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ol>
           </nav>
         )}
       </header>
@@ -210,37 +209,83 @@ export function Empty({ title, children, action }: { title: string; children?: R
   )
 }
 
+/**
+ * Arrow keys, Home and End for a `role="tablist"`: one tab stop, and selection follows focus (the WAI-ARIA
+ * pattern; `focusgroup` would do this natively but is not yet in Firefox or Safari).
+ */
+export function onTablistKeyDown(e: React.KeyboardEvent<HTMLElement>) {
+  if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft' && e.key !== 'Home' && e.key !== 'End') return
+  const tabs = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('[role="tab"]:not([disabled])'))
+  const i = tabs.indexOf(document.activeElement as HTMLElement)
+  if (i < 0) return
+  e.preventDefault()
+  const next = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length
+  tabs[next].focus()
+  tabs[next].click()
+}
+
 export function Tabs<T extends string>({
   tabs,
   value,
   onChange,
+  label,
+  children,
 }: {
   tabs: { id: T; label: string; count?: number }[]
   value: T
   onChange: (id: T) => void
+  /** Accessible name of the tab list. */
+  label: string
+  /** The selected tab's content; it is rendered as the tab panel. */
+  children?: ReactNode
 }) {
+  const id = useId()
   return (
-    <div className="tabs" role="tablist">
-      {tabs.map((t) => (
-        <button
-          key={t.id}
-          role="tab"
-          type="button"
-          aria-selected={t.id === value}
-          className={cx('tab', t.id === value && 'is-active')}
-          onClick={() => onChange(t.id)}
-        >
-          {t.label}
-          {t.count != null && <span className="tab-count">{t.count}</span>}
-        </button>
-      ))}
-    </div>
+    <>
+      <div className="tabs" role="tablist" aria-label={label} onKeyDown={onTablistKeyDown}>
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            id={`${id}-${t.id}`}
+            role="tab"
+            type="button"
+            aria-selected={t.id === value}
+            tabIndex={t.id === value ? 0 : -1}
+            className={cx('tab', t.id === value && 'is-active')}
+            onClick={() => onChange(t.id)}
+          >
+            {t.label}
+            {t.count != null && <span className="tab-count">{t.count}</span>}
+          </button>
+        ))}
+      </div>
+      {children != null && (
+        <div role="tabpanel" aria-labelledby={`${id}-${value}`}>
+          {children}
+        </div>
+      )}
+    </>
   )
 }
 
 // ---------- Dialog ----------
 
 const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
+
+/** `closedby` is newer than the React typings; where it is missing, useModalDialog supplies the light dismiss. */
+const LIGHT_DISMISS = { closedby: 'any' } as object
+
+// Modal dialogs that are open, innermost last. A toast outside a modal dialog would be inert and hidden from
+// assistive technology, so while one is open the innermost dialog shows the messages itself.
+let modals: string[] = []
+const modalListeners = new Set<() => void>()
+const subscribeModals = (l: () => void) => {
+  modalListeners.add(l)
+  return () => {
+    modalListeners.delete(l)
+  }
+}
+const topModal = () => modals[modals.length - 1] ?? null
 
 export function Dialog({
   title,
@@ -257,40 +302,21 @@ export function Dialog({
   width?: number
   onSubmit?: () => void
 }) {
-  const ref = useRef<HTMLDivElement>(null)
-  const titleId = useId()
-  const closeRef = useRef(onClose)
-  closeRef.current = onClose
+  const id = useId()
+  const titleId = `${id}-title`
+  // The first field or the marked control gets focus, not the Close button that comes first in the DOM.
+  const ref = useModalDialog(onClose, (el) => el.querySelector<HTMLElement>('[data-autofocus]') ?? el.querySelectorAll<HTMLElement>(FOCUSABLE)[1])
 
-  useEffect(() => {
-    const prev = document.activeElement as HTMLElement | null
-    const el = ref.current
-    if (el) {
-      const first = el.querySelector<HTMLElement>('[data-autofocus]') ?? el.querySelectorAll<HTMLElement>(FOCUSABLE)[1] ?? el
-      first.focus()
+  useLayoutEffect(() => {
+    modals = [...modals, id]
+    modalListeners.forEach((l) => l())
+    return () => {
+      modals = modals.filter((m) => m !== id)
+      modalListeners.forEach((l) => l())
     }
-    return () => prev?.focus?.()
-  }, [])
-
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      e.stopPropagation()
-      closeRef.current()
-      return
-    }
-    if (e.key !== 'Tab' || !ref.current) return
-    const items = Array.from(ref.current.querySelectorAll<HTMLElement>(FOCUSABLE))
-    if (!items.length) return
-    const first = items[0]
-    const last = items[items.length - 1]
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault()
-      last.focus()
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault()
-      first.focus()
-    }
-  }
+  }, [id])
+  const isTop = useSyncExternalStore(subscribeModals, topModal) === id
+  const notices = useToasts()
 
   const body = (
     <>
@@ -301,43 +327,33 @@ export function Dialog({
         </IconButton>
       </header>
       <div className="dialog-body">{children}</div>
+      {isTop && notices.length > 0 && (
+        <div className="dialog-notices">
+          {notices.map((t) => (
+            <ToastItem key={t.id} toast={t} />
+          ))}
+        </div>
+      )}
       {footer && <footer className="dialog-foot">{footer}</footer>}
     </>
   )
 
-  return createPortal(
-    <div
-      className="dialog-backdrop"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose()
-      }}
-    >
-      <div
-        ref={ref}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        tabIndex={-1}
-        className="dialog"
-        style={{ width }}
-        onKeyDown={onKeyDown}
-      >
-        {onSubmit ? (
-          <form
-            className="dialog-form"
-            onSubmit={(e) => {
-              e.preventDefault()
-              onSubmit()
-            }}
-          >
-            {body}
-          </form>
-        ) : (
-          body
-        )}
-      </div>
-    </div>,
-    document.body,
+  return (
+    <dialog ref={ref} aria-labelledby={titleId} className="dialog" style={{ width }} {...LIGHT_DISMISS}>
+      {onSubmit ? (
+        <form
+          className="dialog-form"
+          onSubmit={(e) => {
+            e.preventDefault()
+            onSubmit()
+          }}
+        >
+          {body}
+        </form>
+      ) : (
+        body
+      )}
+    </dialog>
   )
 }
 
@@ -363,8 +379,10 @@ export function Confirm({
       width={420}
       footer={
         <>
-          <Button onClick={onClose}>Cancel</Button>
-          <Button variant="danger" busy={busy} onClick={onConfirm} data-autofocus>
+          <Button onClick={onClose} data-autofocus>
+            Cancel
+          </Button>
+          <Button variant="danger" busy={busy} onClick={onConfirm}>
             {confirmLabel}
           </Button>
         </>
@@ -441,7 +459,9 @@ export function Popover({
       if (ref.current && !ref.current.contains(e.target as Node)) closeRef.current()
     }
     const key = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && !isComposing(e)) {
+        // preventDefault keeps a modal dialog around the popover open: this Escape closes the popover only.
+        e.preventDefault()
         e.stopPropagation()
         closeRef.current()
       }
@@ -466,7 +486,8 @@ export function Popover({
     <div ref={ref} className={cx('popover', className)} style={pos}>
       {children}
     </div>,
-    document.body,
+    // Inside a modal dialog everything outside it is inert, so the layer has to live in the dialog.
+    ('el' in anchor && anchor.el.closest('dialog:modal')) || document.body,
   )
 }
 
@@ -477,7 +498,8 @@ export type MenuItem =
 
 export function Menu({ anchor, items, onClose, align }: { anchor: Anchor; items: MenuItem[]; onClose: () => void; align?: 'start' | 'end' }) {
   const ref = useRef<HTMLDivElement>(null)
-  useEffect(() => {
+  // A layout effect: focus is back on the trigger before a dialog opened by the chosen item records where to return it.
+  useLayoutEffect(() => {
     const prev = document.activeElement as HTMLElement | null
     ref.current?.querySelector<HTMLElement>('[role^="menuitem"]:not([disabled])')?.focus()
     return () => {
@@ -607,6 +629,7 @@ export function InlineEdit({
       rows={3}
       onChange={(e) => setDraft(e.target.value)}
       onKeyDown={(e) => {
+        if (isComposing(e)) return
         if (e.key === 'Escape') setDraft(null)
         if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) commit()
       }}
@@ -615,9 +638,15 @@ export function InlineEdit({
     <input
       {...common}
       onChange={(e) => setDraft(e.target.value)}
+      enterKeyHint="done"
       onKeyDown={(e) => {
+        // Enter and Escape that confirm or cancel an input method's conversion belong to the input method.
+        if (isComposing(e)) return
         if (e.key === 'Escape') setDraft(null)
-        if (e.key === 'Enter') commit()
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          commit()
+        }
       }}
     />
   )
@@ -649,23 +678,33 @@ export function toast(text: string, kind: Toast['kind'] = 'info') {
 }
 export const toastError = (e: unknown) => toast(e instanceof Error ? e.message : String(e), 'error')
 
+const subscribeToasts = (l: () => void) => {
+  listeners.add(l)
+  return () => {
+    listeners.delete(l)
+  }
+}
+const useToasts = () => useSyncExternalStore(subscribeToasts, () => toasts)
+
+function ToastItem({ toast: t }: { toast: Toast }) {
+  return (
+    <div className={cx('toast', `toast-${t.kind}`)} role={t.kind === 'error' ? 'alert' : 'status'}>
+      {t.kind === 'error' ? <CircleX size={16} aria-hidden /> : <CircleCheck size={16} aria-hidden />}
+      <span>{t.text}</span>
+      <button type="button" aria-label="Dismiss" onClick={() => dismiss(t.id)}>
+        <X size={14} aria-hidden />
+      </button>
+    </div>
+  )
+}
+
 export function Toaster() {
-  const subscribe = useCallback((l: () => void) => {
-    listeners.add(l)
-    return () => listeners.delete(l)
-  }, [])
-  const list = useSyncExternalStore(subscribe, () => toasts)
+  const list = useToasts()
+  // While a modal dialog is open it shows the messages (see Dialog); they come back here if they outlive it.
+  const modalOpen = useSyncExternalStore(subscribeModals, topModal) !== null
   return createPortal(
-    <div className="toasts" aria-live="polite">
-      {list.map((t) => (
-        <div key={t.id} className={cx('toast', `toast-${t.kind}`)} role={t.kind === 'error' ? 'alert' : 'status'}>
-          {t.kind === 'error' ? <CircleX size={16} /> : <CircleCheck size={16} />}
-          <span>{t.text}</span>
-          <button type="button" aria-label="Dismiss" onClick={() => dismiss(t.id)}>
-            <X size={14} />
-          </button>
-        </div>
-      ))}
+    <div className="toasts" role="region" aria-label="Notifications">
+      {!modalOpen && list.map((t) => <ToastItem key={t.id} toast={t} />)}
     </div>,
     document.body,
   )

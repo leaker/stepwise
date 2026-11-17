@@ -18,7 +18,7 @@
 }
 .gate-card h1 {
   margin-top: 12px;
-  font-size: 19px;
+  font-size: 1.1875rem;
 }
 .gate-card .btn {
   margin-top: 4px;
@@ -27,7 +27,7 @@
 .gate-error,
 .form-error {
   color: var(--fail);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 /* ---------- Chips ---------- */
@@ -41,7 +41,7 @@
   border-radius: 11px;
   background: var(--surface);
   color: var(--ink-2);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   white-space: nowrap;
 }
 .chip-quiet {
@@ -137,7 +137,7 @@
   margin: 0;
   padding: 14px 16px;
   overflow-x: auto;
-  font: 13px/1.6 var(--font-mono);
+  font: 0.8125rem/1.6 var(--font-mono);
 }
 .snippet .btn {
   position: absolute;
@@ -158,7 +158,7 @@
   gap: 10px;
 }
 .title-row .hash {
-  font-size: 16px;
+  font-size: 1rem;
   font-weight: 400;
 }
 .split {
@@ -201,12 +201,12 @@
   width: 22px;
   color: var(--ink-3);
   text-align: right;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   text-decoration: none;
 }
 .outline-foot {
   margin-top: 12px;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .status-link {
   color: inherit;
@@ -262,12 +262,12 @@
   align-items: center;
   gap: 6px;
   color: var(--ink-2);
-  font-size: 13px;
+  font-size: 0.8125rem;
   white-space: nowrap;
 }
 .summary dd {
   margin: 4px 0 0;
-  font-size: 26px;
+  font-size: 1.625rem;
   font-weight: 600;
   line-height: 1.1;
 }
@@ -412,7 +412,7 @@ button.message:hover {
   gap: 8px;
   padding: 6px 8px 6px 6px;
   min-width: 0;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .shot-n {
   flex-shrink: 0;
@@ -421,7 +421,7 @@ button.message:hover {
   border-radius: 3px;
   background: var(--rail);
   color: var(--rail-ink);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   font-weight: 500;
   text-align: center;
 }
@@ -454,7 +454,7 @@ button.message:hover {
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);
   color: var(--ink-2);
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 500;
 }
 .log-wrap {
@@ -490,7 +490,7 @@ button.message:hover {
   background: var(--rail);
   color: var(--rail-ink);
   text-align: center;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .log-sentence {
   overflow-wrap: anywhere;
@@ -499,11 +499,11 @@ button.message:hover {
   display: block;
   margin-top: 2px;
   color: var(--fail);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .log-meta {
   color: var(--ink-3);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   white-space: nowrap;
 }
 .log-status {
@@ -536,7 +536,7 @@ button.message:hover {
   padding: 12px 14px;
   max-height: 70vh;
   overflow: auto;
-  font: 12.5px/1.6 var(--font-mono);
+  font: 0.78125rem/1.6 var(--font-mono);
   white-space: pre;
 }
 .log-console pre.is-wrap {
@@ -565,7 +565,7 @@ button.message:hover {
   padding: 9px 16px;
   border-bottom: 1px solid var(--line);
   color: var(--ink-2);
-  font-size: 14px;
+  font-size: 0.875rem;
   font-weight: 400;
 }
 .info-table tr:last-child th {
@@ -573,14 +573,24 @@ button.message:hover {
 }
 
 /* ---------- Lightbox ---------- */
+/* A native modal <dialog> that fills the viewport; the top layer replaces the z-index it used to need. */
 .lightbox {
-  position: fixed;
-  inset: 0;
-  z-index: 120;
-  display: flex;
-  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
   background: rgb(11 14 20 / 0.94);
   color: #dfe4f0;
+}
+.lightbox[open] {
+  display: flex;
+  flex-direction: column;
+}
+.lightbox::backdrop {
+  background: none;
 }
 .lightbox-bar {
   display: flex;
@@ -631,7 +641,7 @@ button.message:hover {
   gap: 10px;
   padding: 10px 12px;
   border-bottom: 1px solid;
-  font-size: 13.5px;
+  font-size: 0.84375rem;
 }
 .banner > svg {
   flex-shrink: 0;
@@ -724,14 +734,14 @@ button.message:hover {
   padding: 20px;
   color: var(--ink-3);
   text-align: center;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .heal-table {
   width: 100%;
   margin-top: 10px;
   border-collapse: collapse;
   table-layout: fixed;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .heal-table th {
   padding: 5px 8px;
@@ -756,11 +766,11 @@ button.message:hover {
   margin-top: 16px;
   padding-top: 14px;
   border-top: 1px solid var(--line);
-  font-size: 13.5px;
+  font-size: 0.84375rem;
 }
 .heal-score .muted {
   flex-basis: 100%;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
 }
 .meter {
   width: 140px;
@@ -781,7 +791,7 @@ button.message:hover {
   flex: 1;
   align-self: center;
   color: var(--ink-3);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   min-width: 0;
 }
 

@@ -68,7 +68,7 @@ async function api(method, path, body, { cleanup = false } = {}) {
         body: body === undefined ? undefined : JSON.stringify(body),
       })
     } catch (e) {
-      throw new Error(`${method} ${path}: could not reach ${baseUrl} (${e instanceof Error ? e.message : e})`)
+      throw new Error(`${method} ${path}: could not reach ${baseUrl} (${e instanceof Error ? e.message : e})`, { cause: e })
     }
     const text = await res.text()
     let data = null
@@ -305,7 +305,7 @@ async function seedCase(project, existing, spec) {
       // The marker in its description is still there, so the next run builds it again instead of trusting it.
       console.error(`    could not undo the partly built test case #${testCase.number}; the next run of this script will build it again`)
     }
-    throw new Error(`"${spec.name}": ${e instanceof Error ? e.message : e}`)
+    throw new Error(`"${spec.name}": ${e instanceof Error ? e.message : e}`, { cause: e })
   }
 }
 

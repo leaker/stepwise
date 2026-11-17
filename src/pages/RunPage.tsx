@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, ChevronLeft, ChevronRight, ImageOff, Pencil, Square, X } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useParams } from 'react-router-dom'
 import { stepSentence } from '../../shared/commands'
@@ -9,7 +9,7 @@ import { locatorToString, type Box, type HealProposal, type Run, type StepResult
 import { api, qk, shotUrl } from '../api'
 import { Button, DeviceChip, Dialog, ErrorState, IconButton, Loading, Shell, Spinner, StatusIcon, Tabs } from '../components/ui'
 import { cx, dateTime, duration, isTerminal, ms, STATUS_LABEL } from '../lib/format'
-import { useTick } from '../lib/hooks'
+import { useModalDialog, useTick } from '../lib/hooks'
 
 type TabId = 'shots' | 'log' | 'info'
 
@@ -117,7 +117,8 @@ export function RunPage() {
           { id: 'log', label: 'Log' },
           { id: 'info', label: 'Run info' },
         ]}
-      />
+        label="Run details"
+      >
 
       {tab === 'shots' &&
         (shots.length === 0 ? (
@@ -145,6 +146,7 @@ export function RunPage() {
 
       {tab === 'log' && <LogTab run={r} live={live} />}
       {tab === 'info' && <InfoTab run={r} />}
+      </Tabs>
 
       {lightbox != null && shots[lightbox] && <Lightbox shots={shots} index={lightbox} onIndex={setLightbox} onClose={() => setLightbox(null)} />}
       {healResult && <HealDialog run={r} result={healResult} live={live} onClose={() => setHealStep(null)} />}
@@ -263,17 +265,18 @@ function InfoTab({ run }: { run: Run }) {
 
 function Lightbox({ shots, index, onIndex, onClose }: { shots: StepResult[]; index: number; onIndex: (i: number) => void; onClose: () => void }) {
   const s = shots[index]
-  useEffect(() => {
-    const key = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-      if (e.key === 'ArrowLeft' && index > 0) onIndex(index - 1)
-      if (e.key === 'ArrowRight' && index < shots.length - 1) onIndex(index + 1)
-    }
-    document.addEventListener('keydown', key)
-    return () => document.removeEventListener('keydown', key)
-  }, [index, shots.length, onIndex, onClose])
-  return createPortal(
-    <div className="lightbox" role="dialog" aria-modal="true" aria-label={`Screenshot of step ${s.number}`}>
+  // A native modal dialog: Escape, the back gesture, focus containment and the return of focus come with it.
+  const ref = useModalDialog(onClose, (el) => el.querySelector<HTMLElement>('[data-autofocus]'))
+  return (
+    <dialog
+      ref={ref}
+      className="lightbox"
+      aria-label={`Screenshot of step ${s.number}`}
+      onKeyDown={(e) => {
+        if (e.key === 'ArrowLeft' && index > 0) onIndex(index - 1)
+        if (e.key === 'ArrowRight' && index < shots.length - 1) onIndex(index + 1)
+      }}
+    >
       <header className="lightbox-bar">
         <span className="shot-n num">{s.number}</span>
         <span className="truncate lightbox-title" title={s.sentence}>
@@ -289,7 +292,7 @@ function Lightbox({ shots, index, onIndex, onClose }: { shots: StepResult[]; ind
         <IconButton label="Next screenshot" disabled={index === shots.length - 1} onClick={() => onIndex(index + 1)}>
           <ChevronRight size={18} />
         </IconButton>
-        <IconButton label="Close" onClick={onClose} autoFocus>
+        <IconButton label="Close" onClick={onClose} data-autofocus>
           <X size={18} />
         </IconButton>
       </header>
@@ -302,8 +305,7 @@ function Lightbox({ shots, index, onIndex, onClose }: { shots: StepResult[]; ind
       >
         <img key={s.screenshotKey} src={shotUrl(s.screenshotKey!)} alt={s.sentence} />
       </div>
-    </div>,
-    document.body,
+    </dialog>
   )
 }
 

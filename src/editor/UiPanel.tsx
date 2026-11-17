@@ -23,6 +23,7 @@ import { locatorToString, type DeviceId, type Locator, type LocatorKey, type Ste
 import { api, qk, shotUrl } from '../api'
 import { Button, Confirm, DeviceChip, Dialog, Field, IconButton, Menu, Popover, Spinner, type MenuItem } from '../components/ui'
 import { cx } from '../lib/format'
+import { isComposing } from '../lib/hooks'
 import { sameLocator } from './model'
 
 export interface Inspect {
@@ -100,7 +101,7 @@ export function UiPanel(p: UiPanelProps) {
   const phone = !!ui && deviceOf(ui.device).isMobile
 
   // Draw big boxes first so small elements stay clickable on top of their containers.
-  const ordered = useMemo(() => (ui ? [...ui.elements].sort((a, b) => b.box.w * b.box.h - a.box.w * a.box.h) : []), [ui])
+  const ordered = useMemo(() => (ui ? ui.elements.toSorted((a, b) => b.box.w * b.box.h - a.box.w * a.box.h) : []), [ui])
   const ghost = targetHere && ui && !ui.elements.some((e) => e.id === targetHere.elementId) ? targetHere : null
 
   useLayoutEffect(() => {
@@ -230,7 +231,7 @@ export function UiPanel(p: UiPanelProps) {
           <div className="uip-scroll" ref={scrollRef}>
             <div className={cx('uip-stage', phone && 'is-phone', p.pickFor && 'is-picking', !overlays && 'no-overlays')} style={phone || !fit ? { width: ui.width } : { width: '100%' }}>
               <div className="uip-canvas" style={{ aspectRatio: `${ui.width} / ${ui.height}` }}>
-                <img key={ui.screenshotKey} src={shotUrl(ui.screenshotKey)} alt={`Screenshot of ${ui.title || ui.url}`} draggable={false} />
+                <img key={ui.screenshotKey} src={shotUrl(ui.screenshotKey)} width={ui.width} height={ui.height} decoding="async" alt={`Screenshot of ${ui.title || ui.url}`} draggable={false} />
                 {ordered.map((el) => (
                   <ElementBox
                     // Remounting the selected step's element restarts its pulse animation.
@@ -303,8 +304,9 @@ export function UiPanel(p: UiPanelProps) {
                       aria-label="Screen name"
                       value={renaming.name}
                       onChange={(e) => setRenaming({ id: u.id, name: e.target.value })}
+                      enterKeyHint="done"
                       onKeyDown={(e) => {
-                        if (e.key === 'Escape') {
+                        if (e.key === 'Escape' && !isComposing(e)) {
                           e.stopPropagation()
                           setRenaming(null)
                         }
@@ -474,7 +476,7 @@ function LaunchForm({ baseUrl, busy, locked, hasSteps, onLaunch }: { baseUrl: st
         turn it into a step.
       </p>
       <div className="launch-row">
-        <input className="input" type="text" inputMode="url" aria-label="URL to capture" placeholder="https://example.com/login" value={url} onChange={(e) => setUrl(e.target.value)} autoFocus />
+        <input className="input" type="text" inputMode="url" enterKeyHint="go" autoCapitalize="none" autoCorrect="off" spellCheck={false} aria-label="URL to capture" placeholder="https://example.com/login" value={url} onChange={(e) => setUrl(e.target.value)} autoFocus />
         <Button type="submit" variant="primary" icon={<Camera size={15} />} disabled={!ok || !!locked} busy={busy} title={locked ?? undefined}>
           Launch &amp; capture
         </Button>
@@ -504,7 +506,7 @@ function CaptureUrlDialog({ baseUrl, onClose, onCapture }: { baseUrl: string; on
       }
     >
       <Field label="URL" hint="Opened in a fresh cloud browser without replaying any steps. Pages behind a login need “Capture after step” instead.">
-        <input className="input" data-autofocus inputMode="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/pricing" />
+        <input className="input" data-autofocus inputMode="url" enterKeyHint="go" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/pricing" />
       </Field>
     </Dialog>
   )
@@ -544,11 +546,19 @@ function ElementInspector({
   const [adding, setAdding] = useState(false)
   const [key, setKey] = useState<LocatorKey>('css')
   const [value, setValue] = useState('')
-  const ref = useRef<HTMLDivElement>(null)
+  const ref = useRef<HTMLDialogElement>(null)
 
   useEffect(() => setName(baseName), [baseName])
-  useEffect(() => {
-    ref.current?.querySelector<HTMLInputElement>('input')?.select()
+  // A non-modal <dialog>: the page stays usable around it, and it stays inside the panel instead of the top layer.
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    if (!el.open) el.show()
+    el.querySelector<HTMLInputElement>('input')?.select()
+    return () => {
+      // Closing it first hands focus back to where it was before React removes the node.
+      if (el.open) el.close()
+    }
   }, [])
 
   // The inspector floats over the screenshot, so it goes where the element it is about is not: to the other
@@ -586,13 +596,12 @@ function ElementInspector({
   }
 
   return (
-    <div
+    <dialog
       className={cx('inspector', dock.left && 'is-left', dock.bottom && 'is-bottom')}
       ref={ref}
-      role="dialog"
       aria-label="UI element"
       onKeyDown={(e) => {
-        if (e.key === 'Escape') {
+        if (e.key === 'Escape' && !isComposing(e)) {
           e.stopPropagation()
           onClose()
         }
@@ -615,8 +624,13 @@ function ElementInspector({
             value={name}
             onChange={(e) => setName(e.target.value)}
             onBlur={commitName}
+            enterKeyHint="done"
             onKeyDown={(e) => {
-              if (e.key === 'Enter') e.currentTarget.blur()
+              // Enter commits the name, except the Enter that confirms an input method's conversion.
+              if (e.key === 'Enter' && !isComposing(e)) {
+                e.preventDefault()
+                e.currentTarget.blur()
+              }
             }}
           />
         </label>
@@ -655,8 +669,10 @@ function ElementInspector({
               placeholder={key === 'id' ? 'submit-button' : key === 'css' ? 'form button[type=submit]' : "//button[text()='Sign in']"}
               value={value}
               onChange={(e) => setValue(e.target.value)}
+              autoCapitalize="none"
+              autoCorrect="off"
               onKeyDown={(e) => {
-                if (e.key === 'Escape') {
+                if (e.key === 'Escape' && !isComposing(e)) {
                   e.stopPropagation()
                   setAdding(false)
                 }
@@ -698,6 +714,6 @@ function ElementInspector({
           }))}
         />
       )}
-    </div>
+    </dialog>
   )
 }

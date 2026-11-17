@@ -4,6 +4,7 @@ import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { AssistantEvent, AssistantSession, AssistantStatus, AssistantToolName } from '../../shared/types'
 import { Button, IconButton, Spinner } from '../components/ui'
 import { cx } from '../lib/format'
+import { isComposing } from '../lib/hooks'
 
 export const EXAMPLE_PROMPTS = [
   'Sign in with the demo account and check the welcome message',
@@ -149,10 +150,13 @@ export function AssistantPanel(p: AssistantPanelProps) {
           disabled={!enabled}
           placeholder={enabled ? (busy ? 'The assistant is working…' : 'Describe a test, or what to change') : p.loadError ? 'The assistant could not be loaded' : p.status ? 'Not configured' : 'Loading…'}
           aria-label="Message to the assistant"
+          enterKeyHint="send"
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
             // Enter sends; Shift+Enter is a new line. Not while an input method is composing text.
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              // isComposing() also covers Safari, which reports the confirming Enter as not composing.
+              if (isComposing(e)) return
               e.preventDefault()
               send(draft)
             }

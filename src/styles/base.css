@@ -99,7 +99,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font: 400 14px/1.45 var(--font-sans);
+  font: 400 0.875rem/1.45 var(--font-sans);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -111,17 +111,17 @@ p {
   margin: 0;
 }
 h1 {
-  font-size: 22px;
+  font-size: 1.375rem;
   font-weight: 600;
   line-height: 1.25;
   letter-spacing: -0.01em;
 }
 h2 {
-  font-size: 16px;
+  font-size: 1rem;
   font-weight: 600;
 }
 h3 {
-  font-size: 14px;
+  font-size: 0.875rem;
   font-weight: 600;
 }
 
@@ -151,6 +151,13 @@ button:disabled {
   outline: none;
   box-shadow: var(--focus);
 }
+/* Forced colours remove box shadows and repaint borders, so the focus ring is drawn as a real outline there. */
+@media (forced-colors: active) {
+  :focus-visible {
+    outline: 2px solid Highlight !important;
+    outline-offset: 2px;
+  }
+}
 
 code,
 .mono {
@@ -179,11 +186,15 @@ code,
 
 @keyframes spin {
   to {
-    transform: rotate(360deg);
+    rotate: 1turn;
   }
 }
 .spin {
   animation: spin 0.9s linear infinite;
+  /* Still turning, so "busy" stays visible, but slowly. */
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 6s;
+  }
 }
 
 /* ---------- Buttons ---------- */
@@ -210,7 +221,7 @@ code,
 .btn-sm {
   height: 26px;
   padding: 0 8px;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .btn-primary {
   border-color: var(--accent);
@@ -291,11 +302,11 @@ textarea.input {
 }
 .field-label {
   font-weight: 500;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .field-hint {
   color: var(--ink-3);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
 }
 
 /* ---------- Status ---------- */
@@ -348,7 +359,7 @@ textarea.input {
   gap: 9px;
   color: var(--ink);
   font-weight: 600;
-  font-size: 15px;
+  font-size: 0.9375rem;
   letter-spacing: -0.01em;
   flex-shrink: 0;
   border-radius: var(--r-control);
@@ -363,10 +374,23 @@ textarea.input {
   stroke: #7f9bff;
 }
 .crumbs {
+  min-width: 0;
+  color: var(--ink-2);
+}
+.crumbs > ol {
   display: flex;
   align-items: center;
   min-width: 0;
-  color: var(--ink-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* The divider is decoration: generated here, with empty alternative text where that syntax is supported. */
+.crumb::before {
+  content: '/';
+  content: '/' / '';
+  margin: 0 9px;
+  color: var(--line-strong);
 }
 .crumb {
   display: inline-flex;
@@ -386,10 +410,6 @@ textarea.input {
 .crumb > span[aria-current] {
   color: var(--ink);
   font-weight: 500;
-}
-.crumb-sep {
-  margin: 0 9px;
-  color: var(--line-strong);
 }
 .page {
   width: 100%;
@@ -477,19 +497,19 @@ textarea.input {
 .tab.is-active {
   color: var(--ink);
 }
+/* A border, not a background: forced colours keep borders, so the selected tab stays marked. */
 .tab.is-active::after {
   content: '';
   position: absolute;
   inset: auto 0 -1px;
-  height: 2px;
-  background: var(--accent);
+  border-bottom: 2px solid var(--accent);
 }
 .tab-count {
   padding: 0 6px;
   border-radius: 9px;
   background: var(--surface-3);
   color: var(--ink-2);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
 }
 
@@ -507,7 +527,7 @@ textarea.input {
 .table th {
   padding: 8px 12px;
   text-align: left;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   font-weight: 500;
   color: var(--ink-3);
   border-bottom: 1px solid var(--line);
@@ -549,7 +569,7 @@ textarea.input {
 }
 .cell-desc {
   color: var(--ink-3);
-  font-size: 13px;
+  font-size: 0.8125rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -571,35 +591,66 @@ textarea.input {
 @keyframes rise {
   from {
     opacity: 0;
-    transform: translateY(6px);
+    translate: 0 6px;
   }
 }
-.dialog-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 100;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: var(--backdrop);
+/* Under reduced motion the same elements fade in without moving. */
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
 }
+/* A native modal <dialog>: the browser centres it in the top layer and makes the page behind it inert. */
 .dialog {
-  display: flex;
-  flex-direction: column;
-  max-width: 100%;
-  max-height: 100%;
+  max-width: calc(100% - 48px);
+  max-height: calc(100% - 48px);
+  padding: 0;
+  border: 0;
   background: var(--surface);
+  color: var(--ink);
   border-radius: var(--r-dialog);
   box-shadow: var(--shadow-dialog);
-  animation: rise 0.14s ease-out;
+}
+/* Only while open: an unconditional display would also show the closed dialog. */
+.dialog[open] {
+  display: flex;
+  flex-direction: column;
+  animation: fade 0.14s ease-out;
+  @media (prefers-reduced-motion: no-preference) {
+    animation-name: rise;
+  }
+}
+/* Literal colours: custom properties only reach ::backdrop in recent browsers. They mirror --backdrop. */
+.dialog::backdrop {
+  background: rgb(22 27 38 / 0.45);
+}
+@media (prefers-color-scheme: dark) {
+  .dialog::backdrop {
+    background: rgb(0 0 0 / 0.6);
+  }
+}
+/* Scrolling inside the dialog or over its backdrop must not move the page behind it. */
+dialog:modal {
+  overscroll-behavior: contain;
+}
+dialog::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
 }
 .dialog:focus-visible {
   box-shadow: var(--shadow-dialog);
+}
+/* Messages that arrive while the dialog is open (a toast outside a modal dialog would be inert). */
+.dialog-notices {
+  display: grid;
+  gap: 8px;
+  padding: 0 20px 14px;
 }
 .dialog-form {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  flex: 1;
 }
 .dialog-head {
   display: flex;
@@ -676,7 +727,7 @@ textarea.input {
 }
 .menu-hint {
   color: var(--ink-3);
-  font-size: 12px;
+  font-size: 0.75rem;
   margin-left: 16px;
 }
 .menu-sep {
@@ -687,7 +738,7 @@ textarea.input {
 .menu-heading {
   padding: 8px 8px 3px;
   color: var(--ink-3);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 500;
 }
 
@@ -742,7 +793,13 @@ textarea.input {
   color: var(--rail-ink);
   border-radius: var(--r-card);
   box-shadow: var(--shadow-pop);
-  animation: rise 0.16s ease-out;
+  animation: fade 0.16s ease-out;
+  @media (prefers-reduced-motion: no-preference) {
+    animation-name: rise;
+  }
+}
+.dialog-notices .toast {
+  box-shadow: none;
 }
 .toast svg {
   margin-top: 2px;
@@ -766,18 +823,6 @@ textarea.input {
   border-radius: 3px;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.001s !important;
-    transition-duration: 0.001s !important;
-  }
-  .spin {
-    animation-duration: 1.6s !important;
-  }
-}
-
 .menu-pop {
   max-width: min(560px, calc(100vw - 16px));
 }
@@ -789,7 +834,7 @@ textarea.input {
 .menu-desc {
   display: block;
   color: var(--ink-3);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   white-space: normal;
   max-width: 300px;
 }

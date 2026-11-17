@@ -502,7 +502,7 @@ function EditorInner({ tid }: { tid: string }) {
   // ----- keyboard -----
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (document.querySelector('.dialog-backdrop, .popover, .lightbox')) return
+      if (document.querySelector('dialog:modal, .popover')) return
       const t = e.target as HTMLElement
       const editable = t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable
       const inSteps = !!t.closest?.('.steps')
@@ -520,6 +520,8 @@ function EditorInner({ tid }: { tid: string }) {
         redo()
         return
       }
+      // Keys that belong to an input method's conversion are not shortcuts.
+      if (e.isComposing || e.keyCode === 229) return
       if (e.key === 'Escape') {
         if (pickForId) setPickForId(null)
         else if (inspect) setInspect(null)
