@@ -521,8 +521,13 @@ async function handle(method: string, path: string, body: Record<string, unknown
     case 'POST runs/:/heals/:': {
       const run = need(runs.find((r) => r.id === b), 'Run')
       const res = need(run.results.find((r) => r.stepId === d && r.heal), 'Heal')
+      if (run.status === 'queued' || run.status === 'running') throw new HttpError(409, 'Wait for the run to finish before reviewing its repairs')
+      if (res.heal!.state !== 'unresolved') throw new HttpError(409, `This repair was already ${res.heal!.state}`)
       res.heal!.state = body.action === 'approve' ? 'approved' : 'rejected'
-      if (!run.results.some((r) => r.heal?.state === 'unresolved')) run.status = run.results.some((r) => r.heal?.state === 'rejected' || r.status === 'failed') ? 'failed' : 'succeeded'
+      if (run.status === 'unresolved') {
+        if (run.results.some((r) => r.heal?.state === 'rejected' || r.status === 'failed')) run.status = 'failed'
+        else if (!run.results.some((r) => r.heal?.state === 'unresolved')) run.status = 'succeeded'
+      }
       const batch = batches.find((x) => x.id === run.batchRunId)
       if (batch) recount(batch)
       return run

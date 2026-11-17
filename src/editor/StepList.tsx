@@ -96,7 +96,13 @@ export function StepList(p: StepListProps) {
           : []),
         { type: 'separator' },
         { label: 'Run up to this step', icon: <Play size={15} />, disabled: !p.canRun, onSelect: () => p.onRunRange(1, menuIndex + 1) },
-        { label: 'Run only this step', icon: <Play size={15} />, disabled: !p.canRun, onSelect: () => p.onRunRange(menuIndex + 1, menuIndex + 1) },
+        {
+          label: 'Run only this step',
+          desc: menuIndex > 0 ? `Steps 1–${menuIndex} run first as set-up, so this step starts on the right page.` : undefined,
+          icon: <Play size={15} />,
+          disabled: !p.canRun,
+          onSelect: () => p.onRunRange(menuIndex + 1, menuIndex + 1),
+        },
         { type: 'separator' },
         { label: 'Delete', icon: <Trash2 size={15} />, danger: true, hint: 'Del', onSelect: () => p.onDelete(menuStep.id) },
       ]

@@ -17,7 +17,7 @@ import {
   X,
 } from 'lucide-react'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { locatorToString, type ElementRef, type Locator, type LocatorKey, type Step, type Ui, type UiElement } from '../../shared/types'
+import { locatorToString, type Locator, type LocatorKey, type Step, type Ui, type UiElement } from '../../shared/types'
 import { api, qk, shotUrl } from '../api'
 import { Button, Confirm, Dialog, Field, IconButton, Menu, Popover, Spinner, type MenuItem } from '../components/ui'
 import { cx } from '../lib/format'
@@ -44,7 +44,8 @@ export interface UiPanelProps {
   onCancelPick: () => void
   captureAfter: { id: string; n: number } | null
   capturing: string | null
-  replayError: { n: number; sentence: string; message: string } | null
+  /** The failed replay behind the screen that is shown, if any. `sentence` is null when the step was removed since. */
+  replayError: { n: number; sentence: string | null; message: string } | null
   onDismissReplayError: () => void
   onCaptureAfter: () => void
   onCaptureUrl: (url: string) => void
@@ -52,7 +53,8 @@ export interface UiPanelProps {
   onPickElement: (ui: Ui, el: UiElement) => void
   inspect: Inspect | null
   onInspect: (i: Inspect | null) => void
-  onUpdateTarget: (stepId: string, target: ElementRef) => void
+  /** Rename an element in every step that uses it and, when opened from a step, set that step's locator. */
+  onSaveElement: (ref: { uiId: string; elementId: string }, name: string, forStep?: { stepId: string; locator: Locator; candidates: Locator[] }) => void
 }
 
 export function UiPanel(p: UiPanelProps) {
@@ -175,10 +177,10 @@ export function UiPanel(p: UiPanelProps) {
           <AlertTriangle size={16} />
           <div>
             <strong>
-              The replay stopped at step {p.replayError.n}: {p.replayError.sentence}
+              {p.replayError.sentence === null ? 'The replay stopped at a step that has since been removed' : `The replay stopped at step ${p.replayError.n}: ${p.replayError.sentence}`}
             </strong>
             <p>{p.replayError.message}</p>
-            <p className="muted">The capture shows the page as it was at that point.</p>
+            <p className="muted">This capture shows the page as it was at that point.</p>
           </div>
           <IconButton label="Dismiss" onClick={p.onDismissReplayError}>
             <X size={16} />
@@ -248,7 +250,8 @@ export function UiPanel(p: UiPanelProps) {
                 const elements = inspectUi.elements.map((e) => (e.id === inspectEl.id ? { ...e, name, locators } : e))
                 patchUi.mutate({ id: inspectUi.id, elements })
               }
-              if (inspectStep?.target) p.onUpdateTarget(inspectStep.id, { ...inspectStep.target, name, locator: current, candidates: locators })
+              const ref = inspectStep?.target ?? (inspectUi && inspectEl ? { uiId: inspectUi.id, elementId: inspectEl.id } : null)
+              if (ref) p.onSaveElement({ uiId: ref.uiId, elementId: ref.elementId }, name, inspectStep?.target ? { stepId: inspectStep.id, locator: current, candidates: locators } : undefined)
             }}
           />
         )}
@@ -621,9 +624,9 @@ function ElementInspector({
         )}
         <p className="inspector-note muted">
           {step
-            ? `Changes apply to step ${steps.indexOf(step) + 1}${element ? ' and to this element on the captured screen' : ' only; its captured screen was deleted'}.`
+            ? `The name changes in every step that uses this element. The locator applies to step ${steps.indexOf(step) + 1}${element ? ' and to new steps made from the captured screen' : '; its captured screen was deleted'}.`
             : usedBy.length
-              ? `Used by step${usedBy.length === 1 ? '' : 's'} ${usedBy.join(', ')}. Existing steps keep their locator; open the element from a step to change it there.`
+              ? `Used by step${usedBy.length === 1 ? '' : 's'} ${usedBy.join(', ')}. Renaming updates them; they keep their locator (open the element from a step to change it there).`
               : 'Not used by any step yet.'}
         </p>
         {onUse && (

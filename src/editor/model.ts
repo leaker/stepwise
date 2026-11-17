@@ -61,9 +61,16 @@ export function commandChoices(step: Step): CommandDef[] {
   return COMMANDS.filter((c) => !c.target)
 }
 
+/** What a command's value is: free text, a number of seconds, a key name, or nothing at all. */
+type ValueKind = 'none' | 'text' | 'seconds' | 'key'
+const valueKind = (command: CommandId): ValueKind => (!COMMAND_BY_ID[command]?.value ? 'none' : isNumeric(command) ? 'seconds' : command === 'press_key' ? 'key' : 'text')
+
+/** Parameters only carry over to a command that reads them the same way: a text is not a number of seconds. */
 export function changeCommand(step: Step, command: CommandId): Step {
   const def = COMMAND_BY_ID[command]
   const next: Step = { ...step, command }
+  if (valueKind(command) !== valueKind(step.command)) delete next.value
+  if (!def.variable) delete next.variable
   if (next.value === undefined && def.value && DEFAULT_VALUE[command] !== undefined) next.value = DEFAULT_VALUE[command]
   if (!def.assertion) delete next.continueOnFailure
   return next
@@ -74,11 +81,35 @@ export function makeTarget(ui: Ui, el: UiElement): ElementRef {
   return { uiId: ui.id, elementId: el.id, name: el.name, locator, candidates: el.locators, fingerprint: el.fingerprint }
 }
 
-/** Errors that block a run: branch structure plus element commands without an element. */
+/** A parameter the engine would reject as soon as the step runs, or null. Mirrors worker/engine/executor.ts. */
+function parameterError(s: Step): string | null {
+  const def = COMMAND_BY_ID[s.command]
+  if (!def) return null
+  const value = s.value ?? ''
+  if (def.variable && !/^[A-Za-z_][A-Za-z0-9_]*$/.test((s.variable ?? '').trim())) {
+    return (s.variable ?? '').trim() ? 'The variable name must start with a letter or _ and use only letters, digits and _.' : 'Enter a variable name.'
+  }
+  if (s.command === 'navigate' && !value.trim()) return 'Enter the URL to open.'
+  if (s.command === 'press_key' && !value.trim()) return 'Choose a key.'
+  if (isNumeric(s.command) && !value.includes('${')) {
+    // "Wait until visible" falls back to 10 s when left empty; a fixed wait needs a number.
+    if (!value.trim()) return s.command === 'wait_seconds' ? 'Enter the number of seconds to wait.' : null
+    const n = Number(value)
+    if (!Number.isFinite(n) || n < 0) return `“${value.length > 24 ? value.slice(0, 24) + '…' : value}” is not a number of seconds.`
+  }
+  return null
+}
+
+/** Errors that block a run: branch structure, element commands without an element, unusable parameters. */
 export function stepErrors(steps: Step[]): Map<string, string> {
   const map = new Map<string, string>()
   for (const s of steps) {
-    if (!s.disabled && COMMAND_BY_ID[s.command]?.target && !s.target) map.set(s.id, 'No UI element chosen. Click the placeholder, then pick an element on the captured screen.')
+    if (s.disabled) continue
+    if (COMMAND_BY_ID[s.command]?.target && !s.target) map.set(s.id, 'No UI element chosen. Click the placeholder, then pick an element on the captured screen.')
+    else {
+      const problem = parameterError(s)
+      if (problem) map.set(s.id, problem)
+    }
   }
   for (const e of validateSteps(steps)) if (!map.has(e.stepId)) map.set(e.stepId, e.message)
   return map
@@ -97,3 +128,11 @@ export function stepDepths(steps: Step[]): number[] {
 }
 
 export const sameLocator = (a: Locator, b: Locator) => a.key === b.key && a.value === b.value
+
+/** Would the two steps do the same thing when run? (The element's display name does not matter.) */
+export function sameStep(a: Step, b: Step): boolean {
+  if (a.command !== b.command || (a.value ?? '') !== (b.value ?? '') || (a.variable ?? '') !== (b.variable ?? '')) return false
+  if (!!a.disabled !== !!b.disabled || !!a.continueOnFailure !== !!b.continueOnFailure) return false
+  if (!a.target || !b.target) return !a.target && !b.target
+  return a.target.uiId === b.target.uiId && a.target.elementId === b.target.elementId && sameLocator(a.target.locator, b.target.locator)
+}

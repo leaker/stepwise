@@ -3,11 +3,11 @@ import { ArrowLeft, Check, CloudAlert, ListPlus, Play, Plus, Redo2, Square, Undo
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { COMMAND_BY_ID, DEFAULT_COMMAND, stepSentence } from '../../shared/commands'
-import type { CommandId, ElementRef, Step, StepResult, Ui, UiElement } from '../../shared/types'
+import type { CommandId, Step, StepResult, Ui, UiElement } from '../../shared/types'
 import { api, qk } from '../api'
 import { Button, ErrorState, IconButton, Loading, Spinner, StatusIcon, toast, toastError } from '../components/ui'
 import { cx, isTerminal, STATUS_LABEL, uid } from '../lib/format'
-import { changeCommand, makeTarget, newStep, stepErrors } from './model'
+import { changeCommand, makeTarget, newStep, sameStep, stepErrors } from './model'
 import { CommandPalette, StepList } from './StepList'
 import { UiPanel, type Inspect } from './UiPanel'
 
@@ -46,7 +46,12 @@ function EditorInner({ tid }: { tid: string }) {
     const s = save.current
     window.clearTimeout(s.timer)
     for (;;) {
-      if (s.inflight) await s.inflight
+      // Another caller may start the next save the moment this one settles, so look again after waiting:
+      // "saved" means no request in flight and nothing dirty.
+      if (s.inflight) {
+        await s.inflight
+        continue
+      }
       if (!s.dirty) return true
       s.dirty = false
       setSaveState('saving')
@@ -148,6 +153,14 @@ function EditorInner({ tid }: { tid: string }) {
     if (uis.length && !uis.some((u) => u.id === currentUiId)) setCurrentUiId(uis[uis.length - 1].id)
   }, [uis, currentUiId])
 
+  // Undo / redo can remove the step that is selected, being picked for or inspected.
+  useEffect(() => {
+    const has = (id: string | null | undefined) => !!id && steps.some((s) => s.id === id)
+    if (selectedId && !has(selectedId)) setSelectedId(null)
+    if (pickForId && !has(pickForId)) setPickForId(null)
+    if (inspect?.stepId && !has(inspect.stepId)) setInspect(null)
+  }, [steps, selectedId, pickForId, inspect])
+
   const selectedRef = useRef<string | null>(null)
   selectedRef.current = selectedId
   const select = useCallback(
@@ -187,9 +200,11 @@ function EditorInner({ tid }: { tid: string }) {
       setSelectedId(pickFor.id)
       setFocusId(pickFor.id)
     } else {
-      const command = DEFAULT_COMMAND[el.type] ?? 'click'
+      const text = el.fingerprint.text
+      // A fingerprint keeps the first 120 characters only: a longer text can be checked with "contains", not "equals".
+      const command = el.type === 'text' && text.length >= 120 ? 'assert_text_contains' : (DEFAULT_COMMAND[el.type] ?? 'click')
       // Text assertions start from what the screen showed at capture time, so the step is runnable as-is.
-      const step = newStep(command, command === 'assert_text_equals' ? { target, value: el.fingerprint.text } : { target })
+      const step = newStep(command, command === 'assert_text_equals' || command === 'assert_text_contains' ? { target, value: text } : { target })
       insertAt(insertIndex(), step)
       setFocusId(step.id)
     }
@@ -246,13 +261,24 @@ function EditorInner({ tid }: { tid: string }) {
   const abort = useMutation({ mutationFn: () => api.abortRun(runId!), onSuccess: (r) => qc.setQueryData(qk.run(r.id), r) })
   const runData = runId ? run.data : undefined
   const running = start.isPending || (!!runData && !isTerminal(runData.status))
-  const results = useMemo(() => new Map<string, StepResult>((runData?.results ?? []).map((r) => [r.stepId, r])), [runData?.results])
+  const reported = useMemo(() => new Map<string, StepResult>((runData?.results ?? []).map((r) => [r.stepId, r])), [runData?.results])
+  // A row only shows a result while the step is still what the run executed; an edited step has not been run.
+  const results = useMemo(() => {
+    const ran = new Map((runData?.steps ?? []).map((s) => [s.id, s]))
+    const current = new Map<string, StepResult>()
+    for (const s of steps) {
+      const result = reported.get(s.id)
+      const then = ran.get(s.id)
+      if (result && then && sameStep(s, then)) current.set(s.id, result)
+    }
+    return current
+  }, [steps, reported, runData?.steps])
   const runningId = useMemo(() => {
     if (!runData || runData.status !== 'running') return null
     const from = runData.range?.from ?? 1
     const to = runData.range?.to ?? runData.steps.length
-    return runData.steps.find((s, i) => !s.disabled && i + 1 >= from && i + 1 <= to && !results.has(s.id))?.id ?? null
-  }, [runData, results])
+    return runData.steps.find((s, i) => !s.disabled && i + 1 >= from && i + 1 <= to && !reported.has(s.id))?.id ?? null
+  }, [runData, reported])
   const finished = runData && isTerminal(runData.status) ? runData : null
   useEffect(() => {
     if (!finished) return
@@ -276,7 +302,8 @@ function EditorInner({ tid }: { tid: string }) {
   }
 
   // ----- capture -----
-  const [replayError, setReplayError] = useState<{ n: number; sentence: string; message: string } | null>(null)
+  // Belongs to the capture it happened on: it is only shown while that screen is.
+  const [replayError, setReplayError] = useState<{ uiId: string; stepId: string; message: string } | null>(null)
   const capture = useMutation({
     mutationFn: async (req: { afterStepId: string } | { url: string }) => {
       if (!(await flush())) throw new Error('The steps could not be saved, so nothing was captured.')
@@ -287,8 +314,7 @@ function EditorInner({ tid }: { tid: string }) {
       setCurrentUiId(res.ui.id)
       setInspect(null)
       if (res.replayError) {
-        const i = stepsRef.current.findIndex((s) => s.id === res.replayError!.stepId)
-        setReplayError({ n: i + 1, sentence: i >= 0 ? stepSentence(stepsRef.current[i]) : 'a step that was removed', message: res.replayError.message })
+        setReplayError({ uiId: res.ui.id, stepId: res.replayError.stepId, message: res.replayError.message })
       } else {
         setReplayError(null)
         toast(`Captured “${res.ui.name}” with ${res.ui.elements.length} elements`)
@@ -296,9 +322,15 @@ function EditorInner({ tid }: { tid: string }) {
     },
   })
   const captureAfter = useMemo(() => {
-    const i = selectedId ? steps.findIndex((s) => s.id === selectedId) : steps.length - 1
+    const at = selectedId ? steps.findIndex((s) => s.id === selectedId) : -1
+    const i = at >= 0 ? at : steps.length - 1
     return i >= 0 ? { id: steps[i].id, n: i + 1 } : null
   }, [steps, selectedId])
+  const shownReplayError = useMemo(() => {
+    if (!replayError || replayError.uiId !== ui?.id) return null
+    const i = steps.findIndex((s) => s.id === replayError.stepId)
+    return { n: i + 1, sentence: i >= 0 ? stepSentence(steps[i]) : null, message: replayError.message }
+  }, [replayError, ui?.id, steps])
   const capturing = capture.isPending
     ? 'afterStepId' in capture.variables
       ? `Replaying steps 1–${Math.max(1, steps.findIndex((s) => s.id === (capture.variables as { afterStepId: string }).afterStepId) + 1)}, then capturing…`
@@ -550,7 +582,7 @@ function EditorInner({ tid }: { tid: string }) {
           onCancelPick={() => setPickForId(null)}
           captureAfter={captureAfter}
           capturing={capturing}
-          replayError={replayError}
+          replayError={shownReplayError}
           onDismissReplayError={() => setReplayError(null)}
           onCaptureAfter={() => captureAfter && capture.mutate({ afterStepId: captureAfter.id })}
           onCaptureUrl={(url) => capture.mutate({ url })}
@@ -558,7 +590,19 @@ function EditorInner({ tid }: { tid: string }) {
           onPickElement={pickElement}
           inspect={inspect}
           onInspect={setInspect}
-          onUpdateTarget={(stepId, target: ElementRef) => commit(stepsRef.current.map((s) => (s.id === stepId ? { ...s, target } : s)))}
+          onSaveElement={(ref, name, forStep) => {
+            // The name belongs to the element: every step that uses it shows the new one. The locator choice is per step.
+            let changed = false
+            const next = stepsRef.current.map((s) => {
+              if (!s.target) return s
+              const mine = forStep?.stepId === s.id
+              const same = s.target.uiId === ref.uiId && s.target.elementId === ref.elementId
+              if (!mine && !(same && s.target.name !== name)) return s
+              changed = true
+              return { ...s, target: { ...s.target, ...(same || mine ? { name } : {}), ...(mine ? { locator: forStep.locator, candidates: forStep.candidates } : {}) } }
+            })
+            if (changed) commit(next)
+          }}
         />
       </div>
 

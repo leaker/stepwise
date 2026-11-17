@@ -16,16 +16,20 @@ affiliated with, endorsed by, or derived from the code of any such product.
 - **Steps without code** - a step is a command (click, input, select, assertions, waits, variables,
   If / Otherwise / End branch, ...) plus an element picked from a capture. The command set is in
   `shared/commands.ts`.
-- **Single runs** - run a test case (or a range of its steps) and watch results arrive step by step.
+- **Single runs** - run a test case and watch results arrive step by step. *Run up to this step* and
+  *Run only this step* run a range; every run starts in a fresh browser, so the steps before the range
+  are replayed first as set-up and only the range is reported.
 - **Batch runs** - run all or selected test cases of a project in order, with a summary of succeeded /
   failed / unresolved / aborted. Batch runs can be started from CI over HTTP.
 - **Reports** - per-step status, duration, screenshot, error message and a console-style log.
 - **Self-healing** - in batch runs, when a step's element cannot be found the engine looks for the
-  closest match, continues with it and marks the run *unresolved*. Approving the repair updates the
-  test case and the stored capture; rejecting it turns the run into a failure.
+  closest match, continues with it and marks the run *unresolved*. Approving the repair saves the new
+  locator to the test case and to the element on its captured screen (the screenshot is kept; capture
+  again to refresh it); rejecting it turns the run into a failure. A decision is final.
 - **Abort** for single and batch runs.
 - **Optional access code** for the whole API, and an optional allow-list of hosts tests may open.
-- A small bundled sample site ("Harbor Inn") under `/demo` and a demo project created on first visit.
+- A small bundled sample site ("Harbor Inn") under `/demo` and a demo project that tests it, created
+  with the database.
 
 ## Architecture
 
@@ -54,8 +58,9 @@ A capture is synchronous: the request launches a browser, captures and returns. 
 `POST` inserts a `queued` row with a snapshot of the steps and sends a queue message; the consumer
 executes it and writes each step result to D1 as it happens, so the UI simply polls `GET /api/runs/:id`.
 A batch run is one queue message: its test cases run one after another in one browser, each in a fresh
-browser context. Aborting sets the status in D1; the consumer checks it before every step. A run that
-shows no progress for 15 minutes is marked failed the next time it is read, so nothing stays "running"
+browser context. Aborting sets the status in D1; the consumer checks it before every step. A run has
+15 minutes from the moment it starts (a queue consumer invocation does not live longer either); one that
+is still unfinished after that is marked failed the next time it is read, so nothing stays "running"
 forever.
 
 ## How the engine works
@@ -64,18 +69,41 @@ The contract is `worker/engine/index.ts`: `captureUi(page)` and `runSteps(page, 
 
 - **Detection.** `captureUi` takes a full-page screenshot and collects the visible interactive and
   text elements with their type, bounding box, a readable name such as `"Sign in" button`, and a
-  *fingerprint* (tag, text, label, stable attributes, ancestor path, position).
+  *fingerprint* (tag, text, label, stable attributes, ancestor path, position). Open shadow roots are
+  scanned; a checkbox or radio button hidden behind a styled label is offered at that label; a
+  `<div>` or `<span>` with a click handler, tab stop or pointer cursor of its own counts as clickable.
 - **Locator ranking.** Every element gets several candidate locators (`id=`, `css=`, `xpath=`) ordered
   from most to least stable; the first is the default and the user can pick another in the editor.
+  Every locator matches exactly one element when it is captured. At run time a locator that matches
+  several elements is an error ("ambiguous"), never "use the first one".
 - **Auto-wait.** A missing element or a failing assertion is retried until a time limit (10 s in runs)
-  before the step fails. Assertions can be set to "continue on failure".
-- **Self-healing.** With healing on (batch runs), a step whose locator matches nothing is compared
-  against the elements on the current page using the stored fingerprint. The best match above a
-  threshold is used, and the step is reported as `healed` with a proposal (old and new locator,
-  similarity score, before/after position) that waits for approval. Commands that expect an element to
-  be absent, and conditional branches, never heal.
+  before the step fails. Assertions can be set to "continue on failure". "Exists" means rendered: a
+  node that is in the DOM but hidden does not exist for *Assert exists / does not exist / If exists*.
+- **Self-healing.** With healing on (batch runs), a step whose locator matches nothing (or more than
+  one element) is compared against the elements on the current page using the stored fingerprint. The
+  best match above a threshold is used, and the step is reported as `healed` with a proposal (old and
+  new locator, similarity score, before/after position) that waits for approval. A replacement must
+  carry over something that identifies the element - its text, label, an attribute such as `name` or
+  `href`, or its classes; for a text element, the text itself. Sitting in the same place with the same
+  tag is not enough, so a different message or an unrelated button is a failure, not a repair.
+  Commands that expect an element to be absent, and conditional branches, never heal.
 
 Each step stores its own copy of its target element, so a run does not depend on the capture still existing.
+
+## Try self-healing
+
+The sample site has a second design: any of its pages opened with `?ui=v2` renames ids, changes the
+button text and wraps the form, the way a redesign would. The demo project has a `SITE_VERSION`
+variable for it, and its test case opens `${BASE_URL}/login.html${SITE_VERSION}`.
+
+1. Open the demo project's test case in the editor, capture the login screen and add steps by clicking
+   elements: input `demo@example.com` and `demo1234`, click *Sign in*, capture again after that step and
+   assert the "Welcome back, Demo User" text. Run it: it succeeds.
+2. In the project's *Settings*, set `SITE_VERSION` to `?ui=v2` and save.
+3. A single run now fails at the first element (single runs never heal). Start a **batch run** instead:
+   the steps are repaired as they go and the run ends *Needs review*.
+4. Open the run, review each repair (before / after, old and new locator, similarity) and approve or
+   reject it. Approved locators are written back to the test case.
 
 ## Local development
 
@@ -83,7 +111,7 @@ Requirements: a current Node release and pnpm. Browser Run, D1, R2 and Queues ar
 
 ```sh
 pnpm install
-pnpm db:migrate:local     # create the local D1 database
+pnpm db:migrate:local     # create the local D1 database and the demo project
 pnpm dev                  # http://localhost:5173
 ```
 
@@ -94,8 +122,12 @@ Optional settings go in `.dev.vars` (see `.dev.vars.example`):
 - `ACCESS_CODE` - when set, every `/api` route except `/api/session` needs the code: the UI asks for
   it once and keeps an HttpOnly cookie; scripts send `Authorization: Bearer <code>`.
 - `ALLOWED_HOSTS` - comma-separated hostnames. When set, captures and navigate steps may only open
-  these hosts and the app's own origin. This is checked before a browser is launched and enforced
-  again inside the browser for URLs that are built at run time.
+  these hosts and the app's own origin. This is checked before a browser is launched and again inside
+  the browser, where every request is checked before it is sent (`worker/guard.ts`): a page or iframe on
+  another host is not loaded, and a step that tries to leave the allowed hosts fails with that URL.
+  Private and loopback addresses are refused the same way, with or without a list. Redirects are checked
+  as they happen: the navigation is cancelled and its page is never shown, but the redirected request
+  itself has already left the browser by then.
 
 ## Deploy
 
@@ -142,7 +174,11 @@ Pass `"testCaseIds": ["...", "..."]` to run a subset. The full HTTP API is docum
   cross-browser matrix, no parallel patterns. A batch runs its test cases sequentially.
 - A batch run executes inside a single queue consumer invocation, so very long batches can hit the
   platform's time limits; Browser Run's own concurrency and session limits apply too.
+- Captures do not look inside iframes or closed shadow roots, and elements inside an open shadow
+  root only get CSS locators (XPath cannot reach them).
 - No users, roles, schedules, notifications, shared steps, data-driven tests, loops or visual diffs.
-- Runs are not retried automatically.
+- A run is never retried once it has started. Only a run that could not get a browser (Browser Run's
+  concurrency or rate limit) is tried again, up to three times, before it is marked failed.
+- A request body may be 1 MB at most; a run may take 15 minutes at most.
 - Self-healing is a similarity heuristic, not a model; every repair needs a human decision.
 - The access code is a single shared secret, not an account system.

@@ -7,7 +7,7 @@ import { stepSentence } from '../../shared/commands'
 import { locatorToString, type Box, type HealProposal, type Run, type StepResult, type Ui } from '../../shared/types'
 import { api, qk, shotUrl } from '../api'
 import { Button, Dialog, ErrorState, IconButton, Loading, Shell, Spinner, StatusIcon, Tabs } from '../components/ui'
-import { clock, cx, dateTime, duration, isTerminal, ms, STATUS_LABEL } from '../lib/format'
+import { cx, dateTime, duration, isTerminal, ms, STATUS_LABEL } from '../lib/format'
 import { useTick } from '../lib/hooks'
 
 type TabId = 'shots' | 'log' | 'info'
@@ -99,7 +99,7 @@ export function RunPage() {
                 {h.heal!.warning && <span className="message-warn"> {h.heal!.warning}</span>}
               </span>
               <span className="message-cta">
-                {h.heal!.state === 'unresolved' ? 'Review' : 'View'}
+                {h.heal!.state === 'unresolved' && !live ? 'Review' : 'View'}
                 <ChevronRight size={15} />
               </span>
             </button>
@@ -145,7 +145,7 @@ export function RunPage() {
       {tab === 'info' && <InfoTab run={r} />}
 
       {lightbox != null && shots[lightbox] && <Lightbox shots={shots} index={lightbox} onIndex={setLightbox} onClose={() => setLightbox(null)} />}
-      {healResult && <HealDialog run={r} result={healResult} onClose={() => setHealStep(null)} />}
+      {healResult && <HealDialog run={r} result={healResult} live={live} onClose={() => setHealStep(null)} />}
     </Shell>
   )
 }
@@ -155,6 +155,10 @@ function healLabel(h: HealProposal): string {
 }
 
 // ---------- Log ----------
+
+/** Size of .log-preview in app.css. */
+const PREVIEW_W = 360
+const PREVIEW_H = 240
 
 function LogTab({ run, live }: { run: Run; live: boolean }) {
   const [wrap, setWrap] = useState(true)
@@ -178,8 +182,11 @@ function LogTab({ run, live }: { run: Run; live: boolean }) {
                 className={cx('log-step', res && `is-${res.status}`, out && 'is-out')}
                 onMouseEnter={(e) => {
                   if (!res?.screenshotKey) return
+                  // Stay inside the Steps pane, under the row (above it near the bottom of the window): the
+                  // Console pane next to it is what the step list is read against.
                   const rect = e.currentTarget.getBoundingClientRect()
-                  setHover({ key: res.screenshotKey, top: Math.max(8, Math.min(rect.top - 40, window.innerHeight - 248)), left: rect.right + 10 })
+                  const below = rect.bottom + 6
+                  setHover({ key: res.screenshotKey, top: below + PREVIEW_H > window.innerHeight - 8 ? Math.max(8, rect.top - 6 - PREVIEW_H) : below, left: Math.max(8, rect.right - PREVIEW_W) })
                 }}
                 onMouseLeave={() => setHover(null)}
               >
@@ -206,7 +213,7 @@ function LogTab({ run, live }: { run: Run; live: boolean }) {
       </div>
       {hover &&
         createPortal(
-          <div className="log-preview" style={{ top: hover.top, left: Math.min(hover.left, window.innerWidth - 376) }}>
+          <div className="log-preview" style={{ top: hover.top, left: hover.left }}>
             <img src={shotUrl(hover.key)} alt="" />
           </div>,
           document.body,
@@ -228,7 +235,7 @@ function InfoTab({ run }: { run: Run }) {
     ['Queued', dateTime(run.createdAt)],
     ['Started', dateTime(run.startedAt)],
     ['Finished', dateTime(run.finishedAt)],
-    ['Duration', clock(run.startedAt, run.finishedAt)],
+    ['Duration', duration(run.startedAt, run.finishedAt)],
     ['Time in steps', ms(total)],
     ['Steps reported', `${run.results.length}`],
     ['Run id', <code key="id">{run.id}</code>],
@@ -333,7 +340,7 @@ function Crop({ src, width, height, box }: { src: string; width: number; height:
   )
 }
 
-function HealDialog({ run, result, onClose }: { run: Run; result: StepResult; onClose: () => void }) {
+function HealDialog({ run, result, live, onClose }: { run: Run; result: StepResult; live: boolean; onClose: () => void }) {
   const qc = useQueryClient()
   const heal = result.heal!
   const uis = useQuery({ queryKey: qk.uis(run.testCaseId), queryFn: () => api.uis(run.testCaseId), retry: false })
@@ -357,10 +364,18 @@ function HealDialog({ run, result, onClose }: { run: Run; result: StepResult; on
       onClose={onClose}
       width={920}
       footer={
-        open ? (
+        open && live ? (
+          <>
+            <span className="heal-foot-note">The run is still in progress. You can approve or reject this repair when it has finished.</span>
+            <Button onClick={onClose} data-autofocus>
+              Close
+            </Button>
+          </>
+        ) : open ? (
           <>
             <span className="heal-foot-note">
-              Approving updates the step and its captured screen to the new locator. Rejecting marks this run as failed and changes nothing.
+              Approving saves the new locator to the step and to the element on its captured screen (the screenshot is not retaken). Rejecting marks this
+              run as failed and changes nothing.
             </span>
             <Button variant="danger" busy={decide.isPending && decide.variables === 'reject'} disabled={decide.isPending} onClick={() => decide.mutate('reject')}>
               Reject
