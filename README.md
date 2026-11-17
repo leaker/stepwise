@@ -263,6 +263,7 @@ Pass `"testCaseIds": ["...", "..."]` to run a subset. The full HTTP API is docum
 
 ## Limits and non-goals
 
+- Speculation rules sent as an HTTP header (for example by Cloudflare Speed Brain) are refused inside the test browser: on Cloudflare Browser Run a mouse-down prefetch tears the browser session down. Pages behave the same, but prefetch/prerender behaviour itself cannot be tested. Inline `<script type="speculationrules">` blocks are not filtered.
 - One browser type (Chromium on Browser Run); no cross-browser matrix, no parallel patterns. A batch
   runs its test cases sequentially.
 - Phones are emulated in that same Chromium (viewport, user agent, touch, pixel ratio). This is mobile

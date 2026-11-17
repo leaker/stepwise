@@ -45,6 +45,11 @@ export async function guardContext(context: BrowserContext, env: Pick<Env, 'ALLO
   await context.route('**/*', async (route) => {
     const request = route.request()
     const url = parseHttpUrl(request.url())
+    // Speculation rules (e.g. the `Speculation-Rules: "/cdn-cgi/speculation"` header Cloudflare Speed Brain adds)
+    // make Chrome prefetch a link on mouse-down. On Cloudflare Browser Run that prefetch tears the whole browser
+    // session down, so every click on a link of such a site would kill the run. Refusing the rule set keeps the
+    // browser from speculating; the page itself behaves the same.
+    if (request.headers()['sec-fetch-dest'] === 'speculationrules' || url?.pathname === '/cdn-cgi/speculation') return route.abort('blockedbyclient')
     if (url) {
       const navigation = request.isNavigationRequest()
       if (!(navigation ? isHostAllowed(url, env, appOrigin) : resourceAllowed(url))) {

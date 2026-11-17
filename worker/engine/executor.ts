@@ -563,6 +563,8 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
       if (step.command !== 'else' && step.command !== 'end_if') condition = await execute(step, def, value, n, out)
       const blocked = opts.takeBlockedNavigation?.()
       if (blocked) throw new StepError(blockedMessage(blocked))
+      // A step must never pass on a dead page (page.url() and friends keep answering from cache after a crash).
+      if (page.isClosed()) throw new StepError('The browser page closed unexpectedly during this step')
       if (isIf) {
         frames.push({ exec: condition === true, taken: condition === true })
         log(`[${n}] condition is ${condition === true}`)
