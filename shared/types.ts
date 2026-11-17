@@ -252,6 +252,7 @@ export interface BatchRun {
 // POST   /api/projects/:pid/test-cases { name?, description?, device? } -> TestCase
 // GET    /api/test-cases/:tid                  -> TestCase
 // PATCH  /api/test-cases/:tid { name?, description?, device?, steps? } -> TestCase
+//          409 when `steps` is sent while an assistant session of the test case is queued or running
 // DELETE /api/test-cases/:tid                  -> { ok: true }
 // POST   /api/test-cases/:tid/duplicate        -> TestCase
 //
@@ -276,7 +277,8 @@ export interface BatchRun {
 // AI assistant (optional; needs the ANTHROPIC_API_KEY secret, otherwise every route but status is a 503):
 // GET    /api/assistant/status                 -> AssistantStatus
 // POST   /api/test-cases/:tid/assistant { message } -> AssistantSession (status queued)
-//          400 when message is empty or over 2000 characters, 409 while another session of the test case is queued or running
+//          400 when message is empty or over 2000 characters, 409 while another session of the test case is queued or running,
+//          429 when the deployment's assistant budget for the last 24 hours is used up
 // GET    /api/test-cases/:tid/assistant        -> AssistantSession[] (oldest first)
 // GET    /api/assistant/:sid                   -> AssistantSession
 // POST   /api/assistant/:sid/abort             -> AssistantSession
@@ -324,7 +326,10 @@ export interface AssistantEvent {
 }
 
 export interface AssistantUsage {
+  /** The model the assistant asks. */
   model: string
+  /** Other models that worked on a request: a request the model declined is re-run on a fallback model, billed at its own price. */
+  otherModels?: string[]
   /** Model requests made so far. */
   turns: number
   /** Tokens that were not read from the prompt cache. */
@@ -332,8 +337,10 @@ export interface AssistantUsage {
   outputTokens: number
   cacheReadTokens: number
   cacheWriteTokens: number
-  /** Estimate from the list price of `model`. */
+  /** Estimate from list prices, each request at the price of the model that worked on it. */
   costUsd: number
+  /** A model without a known price was involved: `costUsd` counts it at the price of `model`. */
+  costIncomplete?: boolean
 }
 
 /** One instruction to the assistant and everything it did for it. */

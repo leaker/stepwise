@@ -22,6 +22,13 @@ export interface CommandDef {
   healable?: boolean
 }
 
+/**
+ * Variables every run provides. A project variable cannot use one of these names: the built-in value would
+ * silently win at run time.
+ */
+export const BUILT_IN_VARIABLES = ['BASE_URL', 'BROWSER', 'DEVICE'] as const
+export const isBuiltInVariable = (name: string): boolean => (BUILT_IN_VARIABLES as readonly string[]).includes(name)
+
 export const COMMANDS: CommandDef[] = [
   { id: 'click', label: 'Click', category: 'UI operation', target: true, sentence: 'Click {target}', shot: true, healable: true },
   { id: 'hover', label: 'Hover', category: 'UI operation', target: true, sentence: 'Hover over {target}', shot: true, healable: true },

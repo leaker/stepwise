@@ -17,9 +17,12 @@ export interface AssistantPanelProps {
   status: AssistantStatus | undefined
   sessions: AssistantSession[]
   loading: boolean
+  /** The status or the session list could not be loaded: shown instead of the transcript, with a way to try again. */
+  loadError: { message: string; retrying: boolean; onRetry: () => void } | null
   sending: boolean
   aborting: boolean
-  onSend: (message: string) => void
+  /** Resolves to whether the message was accepted. A message that was not is kept in the box. */
+  onSend: (message: string) => Promise<boolean>
   onAbort: (sessionId: string) => void
   onClose: () => void
 }
@@ -30,7 +33,7 @@ export function AssistantPanel(p: AssistantPanelProps) {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const active = p.sessions.find(isActive)
   const busy = !!active || p.sending
-  const enabled = p.status?.enabled === true
+  const enabled = p.status?.enabled === true && !p.loadError
   const eventCount = p.sessions.reduce((n, s) => n + s.events.length, 0)
 
   // Follow the transcript while it grows, unless the user scrolled up to read.
@@ -47,8 +50,12 @@ export function AssistantPanel(p: AssistantPanelProps) {
     const message = text.trim()
     if (!message || busy || !enabled) return
     pinned.current = true
-    p.onSend(message)
-    setDraft('')
+    void p.onSend(message).then((accepted) => {
+      // Only a message the server took is cleared (and only if the box still holds it): a refused or failed
+      // one stays where it was written, ready to be sent again.
+      if (accepted) setDraft((d) => (d.trim() === message ? '' : d))
+      else inputRef.current?.focus()
+    })
   }
 
   return (
@@ -70,7 +77,18 @@ export function AssistantPanel(p: AssistantPanelProps) {
           pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
         }}
       >
-        {p.status && !enabled ? (
+        {p.loadError ? (
+          <div className="asst-empty" role="alert">
+            <CircleAlert size={20} aria-hidden />
+            <p>
+              <strong>The assistant could not be loaded.</strong> {p.loadError.message}
+            </p>
+            <Button size="sm" busy={p.loadError.retrying} onClick={p.loadError.onRetry}>
+              Try again
+            </Button>
+            <p className="muted">Everything else in the editor keeps working.</p>
+          </div>
+        ) : p.status && !enabled ? (
           <div className="asst-empty">
             <CircleAlert size={20} aria-hidden />
             <p>
@@ -129,7 +147,7 @@ export function AssistantPanel(p: AssistantPanelProps) {
           maxLength={2000}
           value={draft}
           disabled={!enabled}
-          placeholder={enabled ? (busy ? 'The assistant is working…' : 'Describe a test, or what to change') : 'Not configured'}
+          placeholder={enabled ? (busy ? 'The assistant is working…' : 'Describe a test, or what to change') : p.loadError ? 'The assistant could not be loaded' : p.status ? 'Not configured' : 'Loading…'}
           aria-label="Message to the assistant"
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
@@ -199,19 +217,27 @@ const compact = (n: number): string => (n < 1000 ? String(n) : n < 100_000 ? `${
 function Usage({ session }: { session: AssistantSession }) {
   const u = session.usage!
   const input = u.inputTokens + u.cacheReadTokens + u.cacheWriteTokens
+  const others = u.otherModels ?? []
   return (
-    <div className="asst-usage num" title={`${u.model}: ${u.inputTokens} input tokens, ${u.cacheWriteTokens} written to the prompt cache, ${u.cacheReadTokens} read from it, ${u.outputTokens} output tokens. The cost is an estimate from list prices.`}>
-      {u.turns} {u.turns === 1 ? 'turn' : 'turns'} · {compact(input)} in{u.cacheReadTokens > 0 ? ` (${Math.round((u.cacheReadTokens / input) * 100)}% cached)` : ''} · {compact(u.outputTokens)} out · about ${u.costUsd < 0.01 ? u.costUsd.toFixed(3) : u.costUsd.toFixed(2)}
+    <div
+      className="asst-usage num"
+      title={`${u.model}${others.length ? ` (and ${others.join(', ')}, which answered a request ${u.model} declined)` : ''}: ${u.inputTokens} input tokens, ${u.cacheWriteTokens} written to the prompt cache, ${u.cacheReadTokens} read from it, ${u.outputTokens} output tokens. The cost is an estimate from list prices${u.costIncomplete ? '; a model without a known price was counted at the price of ' + u.model : ''}.`}
+    >
+      {u.turns} {u.turns === 1 ? 'turn' : 'turns'} · {compact(input)} in{u.cacheReadTokens > 0 ? ` (${Math.round((u.cacheReadTokens / input) * 100)}% cached)` : ''} · {compact(u.outputTokens)} out · {u.costIncomplete ? 'at least' : 'about'} ${u.costUsd < 0.01 ? u.costUsd.toFixed(3) : u.costUsd.toFixed(2)}
+      {others.length > 0 && ` · partly answered by ${others.join(', ')}`}
     </div>
   )
 }
 
-// ---- a small markdown subset: paragraphs, lists, bold, inline code ----
+// ---- a small markdown subset: paragraphs, lists, bold, inline code, code blocks, links as text ----
 
 function inline(text: string): ReactNode[] {
-  return text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g).map((part, i) => {
+  return text.split(/(`[^`]+`|\*\*[^*]+\*\*|\[[^\]\n]+\]\([^)\s]+\))/g).map((part, i) => {
     if (part.length > 2 && part.startsWith('`') && part.endsWith('`')) return <code key={i}>{part.slice(1, -1)}</code>
     if (part.length > 4 && part.startsWith('**') && part.endsWith('**')) return <strong key={i}>{part.slice(2, -2)}</strong>
+    // The text is the model's, written after reading pages nobody vetted: a link is shown, never made clickable.
+    const link = /^\[([^\]\n]+)\]\(([^)\s]+)\)$/.exec(part)
+    if (link) return <Fragment key={i}>{link[1] === link[2] ? link[1] : `${link[1]} (${link[2]})`}</Fragment>
     return <Fragment key={i}>{part}</Fragment>
   })
 }
@@ -220,23 +246,52 @@ export function renderMarkdown(source: string): ReactNode[] {
   const out: ReactNode[] = []
   const lines = source.replace(/\r/g, '').split('\n')
   let para: string[] = []
-  let list: { ordered: boolean; items: string[] } | null = null
+  let list: { ordered: boolean; start: number; items: string[] } | null = null
+  let code: string[] | null = null
+  // A blank line ends a paragraph at once, but a list only when what follows is not its next item: models
+  // write "loose" lists with a blank line between the items, and each item must not become a list of its own.
+  let gap = false
   const flush = () => {
     if (para.length) out.push(<p key={out.length}>{inline(para.join(' '))}</p>)
     para = []
     if (list) {
       const items = list.items.map((item, i) => <li key={i}>{inline(item)}</li>)
-      out.push(list.ordered ? <ol key={out.length}>{items}</ol> : <ul key={out.length}>{items}</ul>)
+      out.push(
+        list.ordered ? (
+          <ol key={out.length} start={list.start}>
+            {items}
+          </ol>
+        ) : (
+          <ul key={out.length}>{items}</ul>
+        ),
+      )
     }
     list = null
+    gap = false
   }
   for (const raw of lines) {
     const line = raw.trim()
+    if (code) {
+      if (line.startsWith('```')) {
+        out.push(
+          <pre key={out.length}>
+            <code>{code.join('\n')}</code>
+          </pre>,
+        )
+        code = null
+      } else code.push(raw)
+      continue
+    }
     const bullet = /^[-*•]\s+(.*)$/.exec(line)
-    const numbered = /^\d+[.)]\s+(.*)$/.exec(line)
+    const numbered = /^(\d+)[.)]\s+(.*)$/.exec(line)
     const heading = /^#{1,6}\s+(.*)$/.exec(line)
-    if (line === '') flush()
-    else if (heading) {
+    if (line === '') {
+      if (list) gap = true
+      else flush()
+    } else if (line.startsWith('```')) {
+      flush()
+      code = []
+    } else if (heading) {
       flush()
       out.push(
         <p key={out.length}>
@@ -246,11 +301,17 @@ export function renderMarkdown(source: string): ReactNode[] {
     } else if (bullet || numbered) {
       const ordered = !!numbered
       if (para.length || (list && list.ordered !== ordered)) flush()
-      list ??= { ordered, items: [] }
-      list.items.push((bullet ?? numbered)![1])
-    } else if (list) list.items[list.items.length - 1] += ` ${line}`
-    else para.push(line)
+      list ??= { ordered, start: numbered ? Number(numbered[1]) : 1, items: [] }
+      list.items.push(numbered ? numbered[2] : bullet![1])
+      gap = false
+    } else if (list && !gap) list.items[list.items.length - 1] += ` ${line}`
+    else {
+      if (list) flush()
+      para.push(line)
+    }
   }
+  // A code block the model never closed still shows what it holds.
+  if (code) out.push(<pre key={out.length}>{(code as string[]).join('\n')}</pre>)
   flush()
   return out
 }

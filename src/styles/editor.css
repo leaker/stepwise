@@ -162,9 +162,32 @@ body.is-resizing {
 
 /* ---------- Layout ---------- */
 .ed-body {
+  position: relative;
   flex: 1;
   display: grid;
+  /* --split is the width of the steps column, set by dragging the divider. */
+  grid-template-columns: minmax(400px, var(--split, 38%)) 5px minmax(0, 1fr);
   min-height: 0;
+}
+/* With the assistant open there are three panels to fit. The captured screen keeps a width at which its
+   toolbar and a phone screenshot fit, and the steps column gives way first. */
+.ed-body.has-asst {
+  grid-template-columns: minmax(340px, var(--split, 38%)) 5px minmax(430px, 1fr) 380px;
+}
+/* Too narrow for three: the assistant lies over the right edge instead of squeezing the screen away. */
+@media (max-width: 1199px) {
+  .ed-body.has-asst {
+    grid-template-columns: minmax(400px, var(--split, 38%)) 5px minmax(0, 1fr);
+  }
+  .ed-body.has-asst > .asst {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    width: min(380px, 100%);
+    box-shadow: -8px 0 24px rgb(22 27 38 / 0.16);
+  }
 }
 .ed-left {
   display: flex;
@@ -616,6 +639,7 @@ body.is-resizing .ed-resize {
   min-width: 0;
   min-height: 0;
   background: var(--bg);
+  container: uip / inline-size;
 }
 .uip-bar {
   display: flex;
@@ -627,6 +651,21 @@ body.is-resizing .ed-resize {
   background: var(--surface);
   border-bottom: 1px solid var(--line);
   min-width: 0;
+}
+/* In a narrow panel the bar keeps what acts (screen picker, Capture and its menu) and drops what only informs. */
+@container uip (max-width: 560px) {
+  .uip-bar .uip-url,
+  .uip-bar .uip-picker-count {
+    display: none;
+  }
+  .uip-bar .uip-picker {
+    min-width: 72px;
+  }
+}
+@container uip (max-width: 460px) {
+  .uip-bar .device-chip {
+    display: none;
+  }
 }
 .uip-picker {
   display: inline-flex;
@@ -924,6 +963,14 @@ body.is-resizing .ed-resize {
   box-shadow: var(--shadow-pop);
   animation: rise 0.12s ease-out;
 }
+.inspector.is-left {
+  right: auto;
+  left: 12px;
+}
+.inspector.is-bottom {
+  top: auto;
+  bottom: 12px;
+}
 .inspector-head {
   display: flex;
   align-items: center;
@@ -1136,6 +1183,17 @@ body.is-resizing .ed-resize {
   flex-shrink: 0;
   color: var(--accent);
 }
+.ed-locked.is-error {
+  border-bottom-color: var(--fail);
+  background: var(--fail-soft);
+}
+.ed-locked.is-error svg {
+  color: var(--fail);
+}
+.ed-locked .btn {
+  flex-shrink: 0;
+  margin-left: auto;
+}
 .ed-left-scroll.is-locked .step {
   opacity: 0.78;
 }
@@ -1260,6 +1318,20 @@ body.is-resizing .ed-resize {
 }
 .asst-text li + li {
   margin-top: 3px;
+}
+.asst-text pre {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.45;
+  white-space: pre;
+  overflow-x: auto;
+}
+.asst-text pre code {
+  padding: 0;
+  background: none;
 }
 .asst-text code,
 .asst-tool-text code {

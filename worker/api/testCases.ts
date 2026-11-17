@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { DEFAULT_DEVICE, isDeviceId } from '../../shared/devices'
 import type { DeviceId, Step } from '../../shared/types'
 import { deleteShots, getProjectRow, getTestCaseRow, lastRunsFor, newId, now, resolveBaseUrl, sweepStaleRuns, toTestCase, toUi, type TestCaseRow, type UiRow } from '../db'
+import { sweepStaleSessions } from '../assistant/store'
 import { HttpError, type Env } from '../env'
 import { captureScreen } from '../runner'
 import { assertNavigateTargetsAllowed, isHostAllowed, optionalText, parseElements, parseSteps, readBody, requireName, resolveUrl } from '../validate'
@@ -66,8 +67,21 @@ testCases.patch('/test-cases/:tid', async (c) => {
   const name = body.name === undefined ? current.name : requireName(body.name, 'Test case')
   const description = optionalText(body.description, 'description', 2000) ?? current.description
   const device = optionalDevice(body.device) ?? current.device
-  const steps = body.steps === undefined ? current.steps : JSON.stringify(parseSteps(body.steps))
-  await c.env.DB.prepare('UPDATE test_cases SET name = ?, description = ?, device = ?, steps = ?, updated_at = ? WHERE id = ?').bind(name, description, device, steps, now(), id).run()
+  if (body.steps === undefined) {
+    await c.env.DB.prepare('UPDATE test_cases SET name = ?, description = ?, device = ?, updated_at = ? WHERE id = ?').bind(name, description, device, now(), id).run()
+  } else {
+    // While the assistant works on a test case it owns the step list: it reads, changes and writes it back
+    // call by call, and a save from the editor (another tab, a script) in between would be lost or would
+    // wipe out what the assistant added. The editor's lock is the courtesy; this is the rule.
+    await sweepStaleSessions(c.env.DB)
+    const steps = JSON.stringify(parseSteps(body.steps))
+    const saved = await c.env.DB.prepare(
+      "UPDATE test_cases SET name = ?1, description = ?2, device = ?3, steps = ?4, updated_at = ?5 WHERE id = ?6 AND NOT EXISTS (SELECT 1 FROM assistant_sessions WHERE test_case_id = ?6 AND status IN ('queued', 'running'))",
+    )
+      .bind(name, description, device, steps, now(), id)
+      .run()
+    if (saved.meta.changes === 0) throw new HttpError(409, 'The assistant is editing the steps of this test case. Wait for it to finish, or abort it, then try again.')
+  }
   return c.json(await withLastRun(c.env.DB, await getTestCaseRow(c.env.DB, id)))
 })
 

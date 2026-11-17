@@ -17,6 +17,7 @@ type SaveState = 'saved' | 'unsaved' | 'saving' | 'error'
 const SPLIT_KEY = 'stepwise.editor.split'
 const ASSISTANT_KEY = 'stepwise.editor.assistant'
 const isActiveSession = (s: AssistantSession) => s.status === 'queued' || s.status === 'running'
+const errorText = (e: unknown) => (e instanceof Error ? e.message : 'The request failed')
 
 export function Editor() {
   const { tid = '' } = useParams()
@@ -326,7 +327,8 @@ function EditorInner({ tid }: { tid: string }) {
     queryFn: () => api.assistantSessions(tid),
     enabled: assistantStatus.data?.enabled === true,
     staleTime: 0,
-    refetchInterval: (q) => (q.state.data?.some(isActiveSession) ? 1500 : false),
+    // A list that could not be loaded is asked for again: "no sessions" must be something the server said.
+    refetchInterval: (q) => (q.state.status === 'error' ? 5000 : q.state.data?.some(isActiveSession) ? 1500 : false),
   })
   const sessions = useMemo(() => sessionsQuery.data ?? [], [sessionsQuery.data])
   const activeSession = sessions.find(isActiveSession)
@@ -362,10 +364,15 @@ function EditorInner({ tid }: { tid: string }) {
   const followed = sessions.find((s) => s.id === following)
   const followedState = followed ? `${followed.events.length}:${followed.status}` : ''
   const syncSeq = useRef(0)
+  // Set while the steps a finished session left on the server could not be loaded. The editor stays locked
+  // until they are: unlocking with the old steps on screen would let the next edit save them over the new ones.
+  const [syncError, setSyncError] = useState<string | null>(null)
+  const [syncRetry, setSyncRetry] = useState(0)
   useEffect(() => {
     if (!followed) return
     const ended = !isActiveSession(followed)
     const seq = ++syncSeq.current
+    let retry = 0
     void (async () => {
       try {
         const [nextCase, nextUis] = await Promise.all([api.testCase(tid), api.uis(tid)])
@@ -384,9 +391,17 @@ function EditorInner({ tid }: { tid: string }) {
         if (nextUis.length > hadUis) setCurrentUiId(nextUis[nextUis.length - 1].id)
       } catch (err) {
         if (seq !== syncSeq.current) return
-        if (ended) toast(`The assistant finished, but its steps could not be loaded (${err instanceof Error ? err.message : 'unknown error'}). Reload the page before editing.`, 'error')
+        // While the session runs, its next event brings another sync. After the last one there is none, so
+        // this one is repeated until it works; the editor stays read-only meanwhile.
+        if (ended) {
+          setSyncError(err instanceof Error ? err.message : 'unknown error')
+          retry = window.setTimeout(() => setSyncRetry((n) => n + 1), 3000)
+        }
+        return
       }
-      if (!ended || seq !== syncSeq.current) return
+      if (seq !== syncSeq.current) return
+      setSyncError(null)
+      if (!ended) return
       // One undo entry for the whole session: undo puts the steps back to what they were before it.
       const before = beforeAssistant.current
       beforeAssistant.current = null
@@ -399,7 +414,8 @@ function EditorInner({ tid }: { tid: string }) {
       setPickForId(null)
       setFollowing(null)
     })()
-  }, [following, followedState]) // eslint-disable-line react-hooks/exhaustive-deps
+    return () => window.clearTimeout(retry)
+  }, [following, followedState, syncRetry]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const enabledCount = steps.filter((s) => !s.disabled).length
   const blocked = locked ? 'The assistant is editing the steps. Wait for it to finish, or abort it.' : errors.size > 0 ? 'Fix the highlighted steps before running.' : enabledCount === 0 ? 'Add a step before running.' : null
@@ -471,7 +487,9 @@ function EditorInner({ tid }: { tid: string }) {
       : 'Opening the URL and capturing…'
     : null
 
+  const LOCKED_NOTE = 'The assistant is working on this test case. Wait for it to finish, or abort it.'
   const launch = (url: string) => {
+    if (lockedRef.current) return toast(LOCKED_NOTE, 'error')
     if (stepsRef.current.length === 0) {
       const step = newStep('navigate', { value: url })
       insertAt(0, step)
@@ -660,7 +678,7 @@ function EditorInner({ tid }: { tid: string }) {
         )}
       </header>
 
-      <div className="ed-body" ref={bodyRef} style={{ gridTemplateColumns: `minmax(400px, ${split}%) 5px minmax(0, 1fr)${assistantOpen ? ' 380px' : ''}` }}>
+      <div className={cx('ed-body', assistantOpen && 'has-asst')} ref={bodyRef} style={{ '--split': `${split}%` } as React.CSSProperties}>
         <section className="ed-left" aria-label="Steps">
           <div className="ed-left-head">
             <h2>
@@ -675,10 +693,19 @@ function EditorInner({ tid }: { tid: string }) {
               <Redo2 size={16} />
             </IconButton>
           </div>
-          {locked && (
+          {locked && !syncError && (
             <div className="ed-locked" role="status">
               <Sparkles size={14} aria-hidden />
               <span>The assistant is editing the steps. They are read-only until it finishes.</span>
+            </div>
+          )}
+          {locked && syncError && (
+            <div className="ed-locked is-error" role="alert">
+              <CloudAlert size={14} aria-hidden />
+              <span>The assistant finished, but its steps could not be loaded ({syncError}). The steps stay read-only until they are. Trying again…</span>
+              <Button size="sm" onClick={() => setSyncRetry((n) => n + 1)}>
+                Retry now
+              </Button>
             </div>
           )}
           <div className={cx('ed-left-scroll', locked && 'is-locked')} inert={locked}>
@@ -751,8 +778,9 @@ function EditorInner({ tid }: { tid: string }) {
           capturing={capturing}
           replayError={shownReplayError}
           onDismissReplayError={() => setReplayError(null)}
-          onCaptureAfter={() => captureAfter && capture.mutate({ afterStepId: captureAfter.id })}
-          onCaptureUrl={(url) => capture.mutate({ url })}
+          locked={locked ? LOCKED_NOTE : null}
+          onCaptureAfter={() => (lockedRef.current ? toast(LOCKED_NOTE, 'error') : captureAfter && capture.mutate({ afterStepId: captureAfter.id }))}
+          onCaptureUrl={(url) => (lockedRef.current ? toast(LOCKED_NOTE, 'error') : capture.mutate({ url }))}
           onLaunch={launch}
           onPickElement={pickElement}
           inspect={inspect}
@@ -777,9 +805,22 @@ function EditorInner({ tid }: { tid: string }) {
             status={assistantStatus.data}
             sessions={sessions}
             loading={assistantStatus.isPending || (assistantStatus.data?.enabled === true && sessionsQuery.isPending)}
+            // Without a status, or without ever having had the list, there is nothing to show but the problem.
+            loadError={
+              assistantStatus.isError && !assistantStatus.data
+                ? { message: errorText(assistantStatus.error), retrying: assistantStatus.isFetching, onRetry: () => void assistantStatus.refetch() }
+                : sessionsQuery.isError && !sessionsQuery.data
+                  ? { message: errorText(sessionsQuery.error), retrying: sessionsQuery.isFetching, onRetry: () => void sessionsQuery.refetch() }
+                  : null
+            }
             sending={ask.isPending}
             aborting={abortAssistant.isPending}
-            onSend={(message) => ask.mutate(message)}
+            onSend={(message) =>
+              ask.mutateAsync(message).then(
+                () => true,
+                () => false, // onError has shown why; the panel keeps the text
+              )
+            }
             onAbort={(sid) => abortAssistant.mutate(sid)}
             onClose={() => toggleAssistant(false)}
           />

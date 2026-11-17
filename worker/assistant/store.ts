@@ -11,6 +11,7 @@ export interface AssistantSessionRow {
   usage: string | null
   error: string | null
   created_at: string
+  started_at: string | null
   finished_at: string | null
 }
 
@@ -52,17 +53,52 @@ export async function appendEvent(db: D1Database, id: string, event: Omit<Assist
 }
 
 const STALE_MS = 15 * 60 * 1000
-const STALE_NOTE = 'The session stopped responding and was closed. The steps built so far are kept.'
+const STALE_RUNNING = 'The session stopped responding and was closed. The steps built so far are kept.'
+const STALE_QUEUED = 'The session was not started within 15 minutes and was closed. Try again.'
 
 /**
  * A session must never stay queued or running forever (a consumer can die without a trace), because it
- * locks the editor's step list. The loop stops itself after 12 minutes; this closes what is left after 15.
+ * locks the editor's step list. The loop stops itself 12 minutes after it started; this closes what is
+ * still running 15 minutes after it started, and what was never picked up 15 minutes after it was queued
+ * (the same rule runs follow, see sweepStaleRuns). Time spent waiting in the queue does not count against
+ * a session that is working.
  */
-export async function sweepStaleSessions(db: D1Database): Promise<void> {
-  const cutoff = new Date(Date.now() - STALE_MS).toISOString()
-  const event: AssistantEvent = { kind: 'error', text: STALE_NOTE, at: now() }
+export async function sweepStaleSessions(db: D1Database, nowMs = Date.now()): Promise<void> {
+  const cutoff = new Date(nowMs - STALE_MS).toISOString()
+  const at = new Date(nowMs).toISOString()
+  const event = (text: string): string => JSON.stringify({ kind: 'error', text, at } satisfies AssistantEvent)
   await db
-    .prepare("UPDATE assistant_sessions SET status = 'failed', error = ?1, finished_at = ?2, events = json_insert(events, '$[#]', json(?3)) WHERE status IN ('queued', 'running') AND created_at < ?4")
-    .bind(STALE_NOTE, event.at, JSON.stringify(event), cutoff)
+    .prepare(
+      `UPDATE assistant_sessions SET status = 'failed', finished_at = ?1,
+         error = CASE WHEN status = 'running' THEN ?2 ELSE ?3 END,
+         events = json_insert(events, '$[#]', json(CASE WHEN status = 'running' THEN ?4 ELSE ?5 END))
+       WHERE status IN ('queued', 'running') AND COALESCE(started_at, created_at) < ?6`,
+    )
+    .bind(at, STALE_RUNNING, STALE_QUEUED, event(STALE_RUNNING), event(STALE_QUEUED), cutoff)
     .run()
+}
+
+// ---- deployment-wide budget ----
+
+export const DEFAULT_DAILY_SESSIONS = 100
+export const DEFAULT_DAILY_BUDGET_USD = 20
+export const DAY_MS = 24 * 60 * 60 * 1000
+
+const limitOf = (text: string | undefined, fallback: number): number => {
+  const n = Number((text ?? '').trim() || NaN)
+  return Number.isFinite(n) && n >= 0 ? n : fallback
+}
+
+/** The deployment's limits on assistant use per 24 hours. Every session costs money on the operator's account. */
+export function dailyLimits(env: { ASSISTANT_DAILY_SESSIONS?: string; ASSISTANT_DAILY_BUDGET_USD?: string }): { sessions: number; budgetUsd: number } {
+  return { sessions: limitOf(env.ASSISTANT_DAILY_SESSIONS, DEFAULT_DAILY_SESSIONS), budgetUsd: limitOf(env.ASSISTANT_DAILY_BUDGET_USD, DEFAULT_DAILY_BUDGET_USD) }
+}
+
+/** Sessions started and the estimated spend in the 24 hours before `nowMs`, over all test cases. */
+export async function dailyUse(db: D1Database, nowMs = Date.now()): Promise<{ sessions: number; costUsd: number }> {
+  const row = await db
+    .prepare("SELECT COUNT(*) AS sessions, COALESCE(SUM(json_extract(usage, '$.costUsd')), 0) AS cost FROM assistant_sessions WHERE created_at >= ?")
+    .bind(new Date(nowMs - DAY_MS).toISOString())
+    .first<{ sessions: number; cost: number }>()
+  return { sessions: row?.sessions ?? 0, costUsd: row?.cost ?? 0 }
 }

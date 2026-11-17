@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronRight, Copy, CopyPlus, MoreHorizontal, Play, Plus, Trash2, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { isBuiltInVariable } from '../../shared/commands'
 import type { BatchRun, Project, TestCase } from '../../shared/types'
 import { api, qk } from '../api'
 import { Button, Confirm, DeviceChip, Empty, ErrorState, Field, IconButton, Loading, MenuButton, Shell, StatusIcon, Tabs, toast } from '../components/ui'
@@ -301,12 +302,15 @@ function SettingsTab({ project }: { project: Project }) {
   const names = rows.map((r) => r.name.trim()).filter(Boolean)
   const badRow = rows.find((r) => r.name.trim() && !VAR_NAME.test(r.name.trim()))
   const duplicate = names.find((n, i) => names.indexOf(n) !== i)
+  const builtIn = names.find(isBuiltInVariable)
   const varError = badRow
     ? `“${badRow.name}” is not a valid name. Use letters, digits and underscores, starting with a letter.`
     : duplicate
       ? `“${duplicate}” is defined twice.`
-      : names.includes('BASE_URL')
-        ? 'BASE_URL is built in. Set it with the Base URL field.'
+      : builtIn
+        ? builtIn === 'BASE_URL'
+          ? 'BASE_URL is built in. Set it with the Base URL field.'
+          : `${builtIn} is built in (every run sets it), so it cannot be a project variable. Use another name.`
         : null
   const variables = Object.fromEntries(rows.filter((r) => r.name.trim()).map((r) => [r.name.trim(), r.value]))
   const dirty =

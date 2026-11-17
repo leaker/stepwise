@@ -1,5 +1,5 @@
 // Request body validation shared by the API routes.
-import { COMMAND_BY_ID } from '../shared/commands'
+import { COMMAND_BY_ID, isBuiltInVariable } from '../shared/commands'
 import type { Box, ElementRef, ElementType, Fingerprint, Locator, Step, UiElement } from '../shared/types'
 import { HttpError, type Env } from './env'
 import { newId } from './db'
@@ -62,6 +62,7 @@ export function optionalVariables(value: unknown): Record<string, string> | unde
   if (entries.length > MAX_VARIABLES) throw new HttpError(400, `A project can have at most ${MAX_VARIABLES} variables`)
   for (const [k, v] of entries) {
     if (k.length > 60 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new HttpError(400, `Invalid variable name "${k.slice(0, 60)}" (letters, digits and _ only, 60 characters at most)`)
+    if (isBuiltInVariable(k)) throw new HttpError(400, `${k} is a built-in variable and cannot be a project variable${k === 'BASE_URL' ? ' (set the base URL instead)' : ''}. Remove it or use another name.`)
     if (typeof v !== 'string') throw new HttpError(400, `Variable "${k}" must be a string`)
     if (v.length > MAX_VARIABLE_LENGTH) throw new HttpError(400, `Variable "${k}" must be ${MAX_VARIABLE_LENGTH} characters or fewer`)
     out[k] = v
@@ -254,7 +255,10 @@ export function isPrivateHost(hostname: string): boolean {
  * project variables). URLs that depend on run-time variables are enforced by the navigation guard in the runner.
  */
 export function assertNavigateTargetsAllowed(steps: Step[], baseUrl: string, variables: Record<string, string>, env: Pick<Env, 'ALLOWED_HOSTS'>, appOrigin: string): void {
-  const vars: Record<string, string> = { ...variables, BASE_URL: baseUrl }
+  // The values a run will really use: built-ins win over a project variable of the same name (older data may
+  // still hold one). DEVICE depends on the test case, so a URL built from it is left to the navigation guard.
+  const vars: Record<string, string> = { ...variables, BASE_URL: baseUrl, BROWSER: 'chrome' }
+  delete vars.DEVICE
   steps.forEach((step, i) => {
     if (step.disabled || step.command !== 'navigate') return
     const value = (step.value ?? '').replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, name: string) => (Object.hasOwn(vars, name) ? vars[name] : m))

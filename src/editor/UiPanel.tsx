@@ -51,6 +51,8 @@ export interface UiPanelProps {
   /** The failed replay behind the screen that is shown, if any. `sentence` is null when the step was removed since. */
   replayError: { n: number; sentence: string | null; message: string } | null
   onDismissReplayError: () => void
+  /** Why nothing can be captured right now (the assistant is working on the test case), or null. */
+  locked: string | null
   onCaptureAfter: () => void
   onCaptureUrl: (url: string) => void
   onLaunch: (url: string) => void
@@ -162,10 +164,15 @@ export function UiPanel(p: UiPanelProps) {
         )}
         {p.uis.length > 0 && (
           <div className="split-btn">
-            <Button icon={<Camera size={15} />} disabled={!!p.capturing} onClick={() => (p.captureAfter ? p.onCaptureAfter() : setUrlDialog(true))} title={p.captureAfter ? `Replay steps 1–${p.captureAfter.n} in a fresh cloud browser, then capture` : 'Capture a URL'}>
+            <Button
+              icon={<Camera size={15} />}
+              disabled={!!p.capturing || !!p.locked}
+              onClick={() => (p.captureAfter ? p.onCaptureAfter() : setUrlDialog(true))}
+              title={p.locked ?? (p.captureAfter ? `Replay steps 1–${p.captureAfter.n} in a fresh cloud browser, then capture` : 'Capture a URL')}
+            >
               Capture
             </Button>
-            <button type="button" className="btn split-caret" aria-label="Capture options" aria-haspopup="menu" disabled={!!p.capturing} onClick={(e) => setCapAnchor(capAnchor ? null : e.currentTarget)}>
+            <button type="button" className="btn split-caret" aria-label="Capture options" aria-haspopup="menu" title={p.locked ?? undefined} disabled={!!p.capturing || !!p.locked} onClick={(e) => setCapAnchor(capAnchor ? null : e.currentTarget)}>
               <ChevronDown size={14} />
             </button>
           </div>
@@ -218,7 +225,7 @@ export function UiPanel(p: UiPanelProps) {
             <Spinner /> Loading captured screens…
           </div>
         ) : !ui ? (
-          <LaunchForm key={p.baseUrl} baseUrl={p.baseUrl} busy={!!p.capturing} onLaunch={p.onLaunch} hasSteps={p.steps.length > 0} />
+          <LaunchForm key={p.baseUrl} baseUrl={p.baseUrl} busy={!!p.capturing} locked={p.locked} onLaunch={p.onLaunch} hasSteps={p.steps.length > 0} />
         ) : (
           <div className="uip-scroll" ref={scrollRef}>
             <div className={cx('uip-stage', phone && 'is-phone', p.pickFor && 'is-picking', !overlays && 'no-overlays')} style={phone || !fit ? { width: ui.width } : { width: '100%' }}>
@@ -445,7 +452,7 @@ function CaptureProgress({ label }: { label: string }) {
 
 const looksLikeUrl = (v: string) => /^(https?:\/\/|\/|\$\{)/.test(v.trim())
 
-function LaunchForm({ baseUrl, busy, hasSteps, onLaunch }: { baseUrl: string; busy: boolean; hasSteps: boolean; onLaunch: (url: string) => void }) {
+function LaunchForm({ baseUrl, busy, locked, hasSteps, onLaunch }: { baseUrl: string; busy: boolean; locked: string | null; hasSteps: boolean; onLaunch: (url: string) => void }) {
   const [url, setUrl] = useState(baseUrl)
   const ok = looksLikeUrl(url)
   return (
@@ -453,7 +460,7 @@ function LaunchForm({ baseUrl, busy, hasSteps, onLaunch }: { baseUrl: string; bu
       className="launch"
       onSubmit={(e) => {
         e.preventDefault()
-        if (ok && !busy) onLaunch(url.trim())
+        if (ok && !busy && !locked) onLaunch(url.trim())
       }}
     >
       <div className="launch-art" aria-hidden>
@@ -468,12 +475,12 @@ function LaunchForm({ baseUrl, busy, hasSteps, onLaunch }: { baseUrl: string; bu
       </p>
       <div className="launch-row">
         <input className="input" type="text" inputMode="url" aria-label="URL to capture" placeholder="https://example.com/login" value={url} onChange={(e) => setUrl(e.target.value)} autoFocus />
-        <Button type="submit" variant="primary" icon={<Camera size={15} />} disabled={!ok} busy={busy}>
+        <Button type="submit" variant="primary" icon={<Camera size={15} />} disabled={!ok || !!locked} busy={busy} title={locked ?? undefined}>
           Launch &amp; capture
         </Button>
       </div>
       <p className="muted launch-hint">
-        {hasSteps ? 'The URL is opened directly; existing steps are not replayed.' : 'This also adds “Navigate to URL” as step 1, so the test starts on the same page.'}
+        {locked ? 'The assistant is working on this test case: it captures the screens it needs, and they appear here.' : hasSteps ? 'The URL is opened directly; existing steps are not replayed.' : 'This also adds “Navigate to URL” as step 1, so the test starts on the same page.'}
       </p>
     </form>
   )
@@ -544,6 +551,28 @@ function ElementInspector({
     ref.current?.querySelector<HTMLInputElement>('input')?.select()
   }, [])
 
+  // The inspector floats over the screenshot, so it goes where the element it is about is not: to the other
+  // side, and below when that is still not enough room (a phone screen fills most of a narrow panel).
+  const [dock, setDock] = useState<{ left: boolean; bottom: boolean }>({ left: false, bottom: false })
+  useLayoutEffect(() => {
+    const self = ref.current
+    const body = self?.parentElement
+    const box = body?.querySelector<HTMLElement>('.el-box.is-inspected')
+    if (!self || !body || !box) return
+    const b = body.getBoundingClientRect()
+    const r = box.getBoundingClientRect()
+    if (r.bottom < b.top || r.top > b.bottom) return // scrolled out of view: nothing to keep clear of
+    const width = self.offsetWidth
+    const height = self.offsetHeight
+    const left = r.left + r.width / 2 > b.left + b.width / 2
+    const x0 = left ? b.left + 12 : b.right - 28 - width
+    const besideIt = r.right < x0 - 8 || r.left > x0 + width + 8
+    // Docked at the top it covers the first `height` pixels; at the bottom, the last.
+    const underTop = r.top < b.top + 12 + height + 8
+    const underBottom = r.bottom > b.bottom - 12 - height - 8
+    setDock({ left, bottom: !besideIt && underTop && !underBottom })
+  }, [])
+
   const usedBy = element && ui ? steps.map((s, i) => (s.target?.uiId === ui.id && s.target.elementId === element.id ? i + 1 : 0)).filter(Boolean) : []
   const commitName = () => {
     const n = name.trim()
@@ -558,7 +587,7 @@ function ElementInspector({
 
   return (
     <div
-      className="inspector"
+      className={cx('inspector', dock.left && 'is-left', dock.bottom && 'is-bottom')}
       ref={ref}
       role="dialog"
       aria-label="UI element"

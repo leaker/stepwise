@@ -4,6 +4,21 @@ import type { BrowserContext, Page, Request } from '@cloudflare/playwright'
 import type { Env } from './env'
 import { isHostAllowed, isPrivateHost, parseHttpUrl } from './validate'
 
+/** Runs in every document before its own scripts. Plain source text: nothing from this module exists in the page. */
+const DROP_INLINE_SPECULATION_RULES = `(() => {
+  const isRules = (n) => n && n.nodeType === 1 && n.localName === 'script' && String(n.getAttribute('type') || '').trim().toLowerCase() === 'speculationrules'
+  const drop = (n) => {
+    if (isRules(n)) n.remove()
+    else if (n && n.nodeType === 1 && n.querySelectorAll) for (const s of n.querySelectorAll('script[type="speculationrules" i]')) s.remove()
+  }
+  new MutationObserver((records) => {
+    for (const r of records) {
+      if (r.type === 'attributes') drop(r.target)
+      else for (const n of r.addedNodes) drop(n)
+    }
+  }).observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ['type'] })
+})()`
+
 export interface Guard {
   /** URL of a top-level navigation that was refused since the last call (and forget it), or null. */
   takeBlockedNavigation(): string | null
@@ -48,7 +63,7 @@ export async function guardContext(context: BrowserContext, env: Pick<Env, 'ALLO
     // Speculation rules (e.g. the `Speculation-Rules: "/cdn-cgi/speculation"` header Cloudflare Speed Brain adds)
     // make Chrome prefetch a link on mouse-down. On Cloudflare Browser Run that prefetch tears the whole browser
     // session down, so every click on a link of such a site would kill the run. Refusing the rule set keeps the
-    // browser from speculating; the page itself behaves the same.
+    // browser from speculating; the page itself behaves the same. (Rules written into the page are handled below.)
     if (request.headers()['sec-fetch-dest'] === 'speculationrules' || url?.pathname === '/cdn-cgi/speculation') return route.abort('blockedbyclient')
     if (url) {
       const navigation = request.isNavigationRequest()
@@ -59,6 +74,11 @@ export async function guardContext(context: BrowserContext, env: Pick<Env, 'ALLO
     }
     return route.fallback()
   })
+
+  // Rules written into the page itself (<script type="speculationrules">, which WordPress emits by default) fetch
+  // nothing that could be refused, and the prefetch they cause does not pass through the route above. Taking the
+  // script element out of the document withdraws its rules, so that is done in every frame as soon as one appears.
+  await context.addInitScript(DROP_INLINE_SPECULATION_RULES)
 
   const watch = (page: Page) => {
     const blank = (frame: ReturnType<Page['mainFrame']>, url: string) => {

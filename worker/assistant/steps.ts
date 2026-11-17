@@ -1,6 +1,6 @@
 // Turning the model's tool input into a Step, with every rule the editor and the engine enforce checked
 // up front so a mistake comes back as a message the model can act on. Pure: no database, no browser.
-import { COMMAND_BY_ID, KEYS, SWIPE_DIRECTIONS } from '../../shared/commands'
+import { COMMAND_BY_ID, isBuiltInVariable, KEYS, SWIPE_DIRECTIONS } from '../../shared/commands'
 import type { CommandId, ElementRef, Step, Ui } from '../../shared/types'
 
 export class ToolInputError extends Error {}
@@ -89,4 +89,105 @@ export function checkStep(step: Step, checkUrl: (value: string) => string | null
     const problem = checkUrl(value)
     if (problem) fail(problem)
   }
+}
+
+// ---- step numbers within one model reply ----
+
+/**
+ * The tool calls of one model reply were all written against the same step list, but they run one after
+ * another. Once a call has removed a step or inserted one in the middle, every number from that point on
+ * means a different step than the model had in mind: "delete 3, delete 4" would remove the original steps
+ * 3 and 5. Such a call is refused, with nothing changed, so the model sends it again knowing the new numbers.
+ * Numbers below the change, and appending at the end, are unaffected.
+ */
+export class TurnNumbering {
+  /** The lowest step number whose meaning changed in this reply. */
+  private shiftedFrom = Infinity
+
+  /** A new model reply: its calls see the list as it is now. */
+  reset(): void {
+    this.shiftedFrom = Infinity
+  }
+
+  /** Refuse a step number that an earlier call of this reply has moved. */
+  check(n: number, key: string): void {
+    if (n >= this.shiftedFrom) {
+      fail(
+        `Not done: an earlier call in this reply removed or inserted a step, so the steps from number ${this.shiftedFrom} on have moved and ${key} ${n} may no longer be the step you meant. Nothing was changed by this call. Send it again with the number from the current list (get_steps shows it). To change several steps in one reply, work from the highest number down.`,
+      )
+    }
+  }
+
+  /** Step numbers from `from` on now mean other steps (a removal at `from`, or an insertion before it). */
+  shift(from: number): void {
+    this.shiftedFrom = Math.min(this.shiftedFrom, from)
+  }
+}
+
+// ---- where a step the assistant writes may send project variables ----
+
+/** The host a URL value will open, as far as it can be told without the variables' values; null when it depends on one. */
+function hostBeforeVariables(value: string, baseUrl: string): string | null {
+  const known = value.trim().replace(/\$\{\s*BASE_URL\s*\}/g, baseUrl)
+  const at = known.indexOf('${')
+  const head = at < 0 ? known : known.slice(0, at)
+  if (/^[a-z][a-z0-9+.-]*:/i.test(head)) {
+    // The whole authority has to be written out before the first variable: scheme://host/ or ?/#.
+    const m = /^https?:\/\/([^/?#\\]+)[/?#]/i.exec(head)
+    if (!m) return null
+    try {
+      return new URL(`${head.slice(0, head.indexOf(':'))}://${m[1]}/`).host.toLowerCase()
+    } catch {
+      return null
+    }
+  }
+  // No scheme: a path on the base URL, unless a variable (or "//host") could turn it into something else.
+  if (head === '' || /^[/\\]{2}/.test(head) || !baseUrl) return null
+  try {
+    return new URL(baseUrl).host.toLowerCase()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * A navigate step can carry a project variable's value to whatever host its URL names, on every later run.
+ * The assistant reads pages it does not control, so a step it writes may only do that towards the site
+ * under test: the base URL's host, the app itself, or a host the deployment lists in ALLOWED_HOSTS ("any
+ * public host" when no list is configured is not enough here). Returns what is wrong, or null.
+ */
+export function variableUrlProblem(value: string, o: { baseUrl: string; appOrigin: string; allowedHosts: string | undefined }): string | null {
+  const names = [...value.matchAll(/\$\{([^}]*)\}/g)].map((m) => m[1].trim())
+  const carried = names.filter((n) => !isBuiltInVariable(n))
+  if (carried.length === 0) return null
+  const what = `This URL sends the value of \${${carried[0]}} along`
+  const host = hostBeforeVariables(value, o.baseUrl)
+  if (host === null) return `${what}, so the host it opens must be written out before the first variable (or be \${BASE_URL}); a variable cannot decide where its own value is sent.`
+  const trusted = new Set<string>()
+  for (const url of [o.baseUrl, o.appOrigin]) {
+    try {
+      trusted.add(new URL(url).host.toLowerCase())
+    } catch {
+      /* no base URL */
+    }
+  }
+  const listed = (o.allowedHosts ?? '').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean)
+  if (trusted.has(host) || listed.includes(host.replace(/:\d+$/, ''))) return null
+  return `${what} to ${host}, which is not the site under test. A step with a variable in its URL may only open the base URL's host${listed.length ? ' or a host on the deployment\'s allow-list' : ''}. If the user really wants this, tell them to add the step themselves in the editor.`
+}
+
+/**
+ * Put ${NAME} back where a project variable's value shows up in text that goes to the model (a run's error
+ * message, the URL a capture ended on). The values are the user's, sometimes credentials; the model only
+ * needs to know which variable was there. Short values are left alone: they would match by accident.
+ */
+export function maskVariables(text: string, variables: Record<string, string>): string {
+  const entries = Object.entries(variables)
+    .filter(([, v]) => v.length >= 4)
+    .sort((a, b) => b[1].length - a[1].length)
+  let out = text
+  for (const [name, value] of entries) {
+    for (const form of new Set([value, encodeURIComponent(value), JSON.stringify(value).slice(1, -1)])) out = out.split(form).join(`\${${name}}`)
+  }
+  return out
 }

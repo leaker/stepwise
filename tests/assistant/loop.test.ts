@@ -266,6 +266,65 @@ describe('assistant loop', () => {
     expect(requests).toHaveLength(1)
   })
 
+  it('holds the time limit between the tool calls of one reply, and tells the tools when it is', async () => {
+    let clock = 0
+    const seen: { name: string; deadline: number }[] = []
+    let turns = 0
+    const host: ToolHost = {
+      beginTurn: () => void turns++,
+      call: async (name, _input, context) => {
+        seen.push({ name, deadline: context.deadline })
+        clock += 7 * 60_000 // a long run
+        return { content: 'ok', event: `ran ${name}` }
+      },
+    }
+    const { model, requests } = scripted([turn('tool_use', [{ tool: 'run_steps', input: {} }, { tool: 'run_steps', input: {} }, { tool: 'capture_screen', input: { after_step: 1 } }]), turn('end_turn', [{ text: 'unreachable' }])])
+    const { sink, events } = memorySink()
+    const result = await run(model, host, sink, { now: () => clock })
+    expect(result).toMatchObject({ status: 'failed', error: expect.stringContaining('12 minute limit') })
+    // Two runs took 14 minutes: the third call is not started, and the model is not asked again.
+    expect(seen).toEqual([
+      { name: 'run_steps', deadline: 12 * 60_000 },
+      { name: 'run_steps', deadline: 12 * 60_000 },
+    ])
+    expect(turns).toBe(1)
+    expect(requests).toHaveLength(1)
+    expect(events.map((e) => e.text)).toEqual(['ran run_steps', 'ran run_steps', expect.stringContaining('12 minute limit')])
+  })
+
+  it('stops a session whose estimated cost reaches the limit', async () => {
+    const pricey = () => turn('tool_use', [{ tool: 'run_steps', input: {} }], { usage: { input_tokens: 200_000, output_tokens: 10_000 } as ModelTurn['usage'] }) // $1.00 a turn
+    const { model, requests } = scripted([pricey, pricey, pricey, pricey])
+    const { sink, state } = memorySink()
+    const result = await run(model, memoryHost().host, sink, { maxCostUsd: 2 })
+    expect(result).toMatchObject({ status: 'failed', error: expect.stringContaining('cost limit (about $2)') })
+    expect(requests).toHaveLength(2)
+    expect(state.usage!.costUsd).toBeCloseTo(2, 10)
+  })
+
+  it('counts every attempt of a request that fell back to another model, each at its own price', async () => {
+    const iteration = (type: string, model: string | null, input: number, output: number) => ({ type, model, input_tokens: input, output_tokens: output, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, cache_creation: null })
+    const { model } = scripted([
+      // An ordinary turn: one entry, which repeats the top-level numbers.
+      turn('tool_use', [{ tool: 'run_steps', input: {} }], { usage: { input_tokens: 1000, output_tokens: 100, iterations: [iteration('message', 'claude-opus-5-5', 1000, 100)] } as unknown as ModelTurn['usage'] }),
+      // Declined by the assistant's model after 40 output tokens, then answered by the fallback model: the
+      // top-level usage only covers the attempt that produced the message.
+      turn('tool_use', [{ tool: 'run_steps', input: {} }], {
+        model: 'claude-opus-5',
+        usage: { input_tokens: 2000, output_tokens: 300, iterations: [iteration('message', 'claude-opus-5-5', 2000, 40), iteration('fallback_message', 'claude-opus-5', 2000, 300)] } as unknown as ModelTurn['usage'],
+      }),
+      // A model this code has no price for.
+      turn('end_turn', [{ text: 'Done.' }], { model: 'claude-next', usage: { input_tokens: 500, output_tokens: 50, iterations: null } as unknown as ModelTurn['usage'] }),
+    ])
+    const { sink, state } = memorySink()
+    expect(await run(model, memoryHost().host, sink)).toEqual({ status: 'done' })
+    const u = state.usage!
+    expect(u).toMatchObject({ model: 'claude-opus-5-5', otherModels: ['claude-opus-5', 'claude-next'], costIncomplete: true, turns: 3, inputTokens: 1000 + 2000 + 2000 + 500, outputTokens: 100 + 40 + 300 + 50 })
+    const opus55 = (1000 * 4 + 100 * 20 + 2000 * 4 + 40 * 20 + 500 * 4 + 50 * 20) / 1e6
+    const opus5 = (2000 * 5 + 300 * 25) / 1e6
+    expect(u.costUsd).toBeCloseTo(opus55 + opus5, 10)
+  })
+
   it('treats a refusal as a failed session and runs none of its tool calls', async () => {
     const refusal = turn('refusal', [{ tool: 'add_step', input: { command: 'click', ui_id: 'ui1', element_id: 'e2' } }], {
       stop_details: { type: 'refusal', category: 'cyber', explanation: null } as ModelTurn['stop_details'],

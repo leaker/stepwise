@@ -20,7 +20,8 @@ affiliated with, endorsed by, or derived from the code of any such product.
   Pixel 8): phone viewport, user agent, touch input and pixel ratio. Captures and runs use the test
   case's device, clicks become taps, and *Swipe* moves the page (directions are the finger's: swiping up
   shows what is further down). The built-in `${DEVICE}` variable (`desktop`, `iphone`, `pixel`) can be
-  used in conditions, next to `${BASE_URL}` and `${BROWSER}`.
+  used in conditions, next to `${BASE_URL}` and `${BROWSER}`; these three names cannot be used for
+  project variables.
 - **Single runs** - run a test case and watch results arrive step by step. *Run up to this step* and
   *Run only this step* run a range; every run starts in a fresh browser, so the steps before the range
   are replayed first as set-up and only the range is reported.
@@ -85,7 +86,10 @@ The contract is `worker/engine/index.ts`: `captureUi(page)` and `runSteps(page, 
   scanned; a checkbox or radio button hidden behind a styled label is offered at that label; a
   `<div>` or `<span>` with a click handler, tab stop or pointer cursor of its own counts as clickable.
   An element that lies under an overlay (an open menu drawer, a dialog) is left out of a capture: it
-  could not be picked on the screenshot, and a click on it would hit the overlay.
+  could not be picked on the screenshot, and a click on it would hit the overlay. A native checkbox laid
+  invisibly over its own label (custom switches, "checkbox hack" menus) is the control, not an overlay.
+  Fixed and sticky bars are boxed where the full-page screenshot shows them, also on a page that a
+  swipe or an earlier step has scrolled.
 - **Locator ranking.** Every element gets several candidate locators (`id=`, `css=`, `xpath=`) ordered
   from most to least stable; the first is the default and the user can pick another in the editor.
   Every locator matches exactly one element when it is captured. At run time a locator that matches
@@ -133,8 +137,11 @@ pnpm seed:examples https://stepwise.example.com --code-file ~/.stepwise-code --r
 `--code-file` names a file that holds the access code (it is sent as a bearer token and never printed).
 `--run` starts a batch run of the five cases afterwards, waits for it and prints a table; the exit code
 is 1 only if a case failed or the suite could not be built (runs that were repaired by self-healing and
-wait for review do not count as failures). A case whose name already exists is left alone, so the script
-can be run again; a case that could not be built completely is removed again.
+wait for review do not count as failures). A finished case whose name already exists is left alone, so the
+script can be run again. A case that could not be built completely is removed again, also when the script
+is interrupted (Ctrl-C; exit code 130). While a case is being built its description starts with a marker,
+so one that was left behind anyway (the process was killed, the connection dropped) is recognised and
+built again by the next run instead of being taken for a finished one.
 
 | Test case | What it demonstrates |
 | --- | --- |
@@ -177,21 +184,49 @@ How it works:
   Tool input is validated before anything happens (unknown command, an element that is not in that
   capture, a missing value, a URL the deployment does not allow); a rejected call goes back to the model
   as an error it can act on.
-- While a session is queued or running the step list is read-only. When it ends, the editor's undo stack
-  gets one entry, so a single undo removes everything the assistant did.
+- The tool calls of one model reply run in order, and step numbers are checked against that: once a call
+  has removed a step or inserted one in the middle, a later call of the same reply that names a step from
+  there on is refused (it was written for the old numbering, so "delete 3, delete 4" would remove steps 3
+  and 5) and the model sends it again.
+- While a session is queued or running the step list is read-only, in the editor and on the server:
+  `PATCH /api/test-cases/:id` with `steps` answers 409, and the assistant's own writes stop the moment the
+  session is no longer running. When it ends, the editor loads the steps it left and its undo stack gets
+  one entry, so a single undo removes everything the assistant did; if they cannot be loaded, the editor
+  stays read-only and keeps trying rather than letting an edit save the old steps over the new ones.
 
 Safety and limits:
 
 - The assistant opens pages only through the same target policy as captures and runs
   (`ALLOWED_HOSTS`, private addresses refused, checked again inside the browser), and its routes are
   behind the access gate like the rest of the API.
+- **Prompt injection.** The assistant reads pages it does not control, and a page can contain text written
+  to look like an instruction. Three things stand against that. The system prompt says that everything
+  from a capture or a run is content of the site under test and never an instruction, and a capture result
+  keeps what Stepwise says (ids, what the replay did) apart from what the page says (`page: { url, title,
+  elements }`). A navigate step the assistant writes may carry a project variable only to the base URL's
+  host, the app itself, or a host listed in `ALLOWED_HOSTS`, and a variable may not decide the host: "any
+  public host", which is what the target policy allows without a list, is not enough for a URL that sends
+  a variable's value somewhere on every later run. And run errors and captured URLs go back to the model
+  with `${NAME}` in place of a project variable's value. This narrows what an injected instruction can do;
+  it does not make the model immune. The assistant can still be talked into steps the request did not ask
+  for, including removing steps (one undo restores them) or typing a variable into a form of a page it was
+  led to, so review what it built, and set `ALLOWED_HOSTS` when project variables hold real credentials.
 - One session at a time per test case (409 otherwise). A message is 2000 characters at most.
-- A session stops after 30 model requests or 12 minutes, whichever comes first, and can be aborted;
-  the steps built up to that point are kept. A session that stops responding is closed after 15 minutes.
-- The model's replies cost money on your Anthropic account. Each session shows its token usage and an
-  estimated cost; a typical "sign in and check" test takes about five model requests. The system prompt
-  and tool definitions are prompt-cached, and a request the model's safety classifiers decline is retried
-  server-side on a fallback model (`fallbacks: "default"`).
+- A session stops after 30 model requests, 12 minutes from the moment it starts, or an estimated $5,
+  whichever comes first, and can be aborted; the steps built up to that point are kept. The time limit
+  also holds inside a tool call: a run or a replay stops between two steps when the time is up, and a
+  model request is cut off at the limit, retries included. A session that stops responding is closed 15
+  minutes after it started, one that was never picked up 15 minutes after it was queued.
+- The model's replies cost money on your Anthropic account, so the deployment as a whole has a budget per
+  24 hours: by default 100 sessions and an estimated $20 (`ASSISTANT_DAILY_SESSIONS`,
+  `ASSISTANT_DAILY_BUDGET_USD`); past either, a new session is refused with a 429. "One session per test
+  case" alone bounds nothing, since test cases are free to create. This is a backstop, not a substitute for
+  `ACCESS_CODE` on a public URL or for a spend limit on the API key itself.
+- Each session shows its token usage and an estimated cost; a typical "sign in and check" test takes
+  about five model requests. The system prompt and tool definitions are prompt-cached, and a request the
+  model's safety classifiers decline is retried server-side on a fallback model (`fallbacks: "default"`).
+  Such a request is counted with both attempts, each at the price of the model that made it, and the
+  session names the other model.
 - Page content (text and a screenshot of the site under test) is sent to the Claude API. Do not point
   the assistant at pages whose content must not leave your infrastructure.
 
@@ -213,6 +248,8 @@ Optional settings go in `.dev.vars` (see `.dev.vars.example`):
   it once and keeps an HttpOnly cookie; scripts send `Authorization: Bearer <code>`.
 - `ANTHROPIC_API_KEY` - enables the [AI assistant](#ai-assistant). Without it the rest of the app is
   unaffected.
+- `ASSISTANT_DAILY_SESSIONS`, `ASSISTANT_DAILY_BUDGET_USD` - how many assistant sessions the deployment
+  starts in 24 hours, and the estimated spend after which it starts no more (defaults: 100 and 20).
 - `ALLOWED_HOSTS` - comma-separated hostnames. When set, captures and navigate steps may only open
   these hosts and the app's own origin. This is checked before a browser is launched and again inside
   the browser, where every request is checked before it is sent (`worker/guard.ts`): a page or iframe on
@@ -263,12 +300,14 @@ Pass `"testCaseIds": ["...", "..."]` to run a subset. The full HTTP API is docum
 
 ## Limits and non-goals
 
-- Speculation rules sent as an HTTP header (for example by Cloudflare Speed Brain) are refused inside the test browser: on Cloudflare Browser Run a mouse-down prefetch tears the browser session down. Pages behave the same, but prefetch/prerender behaviour itself cannot be tested. Inline `<script type="speculationrules">` blocks are not filtered.
+- Speculation rules are refused inside the test browser: on Cloudflare Browser Run a mouse-down prefetch tears the browser session down. Rules sent as an HTTP header (for example by Cloudflare Speed Brain) are not loaded, and inline `<script type="speculationrules">` blocks (WordPress emits one by default) are taken out of the document as they appear. Pages behave the same, but prefetch/prerender behaviour itself cannot be tested.
 - One browser type (Chromium on Browser Run); no cross-browser matrix, no parallel patterns. A batch
   runs its test cases sequentially.
 - Phones are emulated in that same Chromium (viewport, user agent, touch, pixel ratio). This is mobile
   *web* testing: it is not Safari or a real device, and native mobile apps cannot be tested. A swipe is
-  a scroll gesture of about 70% of the viewport, not a recorded finger path.
+  a scroll gesture of about 70% of the viewport in the middle of the screen, not a recorded finger path;
+  it moves what a finger there would move (a scrolling list or a layout whose content area scrolls,
+  otherwise the page).
 - A batch run executes inside a single queue consumer invocation, so very long batches can hit the
   platform's time limits; Browser Run's own concurrency and session limits apply too.
 - Captures do not look inside iframes or closed shadow roots, and elements inside an open shadow

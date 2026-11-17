@@ -72,6 +72,8 @@ export interface CaptureInput {
   appOrigin: string
   /** Also return a downscaled copy of the screenshot. */
   preview?: boolean
+  /** Asked between the steps of a replay: true (or a reason for the log) stops it, and the capture shows the page at that point. */
+  shouldAbort?(): Promise<boolean | string>
 }
 
 /** `shared`: use this browser and leave it open (the capture gets its own context); otherwise one is started for the capture. */
@@ -99,10 +101,14 @@ export async function captureScreen(env: Env, input: CaptureInput, shared?: Brow
           range: { from: 1, to: input.replayTo },
           saveShot: async () => '',
           takeBlockedNavigation: guard.takeBlockedNavigation,
+          shouldAbort: input.shouldAbort,
         })
         if (outcome.status === 'failed') {
           const failed = [...outcome.results].reverse().find((r) => r.status === 'failed')
           replayError = { stepId: failed?.stepId ?? lastStep.id, message: failed?.error ?? 'A step failed during the replay' }
+        } else if (outcome.status === 'aborted') {
+          const next = input.steps.slice(0, input.replayTo).find((s) => !s.disabled && !outcome.results.some((r) => r.stepId === s.id))
+          replayError = { stepId: (next ?? lastStep).id, message: 'The replay was stopped before this step (the session was aborted or ran out of time)' }
         }
       } catch (e) {
         replayError = { stepId: lastStep.id, message: errorMessage(e) }
@@ -168,7 +174,7 @@ export interface TrialInput {
   variables: Record<string, string>
   range: { from: number; to: number } | null
   appOrigin: string
-  shouldAbort(): Promise<boolean>
+  shouldAbort(): Promise<boolean | string>
 }
 
 /** Run steps the way a single run does (same waits, no self-healing), but keep nothing: no Run row, no screenshots. */

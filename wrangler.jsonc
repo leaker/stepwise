@@ -26,6 +26,7 @@
   // Optional: restrict which sites captures and navigate steps may open (the app's own origin is always allowed).
   // "vars": { "ALLOWED_HOSTS": "example.com,staging.example.com" },
   // Optional: `wrangler secret put ACCESS_CODE` to require an access code for the whole API.
-  // Optional: `wrangler secret put ANTHROPIC_API_KEY` to enable the AI assistant in the editor.
+  // Optional: `wrangler secret put ANTHROPIC_API_KEY` to enable the AI assistant in the editor. Its budget per
+  // 24 hours can be set under "vars": ASSISTANT_DAILY_SESSIONS (default "100"), ASSISTANT_DAILY_BUDGET_USD ("20").
   "observability": { "enabled": true }
 }

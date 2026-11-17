@@ -5,3 +5,6 @@
 # ALLOWED_HOSTS=example.com
 # Enable the AI assistant in the editor (build test steps by chatting). Uses the Claude API.
 # ANTHROPIC_API_KEY=sk-ant-...
+# The assistant's budget for the whole deployment per 24 hours (defaults: 100 sessions, 20 USD estimated).
+# ASSISTANT_DAILY_SESSIONS=100
+# ASSISTANT_DAILY_BUDGET_USD=20

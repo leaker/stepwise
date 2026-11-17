@@ -19,7 +19,7 @@ const finish = async (env: Env, id: string, result: LoopResult): Promise<void> =
 
 /** `model` is injectable for tests; by default it is Claude with the deployment's API key. */
 export async function processAssistantSession(env: Env, sessionId: string, appOrigin: string, model?: ModelClient): Promise<void> {
-  const claimed = await env.DB.prepare("UPDATE assistant_sessions SET status = 'running' WHERE id = ? AND status = 'queued' RETURNING test_case_id, events").bind(sessionId).first<{ test_case_id: string; events: string }>()
+  const claimed = await env.DB.prepare("UPDATE assistant_sessions SET status = 'running', started_at = ?1 WHERE id = ?2 AND status = 'queued' RETURNING test_case_id, events").bind(now(), sessionId).first<{ test_case_id: string; events: string }>()
   if (!claimed) return // aborted, deleted, or delivered twice
 
   const active = async (): Promise<boolean> => {
@@ -39,7 +39,7 @@ export async function processAssistantSession(env: Env, sessionId: string, appOr
   try {
     if (!model && !env.ANTHROPIC_API_KEY) throw new Error('The assistant is not configured on this deployment (ANTHROPIC_API_KEY is not set).')
     const instruction = (JSON.parse(claimed.events) as { kind: string; text: string }[]).find((e) => e.kind === 'user')?.text ?? ''
-    const tools = assistantTools(env, claimed.test_case_id, appOrigin, browser, active)
+    const tools = assistantTools(env, { testCaseId: claimed.test_case_id, sessionId }, appOrigin, browser, active)
     result = await runAssistant({
       model: model ?? anthropicClient(env.ANTHROPIC_API_KEY!),
       host: tools,
