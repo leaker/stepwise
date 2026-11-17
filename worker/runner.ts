@@ -4,7 +4,7 @@ import type { CaptureResponse, RunStatus, Step, StepResult, Ui } from '../shared
 import { getProjectRow, newId, now, refreshBatchRun, toProject, toUi, type RunRow, type TestCaseRow, type UiRow } from './db'
 import { captureUi, runSteps, type RunOutcome } from './engine'
 import { errorMessage, HttpError, VIEWPORT, type Env, type QueueMessage } from './env'
-import { isHostAllowed, parseHttpUrl } from './validate'
+import { isHostAllowed, isPrivateHost, parseHttpUrl } from './validate'
 
 async function openBrowser(env: Env): Promise<Browser> {
   try {
@@ -14,19 +14,37 @@ async function openBrowser(env: Env): Promise<Browser> {
   }
 }
 
-/** When an allow-list is configured, block top-level navigations to any other host (covers URLs built at run time). */
+/**
+ * Every browser context enforces the target policy (private hosts always blocked, plus ALLOWED_HOSTS when set):
+ * - documents (top-level and iframes) must be on an allowed host;
+ * - sub-resources may come from any public host, but never from a private one;
+ * - redirects are not re-routed by Playwright, so every committed frame URL is re-checked and the page is
+ *   blanked if a redirect or client-side navigation landed somewhere that is not allowed.
+ */
 async function newGuardedContext(browser: Browser, env: Env, appOrigin: string): Promise<BrowserContext> {
   const context = await browser.newContext({ viewport: { ...VIEWPORT } })
-  if (env.ALLOWED_HOSTS) {
-    await context.route('**/*', async (route) => {
-      const request = route.request()
-      if (request.isNavigationRequest() && request.frame().parentFrame() === null) {
-        const url = parseHttpUrl(request.url())
-        if (url && !isHostAllowed(url, env, appOrigin)) return route.abort('blockedbyclient')
-      }
-      return route.fallback()
-    })
+  const documentAllowed = (raw: string): boolean => {
+    if (raw === 'about:blank' || raw.startsWith('about:srcdoc') || raw.startsWith('data:') || raw.startsWith('blob:')) return true
+    const url = parseHttpUrl(raw)
+    return url !== null && isHostAllowed(url, env, appOrigin)
   }
+  await context.route('**/*', async (route) => {
+    const request = route.request()
+    const url = parseHttpUrl(request.url())
+    if (url) {
+      const ok = request.isNavigationRequest() ? isHostAllowed(url, env, appOrigin) : url.origin === appOrigin || !isPrivateHost(url.hostname)
+      if (!ok) return route.abort('blockedbyclient')
+    }
+    return route.fallback()
+  })
+  context.on('page', (page) => {
+    page.on('framenavigated', (frame) => {
+      if (documentAllowed(frame.url())) return
+      const blocked = frame.url()
+      console.warn(`Blocked navigation to disallowed host: ${blocked}`)
+      void page.goto('about:blank').catch(() => {})
+    })
+  })
   return context
 }
 

@@ -133,9 +133,33 @@ export function isHostAllowed(url: URL, env: Pick<Env, 'ALLOWED_HOSTS'>, appOrig
     .split(',')
     .map((h) => h.trim().toLowerCase())
     .filter(Boolean)
-  if (list.length === 0) return true
   if (url.origin === appOrigin) return true
+  if (isPrivateHost(url.hostname)) return false
+  if (list.length === 0) return true
   return list.includes(url.hostname.toLowerCase())
+}
+
+/**
+ * Loopback, private-range, link-local and internal-only hostnames. The cloud browser must never be
+ * pointed at these (the app's own origin is exempted by the callers, which is what makes local dev work).
+ * This is a literal check; it does not defend against DNS names that resolve to private addresses.
+ */
+export function isPrivateHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
+  if (host === 'localhost' || /\.(localhost|local|internal|lan|home\.arpa)$/.test(host)) return true
+  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])]
+    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224
+  }
+  if (/^\d+$/.test(host) || /^0x[0-9a-f]+$/.test(host)) return true // integer / hex IPv4 forms
+  if (host.includes(':')) {
+    if (host === '::' || host === '::1') return true
+    if (/^(fc|fd)[0-9a-f]{2}:/.test(host) || /^fe[89ab][0-9a-f]:/.test(host)) return true
+    const mapped = host.match(/^::ffff:(.+)$/)
+    if (mapped) return mapped[1].includes('.') ? isPrivateHost(mapped[1]) : true
+  }
+  return false
 }
 
 /**
@@ -143,7 +167,6 @@ export function isHostAllowed(url: URL, env: Pick<Env, 'ALLOWED_HOSTS'>, appOrig
  * project variables). URLs that depend on run-time variables are enforced by the navigation guard in the runner.
  */
 export function assertNavigateTargetsAllowed(steps: Step[], baseUrl: string, variables: Record<string, string>, env: Pick<Env, 'ALLOWED_HOSTS'>, appOrigin: string): void {
-  if (!env.ALLOWED_HOSTS) return
   const vars: Record<string, string> = { ...variables, BASE_URL: baseUrl }
   steps.forEach((step, i) => {
     if (step.disabled || step.command !== 'navigate') return
