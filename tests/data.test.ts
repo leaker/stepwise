@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   aggregateStatus,
+  cellsBeyondColumns,
   dataBytes,
   decodeDataFile,
   describeDataProblem,
@@ -14,6 +15,7 @@ import {
   MAX_DATA_ROWS,
   parseDelimited,
   parsePasted,
+  parsePastedIntoEmpty,
   pasteInto,
   patternLogHeading,
   patternSummary,
@@ -245,5 +247,32 @@ describe('pasting a block into the table', () => {
     // Once there are rows, pasting into the header renames columns, as before.
     const renamed = pasteInto({ columns: ['A', 'B'], rows: [['1', '2']] }, [['X', 'Y'], ['3', '4']], { r: -1, c: 0 })
     expect(renamed.table).toEqual({ columns: ['X', 'Y'], rows: [['3', '4']] })
+  })
+})
+
+describe('pasting into a table that has no column yet', () => {
+  it('names the columns from a single line that is a list of names, and makes one column of anything else', () => {
+    expect(parsePastedIntoEmpty('EMAIL,PASSWORD')).toEqual([['EMAIL', 'PASSWORD']])
+    expect(parsePastedIntoEmpty(' EMAIL , PASSWORD \n')).toEqual([[' EMAIL ', ' PASSWORD ']])
+    expect(parsePastedIntoEmpty('EMAIL')).toEqual([['EMAIL']])
+    // Not names: kept as one cell, where the grid says what is wrong with it.
+    expect(parsePastedIntoEmpty('Hello there, world')).toEqual([['Hello there, world']])
+    expect(parsePastedIntoEmpty('1,2')).toEqual([['1,2']])
+    // Several lines and tabs are read as everywhere else.
+    expect(parsePastedIntoEmpty('A\tB\n1\t2')).toEqual(parsePasted('A\tB\n1\t2'))
+    expect(parsePastedIntoEmpty('A,B\n1,2')).toEqual([['A', 'B'], ['1', '2']])
+    const { table } = pasteInto({ columns: [], rows: [] }, parsePastedIntoEmpty('EMAIL,PASSWORD'), { r: -1, c: 0 })
+    expect(table).toEqual({ columns: ['EMAIL', 'PASSWORD'], rows: [] })
+    expect(pasteInto({ columns: [], rows: [] }, parsePastedIntoEmpty('EMAIL'), { r: -1, c: 0 }).table).toEqual({ columns: ['EMAIL'], rows: [] })
+  })
+})
+
+describe('an imported file with rows longer than its first row', () => {
+  it('counts the cells the table has no column for', () => {
+    const rows = parseDelimited('A,B\n1,2,3\n4\n5,6,,7,\n')
+    expect(tableFromRows(rows)).toEqual({ columns: ['A', 'B'], rows: [['1', '2'], ['4', ''], ['5', '6']] })
+    expect(cellsBeyondColumns(rows)).toBe(2)
+    expect(cellsBeyondColumns(parseDelimited('A,B\n1,2\n3,4,\n'))).toBe(0)
+    expect(cellsBeyondColumns([])).toBe(0)
   })
 })

@@ -10,7 +10,9 @@ import {
   MAX_DATA_ROWS,
   decodeDataFile,
   parseDelimited,
+  cellsBeyondColumns,
   parsePasted,
+  parsePastedIntoEmpty,
   pasteInto,
   freeColumnName as freeName,
   tableFromRows,
@@ -95,11 +97,12 @@ export function DataGrid({ value, onChange, disabled }: { value: DataTable; onCh
 
   const onPaste = (e: React.ClipboardEvent, cell: Cell) => {
     const text = e.clipboardData.getData('text/plain')
-    // A single value is an ordinary paste into the field.
-    if (!/[\t\r\n]/.test(text.replace(/[\r\n]+$/, ''))) return
+    // A single value is an ordinary paste into the field. The box of an empty table is not a field: there the
+    // value becomes the first column (or the columns, for a list of names).
+    if (!empty && !/[\t\r\n]/.test(text.replace(/[\r\n]+$/, ''))) return
     e.preventDefault()
-    const block = parsePasted(text)
-    if (block.length === 0) return
+    const block = empty ? parsePastedIntoEmpty(text) : parsePasted(text)
+    if (block.length === 0 || block.every((r) => r.every((c) => c.trim() === ''))) return
     const { table, clipped, named, rows: pastedRows } = pasteInto(value, block, cell)
     onChange(table)
     const width = plural(Math.max(...block.map((r) => r.length)), 'cell')
@@ -107,6 +110,8 @@ export function DataGrid({ value, onChange, disabled }: { value: DataTable; onCh
     say(note)
     // Nothing on screen shows that part of the block was dropped, so that is said visibly too.
     if (clipped) toast(note)
+    // The box that was pasted into is replaced by the grid: the keyboard goes on in its first column name.
+    if (empty) setFocus({ r: -1, c: 0 })
   }
 
   // Up, Down and Enter move between rows as in a spreadsheet; Tab moves between cells as in any form.
@@ -145,8 +150,11 @@ export function DataGrid({ value, onChange, disabled }: { value: DataTable; onCh
     const full = tableFromRows(parsed)
     const table: DataTable = { columns: full.columns.slice(0, MAX_DATA_COLUMNS), rows: full.rows.slice(0, MAX_DATA_ROWS).map((r) => r.slice(0, MAX_DATA_COLUMNS)) }
     const cut = full.columns.length > table.columns.length || full.rows.length > table.rows.length
+    // A row with more cells than there are column names: the table has no place for the rest.
+    const beyond = cellsBeyondColumns(parsed)
+    const dropped = beyond ? `. ${plural(beyond, 'cell')} in rows longer than the first row (the column names) ${beyond === 1 ? 'was' : 'were'} left out: name a column for them in the file and import it again` : ''
     const guessed = decoded.guessed ? `. The file is not UTF-8, so it was read as ${decoded.encoding}: check that the cells look right, or save it as “CSV UTF-8” and import it again` : ''
-    const note = `Imported ${plural(table.columns.length, 'column')} and ${plural(table.rows.length, 'row')} from ${file.name}${guessed}${cut ? `. The file has more (${full.columns.length} columns, ${full.rows.length} rows): ${LIMITS_NOTE}` : ''}`
+    const note = `Imported ${plural(table.columns.length, 'column')} and ${plural(table.rows.length, 'row')} from ${file.name}${guessed}${dropped}${cut ? `. The file has more (${full.columns.length} columns, ${full.rows.length} rows): ${LIMITS_NOTE}` : ''}`
     if (empty) {
       onChange(table)
       say(note)
@@ -210,7 +218,8 @@ export function DataGrid({ value, onChange, disabled }: { value: DataTable; onCh
           <p className="muted">
             Add a column, import a CSV file, or click here and paste cells copied from a spreadsheet (the first row names the columns). Each row is then one
             run of the steps, and a step reads a cell as <code>{'${COLUMN}'}</code>. Pasted text without tabs is split at commas when it has several lines
-            with the same number of cells; a single line goes into one cell.
+            with the same number of cells; a single line names the first column, or the columns when it is a list of names such as{' '}
+            <code>EMAIL,PASSWORD</code>.
           </p>
         </div>
       ) : (

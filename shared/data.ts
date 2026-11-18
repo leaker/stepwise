@@ -94,6 +94,25 @@ export function parsePasted(text: string): string[][] {
   return parseDelimited(text, '\t')
 }
 
+/**
+ * What was pasted into a table that has no column yet. As parsePasted, except for one line without tabs: a
+ * list of names (`EMAIL,PASSWORD`) names the columns, since kept as one cell it would be a column whose name
+ * is not allowed. Any other single line is one cell.
+ */
+export function parsePastedIntoEmpty(text: string): string[][] {
+  const line = text.replace(/[\r\n]+$/, '')
+  if (/[\t\r\n]/.test(line)) return parsePasted(text)
+  if (line.trim() === '') return []
+  const names = parseDelimited(line, ',')[0] ?? []
+  return names.length > 1 && names.every((n) => NAME.test(n.trim())) ? [names] : [[line]]
+}
+
+/** How many cells with something in them stand beyond the last named column, and so are not part of the table. */
+export function cellsBeyondColumns(rows: string[][]): number {
+  const width = rows[0]?.length ?? 0
+  return rows.slice(1).reduce((n, r) => n + r.slice(width).filter((c) => c !== '').length, 0)
+}
+
 /** A table from parsed rows whose first row holds the column names. Short rows are padded, long ones cut. */
 export function tableFromRows(rows: string[][]): DataTable {
   const [head = [], ...body] = rows
