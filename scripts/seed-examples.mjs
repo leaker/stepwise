@@ -2,7 +2,8 @@
 // Builds the example suite in the "Harbor Inn demo" project through the public HTTP API, the way a
 // person does in the editor: save the steps, capture the screen after a step, pick elements from the
 // capture by name, add steps, capture again. It builds one shared step ("Sign in") first, then the test
-// cases; the last two call the shared step instead of signing in with steps of their own.
+// cases; two of them call the shared step instead of signing in with steps of their own, and the last one
+// is data-driven: it has a data table and runs once per row.
 //
 //   node scripts/seed-examples.mjs <baseUrl> [--code-file <path>] [--run]
 //
@@ -115,17 +116,20 @@ class Builder {
     await api('PATCH', `/test-cases/${this.testCase.id}`, { steps: this.steps })
   }
 
-  /** Save, replay everything up to the last step and capture the screen the test is on. */
-  async capture() {
+  /**
+   * Save, replay everything up to the last step and capture the screen the test is on. `row`: for a
+   * data-driven case, the data row whose values the replay uses (the first when omitted).
+   */
+  async capture(row) {
     await this.save()
     const last = this.steps[this.steps.length - 1]
-    const res = await api('POST', `/test-cases/${this.testCase.id}/uis`, { afterStepId: last.id })
+    const res = await api('POST', `/test-cases/${this.testCase.id}/uis`, { afterStepId: last.id, ...(row ? { row } : {}) })
     this.uiIds.push(res.ui.id)
     if (res.replayError) {
       const n = this.steps.findIndex((s) => s.id === res.replayError.stepId) + 1
       throw new Error(`the replay before a capture stopped at step ${n}: ${res.replayError.message}`)
     }
-    console.log(`    captured ${res.ui.name} after step ${this.steps.length}: ${res.ui.elements.length} elements (${res.ui.url})`)
+    console.log(`    captured ${res.ui.name} after step ${this.steps.length}${row ? ` with data row ${row}` : ''}: ${res.ui.elements.length} elements (${res.ui.url})`)
     return res.ui
   }
 }
@@ -299,6 +303,41 @@ const CASES = [
       b.add('assert_url_contains', { value: 'reserve' })
     },
   },
+  // Data-driven: the steps run once for every row of the data table, and ${EMAIL}, ${PASSWORD} and ${RESULT}
+  // are that row's cells. The screens are captured with two different rows, because the page after "Sign in"
+  // depends on the account.
+  {
+    name: 'Data-driven: sign in with several accounts',
+    description:
+      'Has a data table (Data, on this page or in the editor) with four accounts, so one run executes the steps four times, each in a fresh browser. The steps type ${EMAIL} and ${PASSWORD} from the row; the RESULT column says what that account must lead to, and an If branch checks either the welcome heading or the error message.',
+    device: 'desktop',
+    data: {
+      columns: ['EMAIL', 'PASSWORD', 'RESULT'],
+      rows: [
+        ['demo@example.com', 'demo1234', 'signed in'],
+        ['DEMO@EXAMPLE.COM', 'demo1234', 'signed in'],
+        ['demo@example.com', 'not-the-password', 'rejected'],
+        ['someone-else@example.com', 'demo1234', 'rejected'],
+      ],
+    },
+    async build(b) {
+      b.add('navigate', { value: LOGIN_URL })
+      const login = await b.capture()
+      b.add('input', { target: pick(login, '"Email" input area'), value: '${EMAIL}' })
+      b.add('input', { target: pick(login, '"Password" input area'), value: '${PASSWORD}' })
+      b.add('click', { target: pick(login, '"Sign in" button') })
+      // Row 1 signs in; row 3 has the wrong password and stays on the login page with an error.
+      const dashboard = await b.capture(1)
+      const rejected = await b.capture(3)
+      b.add('if_variable_equals', { variable: 'RESULT', value: 'signed in' })
+      b.add('assert_text_equals', { target: pick(dashboard, '"Welcome back, Demo User" text'), value: 'Welcome back, Demo User' })
+      b.add('assert_url_contains', { value: 'dashboard' })
+      b.add('else')
+      b.add('assert_text_equals', { target: pick(rejected, '"The email or password is incorrect." text'), value: 'The email or password is incorrect.' })
+      b.add('assert_url_contains', { value: 'login' })
+      b.add('end_if')
+    },
+  },
 ]
 
 /** The build in progress, for the interrupt handler: undoes what was started on the server. */
@@ -333,6 +372,8 @@ async function seedCase(project, existing, spec, shared = {}) {
     testCase = await api('POST', `/projects/${project.id}/${spec.kind === 'shared' ? 'shared-steps' : 'test-cases'}`, { name: spec.name, description: BUILDING + spec.description, device: spec.device })
     console.log(`  + ${label(testCase)} ${spec.name}: created (${spec.kind === 'shared' ? 'shared step' : (DEVICE_LABEL[spec.device] ?? spec.device)})`)
   }
+  // The data table first: the captures of a data-driven case replay the steps with the values of one of its rows.
+  if (spec.data) await api('PATCH', `/test-cases/${testCase.id}`, { data: spec.data })
   const builder = new Builder(testCase, found && !partial ? structuredClone(found.steps) : [])
   // Do not leave a half-built case behind. A new case is deleted (its captured screens go with it); the
   // demo project's own case gets its step back, keeps the marker if it was already partly built, and loses
@@ -349,7 +390,7 @@ async function seedCase(project, existing, spec, shared = {}) {
     // The last save is the one that makes the case complete: steps and the real description together.
     await api('PATCH', `/test-cases/${testCase.id}`, { steps: builder.steps, description: spec.description })
     undoCurrent = null
-    console.log(`    saved ${builder.steps.length} steps`)
+    console.log(`    saved ${builder.steps.length} steps${spec.data ? ` and ${spec.data.rows.length} data rows` : ''}`)
     return testCase.id
   } catch (e) {
     undoCurrent = null
@@ -401,6 +442,8 @@ async function runBatch(project, ids) {
 
   const rows = (batch.runs ?? []).map((r) => {
     const failed = r.results.find((x) => x.status === 'failed')
+    // A data-driven test case is one line: its steps are counted over all of its patterns (data rows).
+    const patterns = r.patterns ? `${r.patterns.filter((p) => p.status === 'succeeded').length} of ${r.patterns.length} patterns passed` : ''
     return {
       n: `#${r.testCaseNumber}`,
       name: r.testCaseName,
@@ -408,7 +451,12 @@ async function runBatch(project, ids) {
       status: r.status,
       steps: `${r.results.filter((x) => x.status === 'passed' || x.status === 'healed').length} ok / ${r.results.length}`,
       time: seconds(r.startedAt, r.finishedAt),
-      note: failed ? `step ${failed.number}: ${failed.error ?? 'failed'}` : r.status === 'unresolved' ? `${r.results.filter((x) => x.status === 'healed').length} repaired step(s) wait for review` : '',
+      note: [
+        patterns,
+        failed ? `${failed.pattern ? `pattern ${failed.pattern}, ` : ''}step ${failed.number}: ${failed.error ?? 'failed'}` : r.status === 'unresolved' ? `${r.results.filter((x) => x.status === 'healed').length} repaired step(s) wait for review` : '',
+      ]
+        .filter(Boolean)
+        .join('; '),
     }
   })
   const width = (key, title) => Math.max(title.length, ...rows.map((r) => String(r[key]).length))

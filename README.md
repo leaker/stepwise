@@ -23,6 +23,14 @@ affiliated with, endorsed by, or derived from the code of any such product.
   expands to preview its steps and links to it; *Move to a new shared step* in a step's menu turns the
   selected steps (Shift+click or Shift+arrow keys to select several) into one. The project page lists
   the shared steps with the test cases that use each; one that is in use cannot be deleted.
+- **Data-driven tests** - a test case can have a data table: named columns and rows of text. A run then
+  executes the steps once per row (a *pattern*), one after the other, each in a fresh browser, and goes
+  on after a row that failed; `${COLUMN}` in a step reads that row's cell. The table is edited in a grid
+  on the test case page or from the editor's *Data* button: add, rename and remove columns and rows,
+  paste a block copied from a spreadsheet, or import a `.csv` file whose first row names the columns. The
+  run page has one tab per pattern with its own status, screenshots, log and repairs; a batch run counts
+  the test case once and shows "2 of 3 patterns passed". *Run up to this step*, *Run only this step* and
+  captures use one row, chosen in the editor.
 - **Devices** - a test case runs on the desktop browser (1280x800) or on an emulated phone (iPhone 15,
   Pixel 8): phone viewport, user agent, touch input and pixel ratio. Captures and runs use the test
   case's device, clicks become taps, and *Swipe* moves the page (directions are the finger's: swiping up
@@ -40,6 +48,8 @@ affiliated with, endorsed by, or derived from the code of any such product.
   locator to the test case and to the element on its captured screen (the screenshot is kept; capture
   again to refresh it); rejecting it turns the run into a failure. A decision is final. A repair of a
   step that came from a shared step is saved to the shared step, once, for every test case that calls it.
+  In a data-driven run each pattern is reviewed by itself; approving a repair also approves the same
+  repair in the other patterns of that run, and the locator is saved once.
 - **Abort** for single and batch runs.
 - **AI assistant** (optional) - describe a test in plain language in the editor's chat panel and the
   assistant builds the steps: it captures the pages, adds steps with the elements it found, and runs
@@ -81,7 +91,8 @@ A capture is synchronous: the request launches a browser, captures and returns. 
 executes it and writes each step result to D1 as it happens, so the UI simply polls `GET /api/runs/:id`.
 A batch run is one queue message: its test cases run one after another in one browser, each in a fresh
 browser context. Aborting sets the status in D1; the consumer checks it before every step. A run has
-15 minutes from the moment it starts (a queue consumer invocation does not live longer either); one that
+15 minutes from the moment it starts - the whole run, so all the patterns of a data-driven test case
+together (a queue consumer invocation does not live longer either); one that
 is still unfinished after that is marked failed the next time it is read, so nothing stays "running"
 forever.
 
@@ -127,6 +138,21 @@ The contract is `worker/engine/index.ts`: `captureUi(page)` and `runSteps(page, 
   belongs to another project, contains a call itself or has an unbalanced If block is refused when the
   run is created, with the step number.
 
+- **Data-driven runs.** The data table is stored with the test case (`shared/data.ts` has its limits,
+  the CSV / TSV parser and the validation; the grid and the Worker use the same code). When a run is
+  created it gets one *pattern* per row with that row's values, so later edits to the table do not
+  change the run. The consumer executes the patterns in order: a fresh browser context for each (no
+  cookies or storage carried over), the same expanded step list, and the row's values as variables.
+  Precedence inside a pattern: a value stored by a step (*Store value* and friends) replaces whatever
+  the name held, a column wins over a project variable of the same name, and the built-in names
+  (`BASE_URL`, `BROWSER`, `DEVICE`) cannot be used as column names. Nothing a step stores carries over to
+  the next pattern. A pattern that fails does not stop the others. The run is one record: every step
+  result carries its pattern number, the log has one section per pattern, and the run's status combines
+  the patterns - failed if any failed, otherwise unresolved if any waits for a repair review, otherwise
+  succeeded; an abort stops the running pattern and the rest are not run. A step range or a capture
+  replays the steps with one row (the first unless another is chosen), and navigate targets are checked
+  against the allow-list with every row's values before the run starts.
+
 Each step stores its own copy of its target element, so a run does not depend on the capture still existing.
 
 ## Try self-healing
@@ -148,7 +174,7 @@ variable for it, and its test case opens `${BASE_URL}/login.html${SITE_VERSION}`
 
 ## Example suite
 
-`scripts/seed-examples.mjs` builds one shared step and seven test cases in the demo project through the public HTTP API, the
+`scripts/seed-examples.mjs` builds one shared step and eight test cases in the demo project through the public HTTP API, the
 way a person does in the editor: save the steps, capture the screen after a step, pick elements from the
 capture by name, add steps, capture again. It needs nothing but Node.
 
@@ -158,7 +184,7 @@ pnpm seed:examples https://stepwise.example.com --code-file ~/.stepwise-code --r
 ```
 
 `--code-file` names a file that holds the access code (it is sent as a bearer token and never printed).
-`--run` starts a batch run of the seven cases afterwards, waits for it and prints a table; the exit code
+`--run` starts a batch run of the eight cases afterwards, waits for it and prints a table; the exit code
 is 1 only if a case failed or the suite could not be built (runs that were repaired by self-healing and
 wait for review do not count as failures). A finished case whose name already exists is left alone, so the
 script can be run again (the same goes for the shared step). A case that could not be built completely is removed again, also when the script
@@ -175,6 +201,7 @@ built again by the next run instead of being taken for a finished one.
 | Mobile: open the menu and start a reservation | An emulated iPhone 15: the navigation is behind a *Menu* button there, so the test taps Menu, then Reserve, swipes and checks the form. |
 | Shared step: the guest area after signing in | Starts with a call to the shared step *Sign in* (S1) instead of its own login steps, then checks the dashboard. |
 | Shared step: start a reservation after signing in | A second caller of the same shared step: the elements after the call are picked from a capture that replayed through it. |
+| Data-driven: sign in with several accounts | A data table of four accounts (`EMAIL`, `PASSWORD`, `RESULT`): one run executes the steps four times. Two rows sign in, two are rejected (a wrong password, an unknown account), and an If branch on `${RESULT}` checks the welcome heading or the error message. Its screens were captured with two different rows. |
 
 The shared step *Sign in* (navigate, two inputs, click) is built first, with its own captured screen. The
 first five cases are as before: each of them still reads top to bottom on its own.
@@ -580,7 +607,14 @@ current page when the address had no `.html`.
   platform's time limits; Browser Run's own concurrency and session limits apply too.
 - Captures do not look inside iframes or closed shadow roots, and elements inside an open shadow
   root only get CSS locators (XPath cannot reach them).
-- No users, roles, schedules, notifications, data-driven tests, loops or visual diffs.
+- No users, roles, schedules, notifications, loops or visual diffs.
+- Data-driven tests: a data table has at most 20 columns, 50 rows and 2000 characters in a cell, and
+  rows times steps may not exceed 2000 step results in one run. Patterns run sequentially, never in
+  parallel, and the 15 minute limit is for the whole run, so a long test case with many rows has to be
+  split. Cells are text; there is no per-row device, no row filter and no shared data table between test
+  cases (a shared step uses the data of the test case that calls it). A cell is a one-line field: a
+  line break inside an imported or pasted cell is kept until that cell is edited. The assistant builds
+  and tries steps with the first row.
 - Shared steps do not nest (a shared step cannot call another one), and a call takes no parameters:
   what varies between callers goes through variables set before the call. A shared step has no device of
   its own at run time: it runs on the device of the test case that calls it, so one captured on desktop
@@ -589,7 +623,7 @@ current page when the address had no `.html`.
   but it does not add calls or choose shared steps.
 - A run is never retried once it has started. Only a run that could not get a browser (Browser Run's
   concurrency or rate limit) is tried again, up to three times, before it is marked failed.
-- A request body may be 1 MB at most; a run may take 15 minutes at most.
+- A request body may be 1 MB at most; a run may take 15 minutes at most, all of its patterns included.
 - Self-healing is a similarity heuristic, not a model; every repair needs a human decision.
 - The assistant builds and edits steps only: it does not rename test cases, change the device, or
   manage projects. It works from the element list of a page and looks at a screenshot only when it asks for one (which
