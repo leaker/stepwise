@@ -414,8 +414,9 @@ A second pass went through seventeen more guides, one by one:
   (`React.lazy`), so the project list and the access form no longer download them; a tab left open across a
   deployment reloads once when a lazily loaded file is gone; the hashed files under `/assets` are served as
   `immutable` (they pass through the Worker, which answers a hashed file that does not exist with a 404
-  instead of the app shell, so the shell is never cached under a script's address). Deferred: self-hosting the two IBM Plex families. It needs the font files (or a package that
-  ships them) added to the repository, which is the owner's call; until then they come from Google Fonts.
+  instead of the app shell, so the shell is never cached under a script's address). The two IBM Plex families are
+  self-hosted (`public/fonts/v1`, latin subset, SIL Open Font License): no third-party connection, the two weights of
+  the first paint are preloaded, and the files are cached as immutable.
 - **`security`** - applied. Every response carries `X-Frame-Options: DENY`, `nosniff`, a `Referrer-Policy`, a
   `Permissions-Policy`, `Cross-Origin-Opener-Policy` and `Cross-Origin-Resource-Policy` (`public/_headers` for
   the static app shell, `worker/security.ts` for `/api` and `/demo`). The app has an enforced

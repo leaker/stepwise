@@ -6,14 +6,14 @@ import type { Env } from './env'
 /**
  * The app's policy. The shell is static and cached, so there is no per-request nonce: scripts are limited to
  * the origin's own hashed bundles (nothing user-uploaded is served as script; screenshots are images with
- * nosniff). Fonts come from Google Fonts. Trusted Types is enforced where the browser supports it; the app
+ * nosniff). Fonts are served from this origin. Trusted Types is enforced where the browser supports it; the app
  * has no HTML sinks.
  */
 export const APP_CSP = [
   "default-src 'self'",
   "script-src 'self' 'report-sample' https://static.cloudflareinsights.com",
-  "style-src 'self' https://fonts.googleapis.com",
-  'font-src https://fonts.gstatic.com',
+  "style-src 'self'",
+  "font-src 'self'",
   "img-src 'self' data: blob:",
   "connect-src 'self' https://cloudflareinsights.com",
   "object-src 'none'",
