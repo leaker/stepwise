@@ -1,6 +1,6 @@
 // In-browser stand-in for the Worker API. Loaded only when VITE_MOCK is set (see main.tsx);
 // it exists so the UI can be exercised before, or without, the real backend.
-import { COMMAND_BY_ID, nextUiName, sharedLabel, stepSentence, validateSteps } from '../../shared/commands'
+import { COMMAND_BY_ID, isBuiltInVariable, MAX_ELEMENT_NAME, MAX_LOCATOR_LENGTH, MAX_STEP_TEXT, MAX_STEPS, nextUiName, sharedLabel, stepSentence, validateSteps } from '../../shared/commands'
 import { stepsRevision } from '../../shared/revision'
 import { aggregateStatus, describeDataProblem, hasPatterns, patternLogHeading, rowValues, settledPatterns, SUMMARY_LOG_HEADING, validateDataTable } from '../../shared/data'
 import { DEVICES } from '../../shared/devices'
@@ -26,6 +26,7 @@ import type {
   Ui,
   UiElement,
 } from '../../shared/types'
+import { baseUrlProblem } from '../../shared/url'
 import { setShotResolver } from '../api'
 
 let seq = 1
@@ -317,8 +318,14 @@ function makeRun(tc: TestCase, status: RunStatus, opts: { failAt?: number; failP
     finishedAt: done ? new Date(Date.parse(started) + 9_000).toISOString() : null,
   }
   runs.push(run)
-  if (!opts.batch) tc.lastRun = { id: run.id, status, finishedAt: run.finishedAt }
+  refreshLastRun(tc)
   return run
+}
+
+/** As the Worker: the newest run of the test case, single or inside a batch run. */
+function refreshLastRun(tc: TestCase) {
+  const newest = runs.filter((r) => r.testCaseId === tc.id).reduce<Run | null>((a, r) => (!a || r.createdAt >= a.createdAt ? r : a), null)
+  tc.lastRun = newest ? { id: newest.id, status: newest.status, finishedAt: newest.finishedAt } : null
 }
 
 function logFor(results: StepResult[], status: RunStatus, patterns?: RunPattern[] | null): string {
@@ -444,19 +451,53 @@ function recount(b: BatchRun) {
 function simulate(run: Run, onDone?: () => void) {
   const positions = positionsOf(run.steps)
   const todo = reportedSteps(run.steps, run.range).map((s) => ({ s, i: run.steps.indexOf(s) }))
+  const project = projects.find((x) => x.id === run.projectId)
+  // As the engine: a step in a branch arm that is not taken is not executed and gets no result. The mock
+  // decides an "If variable equals" from the project variables, the data row and the values stored by
+  // "Store fixed value"; an "If UI element exists" is always true.
+  const taken = (p: RunPattern | null) => {
+    const vars: Record<string, string> = { ...(project?.variables ?? {}), ...(p?.values ?? {}) }
+    const frames: { exec: boolean; taken: boolean }[] = []
+    const executing = (depth = frames.length) => frames.slice(0, depth).every((f) => f.exec)
+    return todo.filter(({ s }) => {
+      if (s.command === 'if_exists' || s.command === 'if_variable_equals') {
+        if (!executing()) return frames.push({ exec: false, taken: true }) && false
+        const holds = s.command === 'if_exists' || (vars[s.variable ?? ''] ?? '') === (s.value ?? '').replace(/\$\{(\w+)\}/g, (m, name: string) => vars[name] ?? m)
+        frames.push({ exec: holds, taken: holds })
+        return true
+      }
+      if (s.command === 'else') {
+        const top = frames[frames.length - 1]
+        if (!top) frames.push({ exec: false, taken: true })
+        else {
+          top.exec = !top.taken
+          top.taken = true
+        }
+        return executing(frames.length - 1)
+      }
+      if (s.command === 'end_if') return !!frames.pop() && executing()
+      if (!executing()) return false
+      if (s.command === 'store_fixed' && s.variable) vars[s.variable] = s.value ?? ''
+      return true
+    })
+  }
   // A data-driven run goes through its patterns one after the other and goes on after one that failed.
-  const plan = (run.patterns ?? [null]).flatMap((p) => todo.map((item) => ({ ...item, p })))
+  const plan = (run.patterns ?? [null]).flatMap((p) => taken(p).map((item) => ({ ...item, p })))
   let k = 0
   const finish = (status: RunStatus) => {
     run.status = run.patterns ? aggregateStatus(run.patterns.map((p) => p.status)) : status
     run.finishedAt = now()
     run.log = logFor(run.results, run.status, run.patterns)
     const tc = cases.find((c) => c.id === run.testCaseId)
-    if (tc && !run.batchRunId) tc.lastRun = { id: run.id, status: run.status, finishedAt: run.finishedAt }
+    if (tc) refreshLastRun(tc)
     onDone?.()
   }
   const tick = () => {
-    if (run.status === 'aborted') return onDone?.()
+    if (run.status === 'aborted') {
+      const tc = cases.find((c) => c.id === run.testCaseId)
+      if (tc) refreshLastRun(tc)
+      return onDone?.()
+    }
     if (run.status === 'queued') {
       run.status = 'running'
       run.startedAt = now()
@@ -564,6 +605,34 @@ const lite = (r: Run) => {
 }
 const withCounts = (p: Project): Project => ({ ...p, testCaseCount: cases.filter((c) => c.projectId === p.id && c.kind === 'test').length, batchRunCount: batches.filter((b) => b.projectId === p.id).length })
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+/** Remove the matching items of a list in place. */
+function remove<T>(list: T[], match: (item: T) => boolean) {
+  for (let i = list.length - 1; i >= 0; i--) if (match(list[i])) list.splice(i, 1)
+}
+const nameOf = (value: unknown, what: string): string => {
+  const name = typeof value === 'string' ? value.trim() : ''
+  if (!name) throw new HttpError(400, `${what} name is required`)
+  if (name.length > 120) throw new HttpError(400, `${what} name must be 120 characters or fewer`)
+  return name
+}
+const baseUrlOf = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') return undefined
+  const text = value.trim()
+  const problem = baseUrlProblem(text)
+  if (problem) throw new HttpError(400, problem)
+  return text.replace(/\/+$/, '')
+}
+const hasEnabledSteps = (steps: Step[]): boolean => steps.some((s) => !s.disabled && !s.call)
+const assistantBusy = (testCaseId: string): boolean => assistantSessions.some((x) => x.testCaseId === testCaseId && (x.status === 'queued' || x.status === 'running'))
+/** The limits of worker/validate.ts that the editor is expected to keep to. */
+function checkSteps(steps: Step[]) {
+  if (steps.length > MAX_STEPS) throw new HttpError(400, `A test case can have at most ${MAX_STEPS} steps`)
+  steps.forEach((s, i) => {
+    for (const key of ['value', 'variable'] as const) if ((s[key] ?? '').length > MAX_STEP_TEXT) throw new HttpError(400, `Step ${i + 1}: ${key} is too long (${MAX_STEP_TEXT} characters at most)`)
+    if (s.target && s.target.name.length > MAX_ELEMENT_NAME) throw new HttpError(400, `Step ${i + 1}: target.name is too long (${MAX_ELEMENT_NAME} characters at most)`)
+    if (s.target && [s.target.locator, ...s.target.candidates].some((l) => l.value.length > MAX_LOCATOR_LENGTH)) throw new HttpError(400, `Step ${i + 1}: target.locator is too long (${MAX_LOCATOR_LENGTH} characters at most)`)
+  })
+}
 
 async function handle(method: string, path: string, body: Record<string, unknown>): Promise<unknown> {
   const seg = path.split('/').filter(Boolean).map(decodeURIComponent)
@@ -578,7 +647,7 @@ async function handle(method: string, path: string, body: Record<string, unknown
     case 'GET projects':
       return projects.map(withCounts)
     case 'POST projects': {
-      const p: Project = { id: id('p'), name: String(body.name ?? 'Untitled'), description: String(body.description ?? ''), baseUrl: String(body.baseUrl ?? ''), variables: {}, createdAt: now() }
+      const p: Project = { id: id('p'), name: nameOf(body.name, 'Project'), description: String(body.description ?? ''), baseUrl: baseUrlOf(body.baseUrl) ?? '', variables: {}, createdAt: now() }
       projects.push(p)
       counters.set(p.id, { tc: 1, batch: 1, shared: 1 })
       return withCounts(p)
@@ -587,12 +656,35 @@ async function handle(method: string, path: string, body: Record<string, unknown
       return withCounts(need(projects.find((p) => p.id === b), 'Project'))
     case 'PATCH projects/:': {
       const p = need(projects.find((x) => x.id === b), 'Project')
-      Object.assign(p, body)
+      // As the Worker stores them: the name trimmed, the base URL without the slash at its end, the variables checked.
+      const next: Partial<Project> = {}
+      if (body.name !== undefined) next.name = nameOf(body.name, 'Project')
+      if (typeof body.description === 'string') next.description = body.description
+      const baseUrl = baseUrlOf(body.baseUrl)
+      if (baseUrl !== undefined) next.baseUrl = baseUrl
+      if (body.variables !== undefined) {
+        const variables = body.variables as Record<string, string>
+        for (const name of Object.keys(variables)) {
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || name.length > 60) throw new HttpError(400, `Invalid variable name "${name.slice(0, 60)}" (letters, digits and _ only, 60 characters at most)`)
+          if (isBuiltInVariable(name)) throw new HttpError(400, `${name} is a built-in variable and cannot be a project variable${name === 'BASE_URL' ? ' (set the base URL instead)' : ''}. Remove it or use another name.`)
+        }
+        next.variables = variables
+      }
+      Object.assign(p, next)
       return withCounts(p)
     }
-    case 'DELETE projects/:':
-      projects.splice(projects.findIndex((p) => p.id === b), 1)
+    case 'DELETE projects/:': {
+      const p = need(projects.find((x) => x.id === b), 'Project')
+      // Everything of the project goes with it.
+      const gone = new Set(cases.filter((x) => x.projectId === p.id).map((x) => x.id))
+      remove(uis, (u) => gone.has(u.testCaseId))
+      remove(runs, (r) => r.projectId === p.id)
+      remove(batches, (x) => x.projectId === p.id)
+      remove(assistantSessions, (x) => gone.has(x.testCaseId))
+      remove(cases, (x) => x.projectId === p.id)
+      remove(projects, (x) => x === p)
       return { ok: true }
+    }
     case 'GET projects/:/test-cases':
       return cases.filter((x) => x.projectId === b && x.kind === 'test').sort((x, y) => x.number - y.number)
     case 'GET projects/:/shared-steps':
@@ -641,7 +733,17 @@ async function handle(method: string, path: string, body: Record<string, unknown
     case 'POST projects/:/batch-runs': {
       const ctr = need(counters.get(b), 'Project')
       const ids = body.testCaseIds as string[] | undefined
-      const picked = cases.filter((x) => x.projectId === b && x.kind === 'test' && (!ids || ids.includes(x.id))).sort((x, y) => x.number - y.number)
+      let picked = cases.filter((x) => x.projectId === b && x.kind === 'test' && (!ids || ids.includes(x.id))).sort((x, y) => x.number - y.number)
+      if (picked.length === 0) throw new HttpError(400, 'Select at least one test case to run')
+      for (const tc of picked) {
+        const problem = expand(tc).problems[0]
+        if (problem) throw new HttpError(400, `#${tc.number} ${tc.name} - Step ${tc.steps.findIndex((s) => s.id === problem.stepId) + 1}: ${problem.message}`)
+      }
+      // A test case without steps would "succeed" without testing anything: an error when asked for by id, left out of "run everything".
+      const empty = picked.filter((tc) => !hasEnabledSteps(expand(tc).steps))
+      if (empty.length && ids) throw new HttpError(400, `#${empty[0].number} ${empty[0].name} has no steps to run`)
+      picked = picked.filter((tc) => !empty.includes(tc))
+      if (picked.length === 0) throw new HttpError(400, 'No test case in this project has steps to run')
       const batch: BatchRun = { id: id('b'), projectId: b, number: ctr.batch++, status: 'running', trigger: body.trigger === 'api' ? 'api' : 'manual', counts: { total: picked.length, succeeded: 0, failed: 0, unresolved: 0, aborted: 0 }, createdAt: now(), startedAt: now(), finishedAt: null }
       batches.unshift(batch)
       const queue = picked.map((tc, i) => makeRun(tc, 'queued', { batch, order: i + 1, minutesAgo: 0 }))
@@ -664,12 +766,14 @@ async function handle(method: string, path: string, body: Record<string, unknown
       if (nested >= 0) throw new HttpError(400, `Step ${nested + 1}: ${NESTED_SHARED_MESSAGE}`)
       // As the Worker: a save of the steps is refused while the assistant edits them, or when it was based on an older list.
       if (Array.isArray(body.steps)) {
-        if (assistantSessions.some((x) => x.testCaseId === b && (x.status === 'queued' || x.status === 'running'))) throw new HttpError(409, 'The assistant is editing the steps of this test case. Wait for it to finish, or abort it, then try again.', 'assistant_busy')
+        checkSteps(body.steps as Step[])
+        if (assistantBusy(b)) throw new HttpError(409, 'The assistant is editing the steps of this test case. Wait for it to finish, or abort it, then try again.', 'assistant_busy')
         if (typeof body.baseStepsRev === 'string' && body.baseStepsRev !== revisionOf(tc)) {
           throw new HttpError(409, 'The steps were changed somewhere else in the meantime (another tab, an approved repair or the assistant). Reload them before editing, so that neither change is lost.', 'steps_changed')
         }
       }
       const { baseStepsRev: _base, ...fields } = body
+      if (fields.name !== undefined) fields.name = nameOf(fields.name, tc.kind === 'shared' ? 'Shared step' : 'Test case')
       if (body.data) {
         const table = body.data as DataTable
         if (tc.kind === 'shared') throw new HttpError(400, 'A shared step cannot have a data table: it uses the data of the test case that calls it')
@@ -683,7 +787,11 @@ async function handle(method: string, path: string, body: Record<string, unknown
       const tc = need(cases.find((x) => x.id === b), 'Test case')
       const callers = tc.kind === 'shared' ? callersOf(tc.id) : []
       if (callers.length) throw new HttpError(409, `Shared step ${sharedLabel(tc)} is used by ${callers.map((t) => `#${t.number} ${t.name}`).join(', ')}. Remove the calls first.`)
-      cases.splice(cases.indexOf(tc), 1)
+      // Its screens and its single runs go with it; a run inside a batch report stays as history.
+      remove(uis, (u) => u.testCaseId === tc.id)
+      remove(runs, (r) => r.testCaseId === tc.id && !r.batchRunId)
+      remove(assistantSessions, (x) => x.testCaseId === tc.id)
+      remove(cases, (x) => x === tc)
       return { ok: true }
     }
     case 'POST test-cases/:/duplicate': {
@@ -725,15 +833,19 @@ async function handle(method: string, path: string, body: Record<string, unknown
       if (Array.isArray(body.elements)) ui.elements = body.elements as UiElement[]
       return ui
     }
-    case 'DELETE uis/:':
-      uis.splice(uis.findIndex((u) => u.id === b), 1)
+    case 'DELETE uis/:': {
+      const ui = need(uis.find((u) => u.id === b), 'UI')
+      if (assistantBusy(ui.testCaseId)) throw new HttpError(409, 'The assistant is working on this test case and may be using this screen. Wait for it to finish, or abort it, then delete the screen.', 'assistant_busy')
+      remove(uis, (u) => u === ui)
       return { ok: true }
+    }
     case 'POST test-cases/:/runs': {
       const tc = need(cases.find((x) => x.id === b), 'Test case')
       const problem = expand(tc).problems[0]
       if (problem) throw new HttpError(400, `Step ${tc.steps.findIndex((s) => s.id === problem.stepId) + 1}: ${problem.message}`)
       const range = (body.range as Run['range']) ?? null
       const expanded = expand(tc).steps
+      if (!hasEnabledSteps(expanded)) throw new HttpError(400, `This ${tc.kind === 'shared' ? 'shared step' : 'test case'} has no steps to run`)
       const broken = validateSteps(expanded, range ? { from: 1, to: flatRange(expanded, range).to } : null)[0]
       if (broken) throw new HttpError(400, `Step ${positionLabel(positionsOf(expanded)[expanded.findIndex((s) => s.id === broken.stepId)])}: ${broken.message}`)
       if (range && reportedSteps(expanded, range).length === 0) throw new HttpError(400, range.from === range.to ? `Step ${range.from} is disabled, so there is nothing to run` : `Steps ${range.from}-${range.to} are all disabled, so there is nothing to run`)
@@ -741,14 +853,16 @@ async function handle(method: string, path: string, body: Record<string, unknown
       run.range = range
       // A partial run of a data-driven test case uses one data row.
       if (run.range && run.patterns) run.patterns = patternsFor(tc, [Math.min(Number(body.row) || 1, run.patterns.length)])
-      tc.lastRun = { id: run.id, status: 'queued', finishedAt: null }
       simulate(run)
       return run
     }
     case 'GET test-cases/:/runs':
-      return runs.filter((r) => r.testCaseId === b && !r.batchRunId).sort((x, y) => y.createdAt.localeCompare(x.createdAt)).map(lite)
-    case 'GET runs/:':
-      return need(runs.find((r) => r.id === b), 'Run')
+      // Single runs and the ones inside batch runs, newest first.
+      return runs.filter((r) => r.testCaseId === b).sort((x, y) => y.createdAt.localeCompare(x.createdAt)).slice(0, 50).map(lite)
+    case 'GET runs/:': {
+      const run = need(runs.find((r) => r.id === b), 'Run')
+      return cases.some((x) => x.id === run.testCaseId) ? run : { ...run, testCaseDeleted: true }
+    }
     case 'POST runs/:/abort': {
       const run = need(runs.find((r) => r.id === b), 'Run')
       if (run.status === 'queued' || run.status === 'running') {
@@ -756,6 +870,8 @@ async function handle(method: string, path: string, body: Record<string, unknown
         run.finishedAt = now()
         for (const p of run.patterns ?? []) if (p.status === 'queued' || p.status === 'running') p.status = 'aborted'
         run.log = logFor(run.results, 'aborted', run.patterns)
+        const tc = cases.find((x) => x.id === run.testCaseId)
+        if (tc) refreshLastRun(tc)
       }
       return run
     }
@@ -770,13 +886,23 @@ async function handle(method: string, path: string, body: Record<string, unknown
       // An approved repair goes to the step's owner: the shared step for a step that came from one.
       const healed = run.steps.find((s) => s.id === d)
       const owner = cases.find((x) => x.id === (healed?.origin?.shared.id ?? run.testCaseId))
-      if (body.action === 'approve' && healed?.target && owner) {
+      if (body.action === 'approve' && healed?.target) {
         const t = healed.target
-        owner.steps = owner.steps.map((s) => (s.target?.uiId === t.uiId && s.target.elementId === t.elementId ? { ...s, target: { ...s.target, locator: res.heal!.newLocator, candidates: res.heal!.newCandidates } } : s))
-        owner.updatedAt = now()
+        const uses = (s: Step) => s.target?.uiId === t.uiId && s.target.elementId === t.elementId
+        if (owner?.steps.some(uses)) {
+          owner.steps = owner.steps.map((s) => (uses(s) ? { ...s, target: { ...s.target!, locator: res.heal!.newLocator, candidates: res.heal!.newCandidates } } : s))
+          owner.updatedAt = now()
+        } else res.heal!.notSaved = true // moved or deleted since the run: the reviewer is told
+        // The element on its captured screen gets the new locators too, for the steps made from it later.
+        const ui = uis.find((u) => u.id === t.uiId)
+        if (ui) ui.elements = ui.elements.map((el) => (el.id === t.elementId ? { ...el, locators: res.heal!.newCandidates.length ? res.heal!.newCandidates : [res.heal!.newLocator] } : el))
         // Saved once: the same repair of the same element in the other patterns is approved with it.
         const same = new Set(run.steps.filter((s) => s.target?.uiId === t.uiId && s.target.elementId === t.elementId).map((s) => s.id))
-        for (const other of run.results) if (run.patterns && other.heal?.state === 'unresolved' && same.has(other.stepId) && other.heal.newLocator.value === res.heal!.newLocator.value) other.heal.state = 'approved'
+        for (const other of run.results) {
+          if (!run.patterns || other.heal?.state !== 'unresolved' || !same.has(other.stepId) || other.heal.newLocator.value !== res.heal!.newLocator.value) continue
+          other.heal.state = 'approved'
+          if (res.heal!.notSaved) other.heal.notSaved = true
+        }
       }
       const reviewed = (status: RunStatus, own: StepResult[]): RunStatus =>
         status !== 'unresolved' ? status : own.some((r) => r.heal?.state === 'rejected' || r.status === 'failed') ? 'failed' : own.some((r) => r.heal?.state === 'unresolved') ? 'unresolved' : 'succeeded'
@@ -786,6 +912,8 @@ async function handle(method: string, path: string, body: Record<string, unknown
       } else run.status = reviewed(run.status, run.results)
       const batch = batches.find((x) => x.id === run.batchRunId)
       if (batch) recount(batch)
+      const tc = cases.find((x) => x.id === run.testCaseId)
+      if (tc) refreshLastRun(tc)
       return run
     }
     case 'GET batch-runs/:': {
@@ -822,6 +950,8 @@ async function handle(method: string, path: string, body: Record<string, unknown
       for (const r of runs) {
         if (r.batchRunId !== b || (r.status !== 'queued' && r.status !== 'running')) continue
         Object.assign(r, { status: 'aborted', finishedAt: now(), patterns: settledPatterns('aborted', r.patterns ?? null) })
+        const tc = cases.find((x) => x.id === r.testCaseId)
+        if (tc) refreshLastRun(tc)
       }
       recount(batch)
       return batch
