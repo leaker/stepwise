@@ -235,3 +235,83 @@ export function logOfPattern(log: string, index: number): string {
   const parts = splitLog(log)
   return [parts.header, parts.patterns.get(index) ?? '', parts.footer].filter((s) => s !== '').join('\n')
 }
+
+// ---- pasting and importing ----
+
+/** A name for a new column that is not taken yet: COLUMN_1, COLUMN_2, ... */
+export function freeColumnName(taken: string[]): string {
+  for (let n = taken.length + 1; ; n++) if (!taken.includes(`COLUMN_${n}`)) return `COLUMN_${n}`
+}
+
+/**
+ * Put a pasted block into the table with its top left cell at `at` (row -1 is the header: the column
+ * names), growing the table as needed up to the limits. Pasted into the header, the first line names the
+ * columns and the rest become rows, with one exception: a table that already has its columns named and
+ * no rows yet is waiting for rows, so the block is rows (a first line that repeats the column names is
+ * left out). `named`: the block's first line became column names; `rows`: how many of its lines are rows.
+ */
+export function pasteInto(table: DataTable, block: string[][], at: { r: number; c: number }): { table: DataTable; clipped: boolean; named: boolean; rows: number } {
+  const columns = [...table.columns]
+  const rows = table.rows.map((r) => [...r])
+  let clipped = false
+  const width = Math.max(...block.map((r) => r.length))
+  const header = at.r < 0
+  const awaitingRows = header && rows.length === 0 && columns.length > 0 && columns.every((c) => c.trim() !== '')
+  const repeatsNames = awaitingRows && block[0].every((cell, i) => cell.trim() === (columns[at.c + i] ?? null))
+  const named = header && !awaitingRows
+  while (columns.length < at.c + width && columns.length < MAX_DATA_COLUMNS) {
+    columns.push(freeColumnName(columns))
+    for (const r of rows) r.push('')
+  }
+  if (at.c + width > columns.length) clipped = true
+  const body = named || repeatsNames ? block.slice(1) : block
+  const top = Math.max(0, at.r)
+  while (rows.length < top + body.length && rows.length < MAX_DATA_ROWS) rows.push(columns.map(() => ''))
+  if (top + body.length > rows.length) clipped = true
+  if (named) block[0].forEach((name, i) => at.c + i < columns.length && (columns[at.c + i] = name.trim()))
+  body.forEach((cells, i) => {
+    const row = rows[top + i]
+    if (row) cells.forEach((cell, j) => at.c + j < columns.length && (row[at.c + j] = cell))
+  })
+  return { table: { columns, rows }, clipped, named, rows: body.length }
+}
+
+/** The regional encoding a spreadsheet's plain "CSV" most likely has for someone who reads this language. */
+const REGIONAL_ENCODINGS: [RegExp, string][] = [
+  [/^zh-(tw|hk|mo|hant)/i, 'big5'],
+  [/^zh/i, 'gb18030'],
+  [/^ja/i, 'shift_jis'],
+  [/^ko/i, 'euc-kr'],
+]
+
+/**
+ * The text of an imported data file. UTF-8 (with or without a byte order mark) and UTF-16 with one are
+ * read as what they are. Anything else is not UTF-8: it is read in the regional encoding that goes with
+ * the user's languages when it is valid in that encoding (`guessed`, so the user can be told to check),
+ * and not at all otherwise (null). It is never read as UTF-8 with the unreadable bytes replaced.
+ */
+export function decodeDataFile(bytes: Uint8Array, languages: readonly string[] = []): { text: string; encoding: string; guessed: boolean } | null {
+  const strict = (encoding: string): string | null => {
+    try {
+      return new TextDecoder(encoding, { fatal: true }).decode(bytes)
+    } catch {
+      return null
+    }
+  }
+  if (bytes.length >= 2 && ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff))) {
+    const encoding = bytes[0] === 0xff ? 'utf-16le' : 'utf-16be'
+    const text = strict(encoding)
+    return text === null ? null : { text, encoding: encoding.toUpperCase(), guessed: false }
+  }
+  const utf8 = strict('utf-8')
+  if (utf8 !== null) return { text: utf8, encoding: 'UTF-8', guessed: false }
+  const tried = new Set<string>()
+  for (const language of languages) {
+    const encoding = REGIONAL_ENCODINGS.find(([pattern]) => pattern.test(language))?.[1]
+    if (!encoding || tried.has(encoding)) continue
+    tried.add(encoding)
+    const text = strict(encoding)
+    if (text !== null) return { text, encoding: encoding === 'gb18030' ? 'GBK (GB 18030)' : encoding === 'shift_jis' ? 'Shift_JIS' : encoding === 'big5' ? 'Big5' : 'EUC-KR', guessed: true }
+  }
+  return null
+}

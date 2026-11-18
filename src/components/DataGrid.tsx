@@ -8,8 +8,11 @@ import {
   MAX_DATA_BYTES,
   MAX_DATA_COLUMNS,
   MAX_DATA_ROWS,
+  decodeDataFile,
   parseDelimited,
   parsePasted,
+  pasteInto,
+  freeColumnName as freeName,
   tableFromRows,
   validateDataTable,
 } from '../../shared/data'
@@ -21,41 +24,10 @@ import { Button, Confirm, IconButton, toast } from './ui'
 
 export const EMPTY_TABLE: DataTable = { columns: [], rows: [] }
 
-/** A name for a new column that is not taken yet: COLUMN_1, COLUMN_2, ... */
-function freeName(taken: string[]): string {
-  for (let n = taken.length + 1; ; n++) if (!taken.includes(`COLUMN_${n}`)) return `COLUMN_${n}`
-}
-
 /** Row -1 is the header (the column names). */
 interface Cell {
   r: number
   c: number
-}
-
-/**
- * Put a pasted block into the table with its top left cell at `at`, growing the table as needed up to
- * the limits. Pasted into the header, the first line names the columns and the rest become rows.
- */
-function pasteInto(table: DataTable, block: string[][], at: Cell): { table: DataTable; clipped: boolean } {
-  const columns = [...table.columns]
-  const rows = table.rows.map((r) => [...r])
-  let clipped = false
-  const width = Math.max(...block.map((r) => r.length))
-  while (columns.length < at.c + width && columns.length < MAX_DATA_COLUMNS) {
-    columns.push(freeName(columns))
-    for (const r of rows) r.push('')
-  }
-  if (at.c + width > columns.length) clipped = true
-  const body = at.r < 0 ? block.slice(1) : block
-  const top = Math.max(0, at.r)
-  while (rows.length < top + body.length && rows.length < MAX_DATA_ROWS) rows.push(columns.map(() => ''))
-  if (top + body.length > rows.length) clipped = true
-  if (at.r < 0) block[0].forEach((name, i) => at.c + i < columns.length && (columns[at.c + i] = name.trim()))
-  body.forEach((cells, i) => {
-    const row = rows[top + i]
-    if (row) cells.forEach((cell, j) => at.c + j < columns.length && (row[at.c + j] = cell))
-  })
-  return { table: { columns, rows }, clipped }
 }
 
 const LIMITS_NOTE = `Up to ${MAX_DATA_COLUMNS} columns, ${MAX_DATA_ROWS} rows, ${MAX_CELL_LENGTH} characters in a cell and ${MAX_DATA_BYTES / 1024} KB in total.`
@@ -128,9 +100,10 @@ export function DataGrid({ value, onChange, disabled }: { value: DataTable; onCh
     e.preventDefault()
     const block = parsePasted(text)
     if (block.length === 0) return
-    const { table, clipped } = pasteInto(value, block, cell)
+    const { table, clipped, named, rows: pastedRows } = pasteInto(value, block, cell)
     onChange(table)
-    const note = `Pasted ${plural(block.length, 'row')} of ${plural(Math.max(...block.map((r) => r.length)), 'cell')}${clipped ? `. Some of it did not fit: ${LIMITS_NOTE}` : ''}`
+    const width = plural(Math.max(...block.map((r) => r.length)), 'cell')
+    const note = `Pasted ${named ? `the column names and ${plural(pastedRows, 'row')}` : plural(pastedRows, 'row')} of ${width}${clipped ? `. Some of it did not fit: ${LIMITS_NOTE}` : ''}`
     say(note)
     // Nothing on screen shows that part of the block was dropped, so that is said visibly too.
     if (clipped) toast(note)
@@ -157,18 +130,23 @@ export function DataGrid({ value, onChange, disabled }: { value: DataTable; onCh
   }
 
   const importFile = async (file: File) => {
-    let text: string
+    let bytes: Uint8Array
     try {
-      text = await file.text()
+      bytes = new Uint8Array(await file.arrayBuffer())
     } catch {
       return toast(`Could not read ${file.name}`, 'error')
     }
-    const parsed = parseDelimited(text)
+    // A spreadsheet's plain "CSV" is in the computer's regional encoding, not UTF-8: read as UTF-8 its
+    // Chinese or Japanese cells would come out as replacement characters without anyone being told.
+    const decoded = decodeDataFile(bytes, [...navigator.languages])
+    if (!decoded) return toast(`${file.name} is not UTF-8 text, so its cells cannot be read reliably. Save it as “CSV UTF-8” in your spreadsheet and import it again.`, 'error')
+    const parsed = parseDelimited(decoded.text)
     if (parsed.length === 0) return toast(`${file.name} is empty`, 'error')
     const full = tableFromRows(parsed)
     const table: DataTable = { columns: full.columns.slice(0, MAX_DATA_COLUMNS), rows: full.rows.slice(0, MAX_DATA_ROWS).map((r) => r.slice(0, MAX_DATA_COLUMNS)) }
     const cut = full.columns.length > table.columns.length || full.rows.length > table.rows.length
-    const note = `Imported ${plural(table.columns.length, 'column')} and ${plural(table.rows.length, 'row')} from ${file.name}${cut ? `. The file has more (${full.columns.length} columns, ${full.rows.length} rows): ${LIMITS_NOTE}` : ''}`
+    const guessed = decoded.guessed ? `. The file is not UTF-8, so it was read as ${decoded.encoding}: check that the cells look right, or save it as “CSV UTF-8” and import it again` : ''
+    const note = `Imported ${plural(table.columns.length, 'column')} and ${plural(table.rows.length, 'row')} from ${file.name}${guessed}${cut ? `. The file has more (${full.columns.length} columns, ${full.rows.length} rows): ${LIMITS_NOTE}` : ''}`
     if (empty) {
       onChange(table)
       say(note)
@@ -286,7 +264,7 @@ export function DataGrid({ value, onChange, disabled }: { value: DataTable; onCh
               ))}
             </tbody>
           </table>
-          {value.rows.length === 0 && <p className="muted data-norows">No rows yet: the test case runs once, without these columns. Add a row, or paste rows into a column name.</p>}
+          {value.rows.length === 0 && <p className="muted data-norows">No rows yet: the test case runs once, without these columns. Add a row, or paste rows copied from a spreadsheet into a column name.</p>}
         </div>
       )}
 

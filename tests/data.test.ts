@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import {
   aggregateStatus,
   dataBytes,
+  decodeDataFile,
   describeDataProblem,
   hasPatterns,
   logOfPattern,
@@ -13,6 +14,7 @@ import {
   MAX_DATA_ROWS,
   parseDelimited,
   parsePasted,
+  pasteInto,
   patternLogHeading,
   patternSummary,
   rowValues,
@@ -191,5 +193,57 @@ describe('the log of a data-driven run', () => {
 
   it('leaves the log of a run without patterns in the header', () => {
     expect(splitLog('a\nb')).toEqual({ header: 'a\nb', patterns: new Map(), footer: '' })
+  })
+})
+
+describe('reading an imported file', () => {
+  const bytes = (...b: number[]) => new Uint8Array(b)
+  const ascii = (text: string) => [...text].map((c) => c.charCodeAt(0))
+
+  it('reads UTF-8 with or without a byte order mark, and UTF-16 with one', () => {
+    const utf8 = new TextEncoder().encode('NAME\n张三\n日本')
+    expect(decodeDataFile(utf8)).toEqual({ text: 'NAME\n张三\n日本', encoding: 'UTF-8', guessed: false })
+    const withBom = decodeDataFile(new Uint8Array([0xef, 0xbb, 0xbf, ...utf8]))!
+    expect(parseDelimited(withBom.text)).toEqual([['NAME'], ['张三'], ['日本']])
+    const utf16 = new Uint8Array([0xff, 0xfe, ...Buffer.from('NAME\t城市\n张三\t北京', 'utf16le')])
+    const read = decodeDataFile(utf16)!
+    expect([read.encoding, read.guessed]).toEqual(['UTF-16LE', false])
+    expect(parseDelimited(read.text)).toEqual([['NAME', '城市'], ['张三', '北京']])
+  })
+
+  it('never reads a file in a regional encoding as UTF-8 with its cells turned into replacement characters', () => {
+    // "NAME\n张三" as a Chinese spreadsheet saves plain CSV (GBK), "NAME\n日本" as a Japanese one does (Shift_JIS).
+    const gbk = bytes(...ascii('NAME\n'), 0xd5, 0xc5, 0xc8, 0xfd)
+    const sjis = bytes(...ascii('NAME\n'), 0x93, 0xfa, 0x96, 0x7b)
+    expect(decodeDataFile(gbk)).toBeNull()
+    expect(decodeDataFile(gbk, ['en-US'])).toBeNull()
+    expect(decodeDataFile(gbk, ['zh-CN', 'en'])).toEqual({ text: 'NAME\n张三', encoding: 'GBK (GB 18030)', guessed: true })
+    expect(decodeDataFile(sjis, ['ja', 'en-US'])).toEqual({ text: 'NAME\n日本', encoding: 'Shift_JIS', guessed: true })
+  })
+})
+
+describe('pasting a block into the table', () => {
+  const block = [
+    ['alice@example.com', 'secret'],
+    ['bob@example.com', 'hunter2'],
+  ]
+
+  it('names the columns from the first line when pasted into the header of a table that has none of its own', () => {
+    const pasted = pasteInto({ columns: [], rows: [] }, [['EMAIL', 'PASSWORD'], ...block], { r: -1, c: 0 })
+    expect(pasted.table).toEqual({ columns: ['EMAIL', 'PASSWORD'], rows: block })
+    expect([pasted.named, pasted.rows, pasted.clipped]).toEqual([true, 2, false])
+  })
+
+  it('keeps the column names of a table that is waiting for its first rows', () => {
+    const table = { columns: ['EMAIL', 'PASSWORD'], rows: [] }
+    const rowsOnly = pasteInto(table, block, { r: -1, c: 0 })
+    expect(rowsOnly.table).toEqual({ columns: ['EMAIL', 'PASSWORD'], rows: block })
+    expect([rowsOnly.named, rowsOnly.rows]).toEqual([false, 2])
+    // The same block copied with its header line: the line is recognised, not turned into a row.
+    const withHeader = pasteInto(table, [['EMAIL', 'PASSWORD'], ...block], { r: -1, c: 0 })
+    expect(withHeader.table).toEqual({ columns: ['EMAIL', 'PASSWORD'], rows: block })
+    // Once there are rows, pasting into the header renames columns, as before.
+    const renamed = pasteInto({ columns: ['A', 'B'], rows: [['1', '2']] }, [['X', 'Y'], ['3', '4']], { r: -1, c: 0 })
+    expect(renamed.table).toEqual({ columns: ['X', 'Y'], rows: [['3', '4']] })
   })
 })
