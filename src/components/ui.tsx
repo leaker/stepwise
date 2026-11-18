@@ -92,9 +92,10 @@ export function Spinner({ size = 16, className }: { size?: number; className?: s
 
 // ---------- Status ----------
 
-export function StatusIcon({ status, size = 18 }: { status: RunStatus | StepStatus; size?: number }) {
+/** `decorative` is for places where the status is also written out next to the icon. */
+export function StatusIcon({ status, size = 18, decorative = false }: { status: RunStatus | StepStatus; size?: number; decorative?: boolean }) {
   const label = STATUS_LABEL[status]
-  const common = { size, 'aria-label': label, role: 'img' as const }
+  const common = decorative ? { size, 'aria-hidden': true as const } : { size, 'aria-label': label, role: 'img' as const }
   switch (status) {
     case 'succeeded':
     case 'passed':

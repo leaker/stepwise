@@ -52,6 +52,8 @@ export function RunPage() {
   const failures = view.results.filter((x) => x.status === 'failed')
   const heals = view.results.filter((x) => x.heal)
   const shots = view.results.filter((x) => x.screenshotKey)
+  // The shared step a reported step came from, so a screenshot says which one it belongs to.
+  const sharedOf = new Map(r.steps.flatMap((s) => (s.origin ? [[s.id, s.origin.shared] as const] : [])))
   const healResult = healStep ? view.results.find((x) => x.stepId === healStep && x.heal) : undefined
   const what = r.kind === 'shared' ? 'shared step' : 'test case'
 
@@ -182,11 +184,17 @@ export function RunPage() {
                 key={s.stepId}
                 className={cx('shot', s.status === 'failed' && 'is-failed', s.heal && 'is-healed')}
                 onClick={() => (s.heal && s.heal.state === 'unresolved' ? setHealStep(s.stepId) : setLightbox(i))}
-                title={s.sentence}
+                title={sharedOf.has(s.stepId) ? `${s.sentence}\nShared step ${sharedLabel(sharedOf.get(s.stepId)!)}` : s.sentence}
               >
                 <img src={shotUrl(s.screenshotKey!)} alt="" loading="lazy" />
                 <span className="shot-foot">
                   <span className="shot-n num">{positionLabel(s)}</span>
+                  {sharedOf.has(s.stepId) && (
+                    <span className="shot-shared num">
+                      <span className="sr-only">Shared step </span>S{sharedOf.get(s.stepId)!.number}
+                      <span className="sr-only">: {sharedOf.get(s.stepId)!.name}</span>
+                    </span>
+                  )}
                   <span className="truncate">{s.sentence}</span>
                   {s.status !== 'passed' && <StatusIcon status={s.status} size={15} />}
                 </span>
@@ -240,7 +248,7 @@ function PatternBar({ run, current, onSelect }: { run: Run; current: number; onS
               title={values.map(([k, v]) => `${k} = ${v}`).join('\n')}
               onClick={() => onSelect(p.index)}
             >
-              <StatusIcon status={status} size={16} />
+              <StatusIcon status={status} size={16} decorative />
               <span className="pattern-n num">
                 Pattern {p.index}
                 <span className="sr-only">, {notRun ? 'not run' : STATUS_LABEL[status]}</span>

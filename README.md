@@ -175,7 +175,7 @@ variable for it, and its test case opens `${BASE_URL}/login.html${SITE_VERSION}`
    the steps are repaired as they go and the run ends *Needs review*.
 4. Open the run, review each repair (before / after, old and new locator, similarity) and approve or
    reject it. Approved locators are written back to the test case, or to the shared step when the
-   repaired step came from one (the example suite's last two cases sign in through the shared step
+   repaired step came from one (two cases of the example suite sign in through the shared step
    "Sign in": approve its repairs in one of them and the other passes on the next run).
 
 ## Example suite
