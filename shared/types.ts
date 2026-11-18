@@ -52,6 +52,8 @@ export interface UiElement {
   /** Candidates ordered from most to least stable. locators[0] is the recommended one. */
   locators: Locator[]
   fingerprint: Fingerprint
+  /** Pull-down menus only: the labels of the options, in page order, as they were when the screen was captured. */
+  options?: string[]
 }
 
 /** Where a test case runs: the desktop browser or an emulated phone. Profiles are in shared/devices.ts. */

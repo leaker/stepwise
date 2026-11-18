@@ -216,6 +216,7 @@ export function parseElements(value: unknown): UiElement[] {
       box: parseBox(el.box, `${at}: box`),
       locators,
       fingerprint: parseFingerprint(el.fingerprint, `${at}: fingerprint`),
+      ...(Array.isArray(el.options) ? { options: el.options.slice(0, 50).map((o) => String(o).slice(0, 80)) } : {}),
     }
   })
 }

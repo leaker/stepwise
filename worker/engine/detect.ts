@@ -451,6 +451,7 @@ export function scanPage(args: ScanArgs): ScanResult {
         path: path.join('>'),
         box,
       },
+      ...(tag === 'select' ? { options: Array.prototype.slice.call(el.options || [], 0, 50).map((o: any) => norm(String(o.label || o.textContent || '')).slice(0, 80)) } : {}),
     }
   }
 
