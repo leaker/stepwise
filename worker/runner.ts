@@ -1,11 +1,12 @@
 // Everything that drives a real browser: UI capture, trial runs, and the queue consumer that executes
 // runs and assistant sessions.
 import { launch, type Browser, type BrowserContext } from '@cloudflare/playwright'
+import { aggregateStatus, patternLogHeading, runVariables, SUMMARY_LOG_HEADING } from '../shared/data'
 import { deviceOf, type DeviceProfile } from '../shared/devices'
 import { flatRange, positionsOf } from '../shared/expand'
 import { makePreview, type Preview } from './assistant/preview'
 import { processAssistantSession } from './assistant/session'
-import type { CaptureResponse, RunStatus, Step, StepResult, Ui } from '../shared/types'
+import type { CaptureResponse, RunPattern, RunStatus, Step, StepResult, Ui } from '../shared/types'
 import { deleteShots, getProjectRow, newId, now, refreshBatchRun, toProject, toUi, type RunRow, type TestCaseRow, type UiRow } from './db'
 import { captureUi, runSteps, type RunOutcome } from './engine'
 import { errorMessage, HttpError, type Env, type QueueMessage } from './env'
@@ -227,8 +228,9 @@ async function failRun(env: Env, runId: string, message: string): Promise<void> 
 }
 
 /**
- * Execute one run in its own browser context. Every write is conditional on the run still being
- * `running`, so an abort (or the stale-run sweep) is never overwritten by late progress.
+ * Execute one run. A data-driven run executes its steps once per pattern (data row), one after the other,
+ * each in a browser context of its own, and goes on after a pattern that failed. Every write is conditional
+ * on the run still being `running`, so an abort (or the stale-run sweep) is never overwritten by late progress.
  */
 async function executeRun(env: Env, browser: Browser, runId: string, heal: boolean, appOrigin: string): Promise<void> {
   const startedAt = now()
@@ -238,86 +240,126 @@ async function executeRun(env: Env, browser: Browser, runId: string, heal: boole
     .bind(startedAt, runId)
     .run()
 
-  let header = ''
-  let results: StepResult[] = []
-  let context: BrowserContext | undefined
   try {
     const run = await env.DB.prepare('SELECT * FROM runs WHERE id = ?').bind(runId).first<RunRow>()
     if (!run) return
     const steps = JSON.parse(run.steps ?? '[]') as Step[]
     const range = run.range ? (JSON.parse(run.range) as { from: number; to: number }) : null
+    const patterns = run.patterns ? (JSON.parse(run.patterns) as RunPattern[]) : null
     const environment = JSON.parse(run.environment) as { baseUrl?: string; device?: string }
     const device = deviceOf(environment.device)
     const project = toProject(await getProjectRow(env.DB, run.project_id), appOrigin)
     const baseUrl = environment.baseUrl ?? project.baseUrl
 
-    header = [
+    const header = [
       `Run ${run.id} - ${run.test_case_number < 0 ? `shared step S${-run.test_case_number}` : `test case #${run.test_case_number}`} ${run.test_case_name}`,
       `Environment: Cloudflare Browser Run`,
       `Platform: Chrome (${device.viewport.width}x${device.viewport.height}${device.isMobile ? `, ${device.label} emulation` : ''})`,
       `Base URL: ${baseUrl || '(none)'}`,
       `Self-healing: ${heal ? 'on' : 'off'}${range ? `, steps ${range.from}-${range.to}${range.from > 1 ? ` (steps 1-${range.from - 1} are replayed first as set-up)` : ''}` : ''}`,
+      ...(patterns ? [`Data-driven: ${patterns.length === 1 ? `data row ${patterns[0].index} only` : `${patterns.length} patterns (data rows), one after the other, each in a fresh browser context`}`] : []),
       `Started: ${startedAt}`,
     ].join('\n')
     await env.DB.prepare("UPDATE runs SET log = ? WHERE id = ? AND status = 'running'").bind(header, runId).run()
 
-    const guarded = await newGuardedContext(browser, env, appOrigin, device)
-    context = guarded.context
-    const page = await context.newPage()
+    /** Results of the patterns that have finished, then the log sections of those patterns. */
+    const done: StepResult[] = []
+    const sections: string[] = []
+    const logWith = (current: string): string => [header, ...sections, current].filter((s) => s !== '').join('\n')
+    // Screenshot keys count through the whole run, so two patterns never write the same object.
     let shot = 0
-    let engineLog = ''
+    let last: RunOutcome['status'] = 'succeeded'
+    let stopped = false
 
-    let outcome: RunOutcome
-    try {
-      outcome = await runSteps(page, steps, {
-        baseUrl,
-        variables: project.variables,
-        device: device.id,
-        touch: device.hasTouch,
-        heal,
-        // The stored range counts a shared step call as one step; the snapshot has the call expanded.
-        range: range ? flatRange(steps, range) : null,
-        positions: positionsOf(steps),
-        replaySetup: true,
-        takeBlockedNavigation: guarded.guard.takeBlockedNavigation,
-        waitSeconds: 10,
-        saveShot: async (bytes) => {
-          const key = `run/${runId}/${++shot}.jpg`
-          await env.SHOTS.put(key, bytes, { httpMetadata: { contentType: 'image/jpeg' } })
-          return key
-        },
-        onStep: async (result, log) => {
-          const at = results.findIndex((r) => r.stepId === result.stepId)
-          if (at >= 0) results[at] = result
-          else results.push(result)
-          engineLog = log
-          await env.DB.prepare("UPDATE runs SET results = ?, log = ? WHERE id = ? AND status = 'running'")
-            .bind(JSON.stringify(results), appendLog(header, log), runId)
-            .run()
-        },
-        shouldAbort: async () => {
-          const row = await env.DB.prepare('SELECT status FROM runs WHERE id = ?').bind(runId).first<{ status: string }>()
-          if (row?.status === 'running') return false
-          // Aborted by the user, or failed from outside (the time limit); the log should say which.
-          return row?.status === 'aborted' ? true : 'Stopped: the run is no longer active (it ran into the time limit or was removed)'
-        },
-      })
-    } catch (e) {
-      outcome = { status: 'failed', results, log: appendLog(engineLog, `Unexpected error: ${errorMessage(e)}`) }
+    for (const pattern of patterns ?? [null]) {
+      if (pattern && stopped) {
+        // The run was aborted (or stopped from outside) during an earlier pattern.
+        pattern.status = 'aborted'
+        continue
+      }
+      const shown = (v: string) => JSON.stringify(v.length > 80 ? `${v.slice(0, 79)}…` : v)
+      const heading = pattern
+        ? `${patternLogHeading(pattern.index)}\nData row ${pattern.index}: ${Object.entries(pattern.values)
+            .map(([k, v]) => `${k}=${shown(v)}`)
+            .join(', ')}`
+        : ''
+      if (pattern && patterns) {
+        pattern.status = 'running'
+        pattern.startedAt = now()
+        await env.DB.prepare("UPDATE runs SET patterns = ?, log = ? WHERE id = ? AND status = 'running'").bind(JSON.stringify(patterns), logWith(heading), runId).run()
+      }
+
+      let own: StepResult[] = []
+      let engineLog = ''
+      let context: BrowserContext | undefined
+      let outcome: RunOutcome
+      try {
+        const guarded = await newGuardedContext(browser, env, appOrigin, device)
+        context = guarded.context
+        const page = await context.newPage()
+        outcome = await runSteps(page, steps, {
+          baseUrl,
+          // The values of this data row are variables of the run; a column wins over a project variable of the same name.
+          variables: runVariables(project.variables, pattern?.values),
+          device: device.id,
+          touch: device.hasTouch,
+          heal,
+          // The stored range counts a shared step call as one step; the snapshot has the call expanded.
+          range: range ? flatRange(steps, range) : null,
+          positions: positionsOf(steps),
+          replaySetup: true,
+          takeBlockedNavigation: guarded.guard.takeBlockedNavigation,
+          waitSeconds: 10,
+          saveShot: async (bytes) => {
+            const key = `run/${runId}/${++shot}.jpg`
+            await env.SHOTS.put(key, bytes, { httpMetadata: { contentType: 'image/jpeg' } })
+            return key
+          },
+          onStep: async (result, log) => {
+            if (pattern) result.pattern = pattern.index
+            const at = own.findIndex((r) => r.stepId === result.stepId)
+            if (at >= 0) own[at] = result
+            else own.push(result)
+            engineLog = log
+            await env.DB.prepare("UPDATE runs SET results = ?, log = ? WHERE id = ? AND status = 'running'")
+              .bind(JSON.stringify([...done, ...own]), logWith(appendLog(heading, log)), runId)
+              .run()
+          },
+          shouldAbort: async () => {
+            const row = await env.DB.prepare('SELECT status FROM runs WHERE id = ?').bind(runId).first<{ status: string }>()
+            if (row?.status === 'running') return false
+            // Aborted by the user, or failed from outside (the time limit); the log should say which.
+            return row?.status === 'aborted' ? true : 'Stopped: the run is no longer active (it ran into the time limit or was removed)'
+          },
+        })
+      } catch (e) {
+        outcome = { status: 'failed', results: own, log: appendLog(engineLog, `Unexpected error: ${errorMessage(e)}`) }
+      } finally {
+        await context?.close().catch(() => {})
+      }
+      own = outcome.results
+      if (pattern) for (const r of own) r.pattern = pattern.index
+      done.push(...own)
+      sections.push(appendLog(heading, outcome.log))
+      last = outcome.status
+      if (outcome.status === 'aborted') stopped = true
+      if (pattern) {
+        pattern.status = outcome.status
+        pattern.finishedAt = now()
+      }
     }
-    results = outcome.results
 
+    const status: RunStatus = patterns ? aggregateStatus(patterns.map((p) => p.status)) : last
     const finishedAt = now()
-    const log = appendLog(appendLog(header, outcome.log), `Finished: ${finishedAt} - ${outcome.status}`)
+    const summary = patterns ? [SUMMARY_LOG_HEADING, ...patterns.map((p) => `Pattern ${p.index}: ${p.startedAt ? p.status : 'not run'}`)].join('\n') : ''
+    const log = appendLog(logWith(summary), `Finished: ${finishedAt} - ${status}`)
     // Keep a status that was set from outside (aborted / timed out); otherwise record the engine's verdict.
-    await env.DB.prepare("UPDATE runs SET results = ?1, log = ?2, status = CASE WHEN status = 'running' THEN ?3 ELSE status END, finished_at = COALESCE(finished_at, ?4) WHERE id = ?5")
-      .bind(JSON.stringify(outcome.results), log, outcome.status satisfies RunStatus, finishedAt, runId)
+    await env.DB.prepare("UPDATE runs SET results = ?1, log = ?2, status = CASE WHEN status = 'running' THEN ?3 ELSE status END, finished_at = COALESCE(finished_at, ?4), patterns = ?6 WHERE id = ?5")
+      .bind(JSON.stringify(done), log, status, finishedAt, runId, patterns ? JSON.stringify(patterns) : null)
       .run()
   } catch (e) {
     console.error(`run ${runId} crashed`, e)
     await failRun(env, runId, `Unexpected error: ${errorMessage(e)}`)
-  } finally {
-    await context?.close().catch(() => {})
   }
 }
 

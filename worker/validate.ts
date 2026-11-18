@@ -1,7 +1,8 @@
 // Request body validation shared by the API routes.
 import { COMMAND_BY_ID, isBuiltInVariable } from '../shared/commands'
+import { describeDataProblem, validateDataTable } from '../shared/data'
 import { positionLabel, type StepPosition } from '../shared/expand'
-import type { Box, ElementRef, ElementType, Fingerprint, Locator, Step, UiElement } from '../shared/types'
+import type { Box, DataTable, ElementRef, ElementType, Fingerprint, Locator, Step, UiElement } from '../shared/types'
 import { HttpError, type Env } from './env'
 import { newId } from './db'
 
@@ -69,6 +70,23 @@ export function optionalVariables(value: unknown): Record<string, string> | unde
     out[k] = v
   }
   return out
+}
+
+/**
+ * The data table of a data-driven test case. `undefined`: not sent; `null`, or a table without columns:
+ * remove it. Otherwise the table, or a 400 that names the first cell that is wrong.
+ */
+export function optionalData(value: unknown): DataTable | null | undefined {
+  if (value === undefined) return undefined
+  if (value === null) return null
+  const shape = 'data must be { columns: string[], rows: string[][] }'
+  if (!isObject(value) || !Array.isArray(value.columns) || !Array.isArray(value.rows)) throw new HttpError(400, shape)
+  if (!value.columns.every((c) => typeof c === 'string')) throw new HttpError(400, shape)
+  if (!value.rows.every((r) => Array.isArray(r) && r.every((c) => typeof c === 'string'))) throw new HttpError(400, shape)
+  const table: DataTable = { columns: value.columns as string[], rows: value.rows as string[][] }
+  const first = validateDataTable(table)[0]
+  if (first) throw new HttpError(400, `Data: ${describeDataProblem(table, first)}`)
+  return table.columns.length === 0 ? null : table
 }
 
 // Captured elements come back from the editor inside steps and UI element lists. They are rebuilt field by

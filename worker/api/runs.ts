@@ -1,7 +1,8 @@
 import { Hono } from 'hono'
 import { validateSteps } from '../../shared/commands'
+import { aggregateStatus, hasPatterns, rowValues, runVariables } from '../../shared/data'
 import { flatRange, positionLabel, positionsOf } from '../../shared/expand'
-import type { BatchRun, RunStatus, Step, StepResult, UiElement } from '../../shared/types'
+import type { BatchRun, DataTable, RunPattern, RunStatus, Step, StepResult, UiElement } from '../../shared/types'
 import {
   environmentOf,
   getBatchRunRow,
@@ -30,7 +31,7 @@ import { assertNavigateTargetsAllowed, readBody } from '../validate'
 export const runs = new Hono<{ Bindings: Env }>()
 
 const INSERT_RUN =
-  'INSERT INTO runs (id, project_id, test_case_id, test_case_number, test_case_name, batch_run_id, run_order, status, steps, environment, range, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  'INSERT INTO runs (id, project_id, test_case_id, test_case_number, test_case_name, batch_run_id, run_order, status, steps, environment, range, created_at, patterns) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
 
 function parseRange(value: unknown, stepCount: number): { from: number; to: number } | null {
   if (value === undefined || value === null) return null
@@ -44,6 +45,43 @@ function parseRange(value: unknown, stepCount: number): { from: number; to: numb
 
 /** Is there anything to execute? The marker row of an expanded shared step call is not a step that runs. */
 const hasEnabledSteps = (steps: Step[]): boolean => steps.some((s) => !s.disabled && !s.call)
+
+/** Largest number of step results one run may produce (data rows x steps): they are stored in one D1 value. */
+const MAX_RUN_RESULTS = 2000
+const TOO_MANY_RESULTS = `The data rows times the steps come to more than ${MAX_RUN_RESULTS} step results, which is more than one run can hold. Remove rows, or split the test case.`
+
+/** The data table of a test case, if it makes its runs data-driven. A shared step run by itself has none. */
+function tableOf(testCase: TestCaseRow): DataTable | null {
+  if (isSharedRow(testCase) || !testCase.data) return null
+  try {
+    const table = JSON.parse(testCase.data) as DataTable
+    return hasPatterns(table) ? table : null
+  } catch {
+    return null
+  }
+}
+
+/** The patterns a new run executes: every row, or the given rows (1-based). */
+function patternsOf(table: DataTable, rows?: number[]): RunPattern[] {
+  return (rows ?? table.rows.map((_, i) => i + 1)).map((index) => ({ index, values: rowValues(table, index), status: 'queued', startedAt: null, finishedAt: null }))
+}
+
+function parseRow(value: unknown, table: DataTable | null): number {
+  if (value === undefined || value === null) return 1
+  if (!Number.isInteger(value) || (value as number) < 1) throw new HttpError(400, 'row must be a whole number from 1')
+  if (table && (value as number) > table.rows.length) throw new HttpError(400, `row must be within the ${table.rows.length} data rows of this test case`)
+  return value as number
+}
+
+/**
+ * How a run that was waiting for a repair review stands after a decision. Only `unresolved` changes: a run
+ * (or pattern) that failed or was aborted keeps that, since approving a repair does not make an unfinished test pass.
+ */
+function reviewedStatus(status: RunStatus, results: StepResult[]): RunStatus {
+  if (status !== 'unresolved') return status
+  if (results.some((r) => r.status === 'failed' || r.heal?.state === 'rejected')) return 'failed'
+  return results.some((r) => r.heal?.state === 'unresolved') ? 'unresolved' : 'succeeded'
+}
 
 const TOO_MANY_STEPS = `With its shared steps this has more than ${MAX_RUN_STEPS} steps, which is more than one run can hold`
 
@@ -75,11 +113,39 @@ runs.post('/test-cases/:tid/runs', async (c) => {
   const baseUrl = resolveBaseUrl(project.base_url, origin)
   // The steps before a partial run's range are replayed as set-up, so they are checked too.
   const executed = range ? steps.slice(0, flatRange(steps, range).to) : steps
-  assertNavigateTargetsAllowed(executed, baseUrl, JSON.parse(project.variables) as Record<string, string>, c.env, origin, positions)
+  // A data-driven test case runs once per data row. A partial run is for trying steps out, so it uses one
+  // row: the first, or the one asked for.
+  const table = tableOf(testCase)
+  const row = parseRow(body.row, table)
+  const patterns = table ? patternsOf(table, range ? [row] : undefined) : null
+  if (patterns && patterns.length * executed.filter((s) => !s.disabled && !s.call).length > MAX_RUN_RESULTS) throw new HttpError(400, TOO_MANY_RESULTS)
+  const variables = JSON.parse(project.variables) as Record<string, string>
+  for (const pattern of patterns ?? [null]) {
+    try {
+      assertNavigateTargetsAllowed(executed, baseUrl, runVariables(variables, pattern?.values), c.env, origin, positions)
+    } catch (e) {
+      if (pattern && e instanceof HttpError) throw new HttpError(e.status, `Data row ${pattern.index}: ${e.message}`)
+      throw e
+    }
+  }
 
   const id = newId()
   await c.env.DB.prepare(INSERT_RUN)
-    .bind(id, project.id, testCase.id, testCase.number, testCase.name, null, 0, 'queued', JSON.stringify(steps), JSON.stringify(environmentOf(baseUrl, testCase.device)), range ? JSON.stringify(range) : null, now())
+    .bind(
+      id,
+      project.id,
+      testCase.id,
+      testCase.number,
+      testCase.name,
+      null,
+      0,
+      'queued',
+      JSON.stringify(steps),
+      JSON.stringify(environmentOf(baseUrl, testCase.device)),
+      range ? JSON.stringify(range) : null,
+      now(),
+      patterns ? JSON.stringify(patterns) : null,
+    )
     .run()
   try {
     await c.env.RUN_QUEUE.send({ runId: id, origin })
@@ -129,7 +195,14 @@ runs.post('/runs/:rid/heals/:stepId', async (c) => {
   const run = await getRunRow(c.env.DB, id)
   if (isUnfinished(run.status)) throw new HttpError(409, 'Wait for the run to finish before reviewing its repairs')
   const results = JSON.parse(run.results) as StepResult[]
-  const result = results.find((r) => r.stepId === stepId && r.heal)
+  const patterns = run.patterns ? (JSON.parse(run.patterns) as RunPattern[]) : null
+  // In a data-driven run the same step has a result, and possibly a proposal, in every pattern.
+  let pattern: number | undefined
+  if (patterns) {
+    if (!Number.isInteger(body.pattern) || !patterns.some((p) => p.index === body.pattern)) throw new HttpError(400, 'pattern must be the number of one of the data rows of this run')
+    pattern = body.pattern as number
+  }
+  const result = results.find((r) => r.stepId === stepId && r.heal && r.pattern === pattern)
   const heal = result?.heal
   if (!heal) throw new HttpError(404, 'This step has no repair proposal')
   // A decision is final: deciding twice would leave the test case and the report telling different stories.
@@ -140,14 +213,28 @@ runs.post('/runs/:rid/heals/:stepId', async (c) => {
   const ownerId = step?.origin?.shared.id ?? run.test_case_id
 
   heal.state = action === 'approve' ? 'approved' : 'rejected'
+  // An approved repair is saved once, for the test case (or shared step). The other patterns that found the
+  // same replacement for the same element are therefore approved with it; a rejection is about this pattern only.
+  let alsoApproved = 0
+  if (action === 'approve' && patterns && target) {
+    const sameElement = new Set((JSON.parse(run.steps ?? '[]') as Step[]).filter((s) => s.target?.uiId === target.uiId && s.target.elementId === target.elementId).map((s) => s.id))
+    for (const other of results) {
+      const h = other.heal
+      if (other === result || !h || h.state !== 'unresolved' || !sameElement.has(other.stepId)) continue
+      if (h.newLocator.key !== heal.newLocator.key || h.newLocator.value !== heal.newLocator.value) continue
+      h.state = 'approved'
+      alsoApproved++
+    }
+  }
 
   // Only a run that was waiting for review changes its verdict. One that failed (a failed step, a crash,
   // the time limit) or was aborted keeps it: approving a repair does not make an unfinished test pass.
+  // A data-driven run is judged pattern by pattern first, then as a whole.
   let status = run.status as RunStatus
-  if (status === 'unresolved') {
-    if (results.some((r) => r.status === 'failed' || r.heal?.state === 'rejected')) status = 'failed'
-    else if (!results.some((r) => r.heal?.state === 'unresolved')) status = 'succeeded'
-  }
+  if (patterns) {
+    for (const p of patterns) p.status = reviewedStatus(p.status, results.filter((r) => r.pattern === p.index))
+    if (status === 'unresolved') status = aggregateStatus(patterns.map((p) => p.status))
+  } else status = reviewedStatus(status, results)
 
   // Everything below is one transaction, and every statement only applies while the run's results are
   // still the ones this decision was based on, so two reviewers cannot overwrite each other's decision.
@@ -178,11 +265,12 @@ runs.post('/runs/:rid/heals/:stepId', async (c) => {
       statements.push(c.env.DB.prepare(`UPDATE uis SET elements = ? WHERE id = ? AND ${unchanged}`).bind(JSON.stringify(elements), target.uiId, id, run.results))
     }
   }
-  const line = `Repair of step ${positionLabel(result)} (${heal.elementName}) ${heal.state} by reviewer.`
+  const line = `Repair of step ${positionLabel(result!)}${pattern ? ` in pattern ${pattern}` : ''} (${heal.elementName}) ${heal.state} by reviewer${alsoApproved ? `, and with it the same repair in ${alsoApproved} other ${alsoApproved === 1 ? 'pattern' : 'patterns'}` : ''}.`
   statements.push(
-    c.env.DB.prepare("UPDATE runs SET results = ?, status = ?, log = log || CASE WHEN log = '' THEN '' ELSE char(10) END || ? WHERE id = ? AND results = ? AND status = ?").bind(
+    c.env.DB.prepare("UPDATE runs SET results = ?, status = ?, patterns = ?, log = log || CASE WHEN log = '' THEN '' ELSE char(10) END || ? WHERE id = ? AND results = ? AND status = ?").bind(
       JSON.stringify(results),
       status,
+      patterns ? JSON.stringify(patterns) : null,
       line,
       id,
       run.results,
@@ -265,13 +353,20 @@ runs.post('/projects/:pid/batch-runs', async (c) => {
   const origin = new URL(c.req.url).origin
   const baseUrl = resolveBaseUrl(project.base_url, origin)
   const variables = JSON.parse(project.variables) as Record<string, string>
+  // A data-driven test case is one run of the batch that executes every data row.
+  const patterns = new Map<string, RunPattern[]>()
   for (const t of selected) {
-    try {
-      const steps = expanded.get(t.id)!
-      assertNavigateTargetsAllowed(steps, baseUrl, variables, c.env, origin, positionsOf(steps))
-    } catch (e) {
-      if (e instanceof HttpError) throw new HttpError(400, `#${t.number} ${t.name} - ${e.message}`)
-      throw e
+    const steps = expanded.get(t.id)!
+    const table = tableOf(t)
+    if (table) patterns.set(t.id, patternsOf(table))
+    if (table && table.rows.length * steps.filter((s) => !s.disabled && !s.call).length > MAX_RUN_RESULTS) throw new HttpError(400, `#${t.number} ${t.name} - ${TOO_MANY_RESULTS}`)
+    for (const pattern of patterns.get(t.id) ?? [null]) {
+      try {
+        assertNavigateTargetsAllowed(steps, baseUrl, runVariables(variables, pattern?.values), c.env, origin, positionsOf(steps))
+      } catch (e) {
+        if (e instanceof HttpError) throw new HttpError(400, `#${t.number} ${t.name} - ${pattern ? `Data row ${pattern.index}: ` : ''}${e.message}`)
+        throw e
+      }
     }
   }
 
@@ -280,7 +375,7 @@ runs.post('/projects/:pid/batch-runs', async (c) => {
   await c.env.DB.batch([
     c.env.DB.prepare('INSERT INTO batch_runs (id, project_id, number, status, trigger, created_at) SELECT ?, id, next_batch_number, ?, ?, ? FROM projects WHERE id = ?').bind(id, 'queued', trigger, ts, project.id),
     c.env.DB.prepare('UPDATE projects SET next_batch_number = next_batch_number + 1 WHERE id = ?').bind(project.id),
-    ...selected.map((t, i) => c.env.DB.prepare(INSERT_RUN).bind(newId(), project.id, t.id, t.number, t.name, id, i + 1, 'queued', JSON.stringify(expanded.get(t.id)!), JSON.stringify(environmentOf(baseUrl, t.device)), null, ts)),
+    ...selected.map((t, i) => c.env.DB.prepare(INSERT_RUN).bind(newId(), project.id, t.id, t.number, t.name, id, i + 1, 'queued', JSON.stringify(expanded.get(t.id)!), JSON.stringify(environmentOf(baseUrl, t.device)), null, ts, patterns.has(t.id) ? JSON.stringify(patterns.get(t.id)) : null)),
   ])
   try {
     await c.env.RUN_QUEUE.send({ batchRunId: id, origin })

@@ -234,6 +234,7 @@ export interface RunPattern {
   /** 1-based row of the data table. */
   index: number
   values: Record<string, string>
+  /** `queued` or `running` on a run that has finished: the pattern was not run (the run timed out or crashed). */
   status: RunStatus
   startedAt: string | null
   finishedAt: string | null
@@ -285,7 +286,12 @@ export interface Run {
    * one step). The steps before it are replayed as set-up and not reported unless one fails.
    */
   range: { from: number; to: number } | null
-  /** Data-driven runs only: one entry per data row that the run executes. */
+  /**
+   * Data-driven runs only: one entry per data row that the run executes, in order, each in a fresh browser
+   * context. `results` then holds the results of every pattern (StepResult.pattern), and `log` one section
+   * per pattern (shared/data.ts). `status` is the patterns' statuses combined: failed if any failed, else
+   * unresolved if any waits for a repair review, else succeeded.
+   */
   patterns: RunPattern[] | null
   createdAt: string
   startedAt: string | null
@@ -323,7 +329,8 @@ export interface BatchRun {
 // GET    /api/projects/:pid/test-cases         -> TestCase[] (ordered by number)
 // POST   /api/projects/:pid/test-cases { name?, description?, device? } -> TestCase
 // GET    /api/test-cases/:tid                  -> TestCase
-// PATCH  /api/test-cases/:tid { name?, description?, device?, steps? } -> TestCase
+// PATCH  /api/test-cases/:tid { name?, description?, device?, steps?, data? } -> TestCase
+//          `data`: a DataTable, or null to remove it; 400 with the first invalid cell, or for a shared step
 //          409 when `steps` is sent while an assistant session of the test case is queued or running
 //          400 when a shared step is given a `shared_step` step (shared steps do not nest)
 // DELETE /api/test-cases/:tid                  -> { ok: true }
@@ -342,11 +349,13 @@ export interface BatchRun {
 // PATCH  /api/uis/:uid { name?, elements? }    -> Ui
 // DELETE /api/uis/:uid                         -> { ok: true }
 //
-// POST   /api/test-cases/:tid/runs { range? }  -> Run (status queued)
+// POST   /api/test-cases/:tid/runs { range?, row? } -> Run (status queued)
+//          a data-driven test case runs every data row; with `range` only one row: `row` (1-based, default 1)
 // GET    /api/test-cases/:tid/runs             -> Omit<Run,'steps'|'log'>[] (newest first, single runs only)
 // GET    /api/runs/:rid                        -> Run
 // POST   /api/runs/:rid/abort                  -> Run
-// POST   /api/runs/:rid/heals/:stepId { action: 'approve' | 'reject' } -> Run | 409 (run unfinished, or already decided)
+// POST   /api/runs/:rid/heals/:stepId { action: 'approve' | 'reject', pattern? } -> Run | 409 (run unfinished, or already decided)
+//          `pattern` (the data row) is required for a data-driven run; approving also approves the same repair in its other patterns
 //
 // GET    /api/projects/:pid/batch-runs         -> BatchRun[] (newest first)
 // POST   /api/projects/:pid/batch-runs { testCaseIds?: string[], trigger?: 'manual' | 'api' } -> BatchRun

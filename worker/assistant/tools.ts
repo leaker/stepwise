@@ -1,9 +1,10 @@
 // The assistant's tools, run against the same database rows and engine code paths the HTTP API uses.
 // A tool never throws for something the model can fix: it returns an error result with what to do instead.
 import { COMMAND_BY_ID, stepSentence, validateSteps } from '../../shared/commands'
+import { hasPatterns, rowValues, runVariables } from '../../shared/data'
 import { deviceOf } from '../../shared/devices'
 import { expandSteps, flatRange, positionLabel, positionsOf, type SharedLookup } from '../../shared/expand'
-import type { Step, Ui } from '../../shared/types'
+import type { DataTable, Step, Ui } from '../../shared/types'
 import { getProjectRow, getTestCaseRow, isSharedRow, newId, resolveBaseUrl, rowLabel, toUi, type TestCaseRow, type UiRow } from '../db'
 import { errorMessage, HttpError, type Env } from '../env'
 import { captureScreen, trialRun, type BrowserLease } from '../runner'
@@ -41,11 +42,13 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
     const row = await getTestCaseRow(env.DB, testCaseId)
     const project = await getProjectRow(env.DB, row.project_id)
     const steps = JSON.parse(row.steps) as Step[]
+    // A data-driven test case is captured and tried with its first data row; the columns are variables like any other.
+    const table = isSharedRow(row) ? null : (JSON.parse(row.data || 'null') as DataTable | null)
     return {
       row,
       steps,
       baseUrl: resolveBaseUrl(project.base_url, appOrigin),
-      variables: JSON.parse(project.variables) as Record<string, string>,
+      variables: runVariables(JSON.parse(project.variables) as Record<string, string>, hasPatterns(table) ? rowValues(table, 1) : null),
       shared: await sharedLookupFor(env.DB, [steps]),
     }
   }

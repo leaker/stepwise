@@ -1,14 +1,15 @@
 import { Hono } from 'hono'
 import { sharedLabel, validateSteps } from '../../shared/commands'
+import { hasPatterns, rowValues, runVariables } from '../../shared/data'
 import { DEFAULT_DEVICE, isDeviceId } from '../../shared/devices'
 import { flatRange, NESTED_SHARED_MESSAGE, positionsOf } from '../../shared/expand'
-import type { DeviceId, Step, TestCase } from '../../shared/types'
+import type { DataTable, DeviceId, Step, TestCase } from '../../shared/types'
 import { deleteShots, getProjectRow, getTestCaseRow, isSharedRow, lastRunsFor, newId, now, resolveBaseUrl, sweepStaleRuns, toTestCase, toUi, type TestCaseRow, type UiRow } from '../db'
 import { sweepStaleSessions } from '../assistant/store'
 import { HttpError, type Env } from '../env'
 import { captureScreen } from '../runner'
 import { assertExpanded, callersByShared, expandRow } from '../shared'
-import { assertNavigateTargetsAllowed, isHostAllowed, optionalText, parseElements, parseSteps, readBody, requireName, resolveUrl } from '../validate'
+import { assertNavigateTargetsAllowed, isHostAllowed, optionalData, optionalText, parseElements, parseSteps, readBody, requireName, resolveUrl } from '../validate'
 
 export const testCases = new Hono<{ Bindings: Env }>()
 
@@ -189,8 +190,12 @@ testCases.patch('/test-cases/:tid', async (c) => {
   const name = body.name === undefined ? current.name : requireName(body.name, isSharedRow(current) ? 'Shared step' : 'Test case')
   const description = optionalText(body.description, 'description', 2000) ?? current.description
   const device = optionalDevice(body.device) ?? current.device
+  // The data table is not part of what the assistant edits, so it can be saved while a session is running.
+  const table = optionalData(body.data)
+  if (table && isSharedRow(current)) throw new HttpError(400, 'A shared step cannot have a data table: it uses the data of the test case that calls it')
+  const data = table === undefined ? current.data : table ? JSON.stringify(table) : ''
   if (body.steps === undefined) {
-    await c.env.DB.prepare('UPDATE test_cases SET name = ?, description = ?, device = ?, updated_at = ? WHERE id = ?').bind(name, description, device, now(), id).run()
+    await c.env.DB.prepare('UPDATE test_cases SET name = ?, description = ?, device = ?, data = ?, updated_at = ? WHERE id = ?').bind(name, description, device, data, now(), id).run()
   } else {
     // While the assistant works on a test case it owns the step list: it reads, changes and writes it back
     // call by call, and a save from the editor (another tab, a script) in between would be lost or would
@@ -203,9 +208,9 @@ testCases.patch('/test-cases/:tid', async (c) => {
     if (nested >= 0) throw new HttpError(400, `Step ${nested + 1}: ${NESTED_SHARED_MESSAGE}`)
     const steps = JSON.stringify(parsed)
     const saved = await c.env.DB.prepare(
-      "UPDATE test_cases SET name = ?1, description = ?2, device = ?3, steps = ?4, updated_at = ?5 WHERE id = ?6 AND NOT EXISTS (SELECT 1 FROM assistant_sessions WHERE test_case_id = ?6 AND status IN ('queued', 'running'))",
+      "UPDATE test_cases SET name = ?1, description = ?2, device = ?3, steps = ?4, updated_at = ?5, data = ?7 WHERE id = ?6 AND NOT EXISTS (SELECT 1 FROM assistant_sessions WHERE test_case_id = ?6 AND status IN ('queued', 'running'))",
     )
-      .bind(name, description, device, steps, now(), id)
+      .bind(name, description, device, steps, now(), id, data)
       .run()
     if (saved.meta.changes === 0) throw new HttpError(409, 'The assistant is editing the steps of this test case. Wait for it to finish, or abort it, then try again.')
   }
@@ -273,7 +278,15 @@ testCases.post('/test-cases/:tid/uis', async (c) => {
   const body = await readBody(c.req)
   const appOrigin = new URL(c.req.url).origin
   const baseUrl = resolveBaseUrl(project.base_url, appOrigin)
-  const variables = JSON.parse(project.variables) as Record<string, string>
+  // A data-driven test case is replayed with the values of one data row: the first unless `row` says otherwise.
+  const table = isSharedRow(testCase) ? null : (JSON.parse(testCase.data || 'null') as DataTable | null)
+  let row = 1
+  if (body.row !== undefined && body.row !== null) {
+    if (!Number.isInteger(body.row) || (body.row as number) < 1) throw new HttpError(400, 'row must be a whole number from 1')
+    row = body.row as number
+    if (hasPatterns(table) && row > table.rows.length) throw new HttpError(400, `row must be within the ${table.rows.length} data rows of this test case`)
+  }
+  const variables = runVariables(JSON.parse(project.variables) as Record<string, string>, hasPatterns(table) ? rowValues(table, row) : null)
 
   let steps: Step[] = []
   let replayTo: number | null = null
