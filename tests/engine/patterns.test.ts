@@ -15,7 +15,15 @@ import { capture, ref, startDemoServer, type CapturedUi } from './helpers'
 
 let browser: Browser
 let contextsOpened = 0
-vi.mock('@cloudflare/playwright', () => ({ launch: async () => browser }))
+let launches = 0
+/** Set by a test to make Browser Run answer differently; by default it hands out the one browser. */
+let onLaunch: (() => Promise<Browser>) | null = null
+vi.mock('@cloudflare/playwright', () => ({
+  launch: async () => {
+    launches++
+    return onLaunch ? onLaunch() : browser
+  },
+}))
 
 let server: Server
 let origin: string
@@ -187,5 +195,72 @@ describe('a data-driven run', () => {
     expect(run.patterns?.map((p) => p.status)).toEqual(['succeeded', 'aborted', 'aborted'])
     expect(run.patterns?.[2].startedAt).toBeNull()
     expect(run.log).toContain('Pattern 3: not run')
+  }, 120_000)
+
+  /** A second browser that goes away when its second context is asked for, i.e. between pattern 1 and 2. */
+  async function dyingBrowser(): Promise<Browser> {
+    const dying = await chromium.launch()
+    const newContext = dying.newContext.bind(dying)
+    let asked = 0
+    dying.newContext = (async (...args: Parameters<Browser['newContext']>) => {
+      if (++asked === 2) await Object.getPrototypeOf(dying).close.call(dying)
+      return newContext(...args)
+    }) as Browser['newContext']
+    return dying
+  }
+
+  it('starts another browser for the next pattern when the browser went away, so only the row that was hit fails', async () => {
+    const [testCase] = (await call<TestCase[]>('GET', `/projects/${PID}/test-cases`)).filter((t) => t.data)
+    const queued = await call<Run>('POST', `/test-cases/${testCase.id}/runs`)
+    const dying = await dyingBrowser()
+    // The first launch gets the browser that dies; the one after it the healthy one.
+    const answers = [dying, browser]
+    onLaunch = async () => answers.shift() ?? browser
+    launches = 0
+    try {
+      await drain()
+    } finally {
+      onLaunch = null
+    }
+    const run = await call<Run>('GET', `/runs/${queued.id}`)
+    expect(launches).toBe(2)
+    expect(splitLog(run.log).patterns.get(2)).toContain('Unexpected error')
+    // Row 2 is the wrong password, which fails anyway; row 3 passes only because it got a live browser.
+    expect(run.patterns?.map((p) => p.status)).toEqual(['succeeded', 'failed', 'succeeded'])
+    expect(run.results.filter((r) => r.pattern === 3)).toHaveLength(9)
+  }, 120_000)
+
+  it('fails the patterns that are left, with the reason, when no other browser can be started', async () => {
+    const created = await call<TestCase>('POST', `/projects/${PID}/test-cases`, { name: 'Four rows' })
+    const testCase = await call<TestCase>('PATCH', `/test-cases/${created.id}`, {
+      steps: [{ id: 's', command: 'store_fixed', variable: 'SEEN', value: '${N}' }],
+      data: { columns: ['N'], rows: [['1'], ['2'], ['3'], ['4']] },
+    })
+    const queued = await call<Run>('POST', `/test-cases/${testCase.id}/runs`)
+    const retried: unknown[] = []
+    const dying = await dyingBrowser()
+    let first = true
+    onLaunch = async () => {
+      if (!first) throw new Error('rate limit')
+      first = false
+      return dying
+    }
+    launches = 0
+    try {
+      const messages = sent.splice(0).map((body) => ({ body, attempts: 1, ack: () => {}, retry: () => void retried.push(body) }))
+      await handleQueue({ messages } as unknown as MessageBatch<QueueMessage>, env)
+    } finally {
+      onLaunch = null
+    }
+    const run = await call<Run>('GET', `/runs/${queued.id}`)
+    // The run had started: it is not put back on the queue, and one failed launch is not repeated per row.
+    expect(retried).toEqual([])
+    expect(launches).toBe(2)
+    expect(run.status).toBe('failed')
+    expect(run.patterns?.map((p) => p.status)).toEqual(['succeeded', 'failed', 'failed', 'failed'])
+    const log = splitLog(run.log)
+    expect(log.patterns.get(2)).toContain('Unexpected error')
+    expect(log.patterns.get(3)).toContain('\nCould not start a browser: rate limit')
+    expect(log.patterns.get(4)).toContain('Not run: Could not start a browser: rate limit')
   }, 120_000)
 })

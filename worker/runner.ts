@@ -19,6 +19,9 @@ class BrowserLaunchError extends HttpError {
   }
 }
 
+/** A pattern that was skipped because an earlier one already found that no browser can be started. */
+class NotRun extends Error {}
+
 async function openBrowser(env: Env): Promise<Browser> {
   try {
     return await launch(env.BROWSER)
@@ -229,10 +232,11 @@ async function failRun(env: Env, runId: string, message: string): Promise<void> 
 
 /**
  * Execute one run. A data-driven run executes its steps once per pattern (data row), one after the other,
- * each in a browser context of its own, and goes on after a pattern that failed. Every write is conditional
+ * each in a browser context of its own, and goes on after a pattern that failed. The browser comes from a
+ * lease, so one that went away during a pattern is replaced for the next. Every write is conditional
  * on the run still being `running`, so an abort (or the stale-run sweep) is never overwritten by late progress.
  */
-async function executeRun(env: Env, browser: Browser, runId: string, heal: boolean, appOrigin: string): Promise<void> {
+async function executeRun(env: Env, lease: BrowserLease, runId: string, heal: boolean, appOrigin: string): Promise<void> {
   const startedAt = now()
   const claimed = await env.DB.prepare("UPDATE runs SET status = 'running', started_at = ? WHERE id = ? AND status = 'queued'").bind(startedAt, runId).run()
   if (claimed.meta.changes === 0) return // aborted or deleted before it started
@@ -270,6 +274,8 @@ async function executeRun(env: Env, browser: Browser, runId: string, heal: boole
     let shot = 0
     let last: RunOutcome['status'] = 'succeeded'
     let stopped = false
+    // Set when the browser went away and no other could be started: the patterns that are left cannot run.
+    let noBrowser = ''
 
     for (const pattern of patterns ?? [null]) {
       if (pattern && stopped) {
@@ -294,7 +300,8 @@ async function executeRun(env: Env, browser: Browser, runId: string, heal: boole
       let context: BrowserContext | undefined
       let outcome: RunOutcome
       try {
-        const guarded = await newGuardedContext(browser, env, appOrigin, device)
+        if (noBrowser) throw new NotRun(noBrowser)
+        const guarded = await newGuardedContext(await lease.get(), env, appOrigin, device)
         context = guarded.context
         const page = await context.newPage()
         outcome = await runSteps(page, steps, {
@@ -333,7 +340,10 @@ async function executeRun(env: Env, browser: Browser, runId: string, heal: boole
           },
         })
       } catch (e) {
-        outcome = { status: 'failed', results: own, log: appendLog(engineLog, `Unexpected error: ${errorMessage(e)}`) }
+        // The run has started, so a launch failure is not retried through the queue: this pattern and the rest fail with the reason.
+        if (e instanceof BrowserLaunchError) noBrowser = errorMessage(e)
+        const line = e instanceof NotRun ? `Not run: ${e.message}` : e instanceof BrowserLaunchError ? errorMessage(e) : `Unexpected error: ${errorMessage(e)}`
+        outcome = { status: 'failed', results: own, log: appendLog(engineLog, line) }
       } finally {
         await context?.close().catch(() => {})
       }
@@ -372,16 +382,16 @@ type Processed = 'done' | 'retry'
 async function processSingle(env: Env, runId: string, appOrigin: string, canRetry: boolean): Promise<Processed> {
   const row = await env.DB.prepare('SELECT status FROM runs WHERE id = ?').bind(runId).first<{ status: string }>()
   if (!row || row.status !== 'queued') return 'done'
-  let browser: Browser | undefined
+  const lease = leaseBrowser(env)
   try {
-    browser = await openBrowser(env)
-    await executeRun(env, browser, runId, false, appOrigin)
+    // Started before the run is claimed: nothing has run yet when this fails, which is not a test failure.
+    await lease.get()
+    await executeRun(env, lease, runId, false, appOrigin)
   } catch (e) {
-    // Nothing has run yet when the browser could not be started: that is not a test failure.
     if (e instanceof BrowserLaunchError && canRetry) return 'retry'
     await failRun(env, runId, errorMessage(e))
   } finally {
-    await browser?.close().catch(() => {})
+    await lease.close()
   }
   return 'done'
 }
@@ -389,23 +399,23 @@ async function processSingle(env: Env, runId: string, appOrigin: string, canRetr
 async function processBatch(env: Env, batchRunId: string, appOrigin: string, canRetry: boolean): Promise<Processed> {
   const { results: runs } = await env.DB.prepare('SELECT id FROM runs WHERE batch_run_id = ? ORDER BY run_order').bind(batchRunId).all<{ id: string }>()
   if (runs.length === 0) return 'done'
-  let browser: Browser | undefined
+  const lease = leaseBrowser(env)
   try {
-    browser = await openBrowser(env)
     for (const { id } of runs) {
-      // One browser for the whole batch; if it died mid-way, start another for the remaining cases.
-      if (!browser.isConnected()) browser = await openBrowser(env)
-      await executeRun(env, browser, id, true, appOrigin) // only claims runs that are still queued
+      // One browser for the whole batch; if it died mid-way, the lease starts another for the remaining cases.
+      await lease.get()
+      await executeRun(env, lease, id, true, appOrigin) // only claims runs that are still queued
       await refreshBatchRun(env.DB, batchRunId)
     }
   } catch (e) {
-    // A launch can only fail between test cases, so every unfinished run is still queued and a later
-    // delivery of the same message picks up exactly where this one stopped.
+    // A launch failure only gets here from between test cases (inside a run it fails that run's patterns),
+    // so every unfinished run is still queued and a later delivery of the same message picks up exactly
+    // where this one stopped.
     if (e instanceof BrowserLaunchError && canRetry) return 'retry'
     const message = errorMessage(e)
     await env.DB.batch(runs.map(({ id }) => env.DB.prepare(batchFailSql).bind(now(), message, id)))
   } finally {
-    await browser?.close().catch(() => {})
+    await lease.close()
     await refreshBatchRun(env.DB, batchRunId)
   }
   return 'done'
