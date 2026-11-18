@@ -54,8 +54,19 @@ export function useModalDialog(onClose: () => void, initialFocus?: (el: HTMLDial
     focusRef.current?.(el)?.focus()
 
     // Fired by Escape, the back gesture and (with closedby="any") a press on the backdrop.
+    // An owner may decline to close (a request of the dialog is still under way). The browser has closed the
+    // element all the same, and it would stay mounted but invisible: its buttons dead, and every message of
+    // the app drawn inside it. So a dialog that is still there a moment later is opened again.
+    let reopen = 0
     const onClosed = () => {
-      if (!el.open) closeRef.current()
+      if (el.open) return
+      closeRef.current()
+      window.clearTimeout(reopen)
+      reopen = window.setTimeout(() => {
+        if (!el.isConnected || el.open) return
+        el.showModal()
+        focusRef.current?.(el)?.focus()
+      }, 60)
     }
     el.addEventListener('close', onClosed)
 
@@ -78,6 +89,7 @@ export function useModalDialog(onClose: () => void, initialFocus?: (el: HTMLDial
       el.addEventListener('pointerup', onUp)
     }
     return () => {
+      window.clearTimeout(reopen)
       el.removeEventListener('close', onClosed)
       el.removeEventListener('pointerdown', onDown)
       el.removeEventListener('pointerup', onUp)
