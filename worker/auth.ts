@@ -4,6 +4,12 @@ import { getCookie, setCookie } from 'hono/cookie'
 import type { Env } from './env'
 
 const COOKIE = 'sw_access'
+/**
+ * Over https the cookie is `__Host-sw_access`: the prefix makes the browser refuse it unless it is Secure,
+ * for Path=/ and without a Domain, so neither a sibling subdomain nor a network attacker can plant one.
+ * Local development runs over http, where a prefixed cookie would be rejected, so it keeps the plain name.
+ */
+const isSecure = (c: Context<{ Bindings: Env }>): boolean => new URL(c.req.url).protocol === 'https:'
 const encoder = new TextEncoder()
 
 async function sha256(text: string): Promise<Uint8Array> {
@@ -25,7 +31,7 @@ async function isAuthorized(c: Context<{ Bindings: Env }>): Promise<boolean> {
   if (!code) return true
   const header = c.req.header('Authorization')
   if (header?.startsWith('Bearer ') && (await safeEqual(header.slice(7).trim(), code))) return true
-  const cookie = getCookie(c, COOKIE)
+  const cookie = isSecure(c) ? getCookie(c, COOKIE, 'host') : getCookie(c, COOKIE)
   return !!cookie && (await safeEqual(cookie, toHex(await sha256(code))))
 }
 
@@ -45,10 +51,12 @@ export async function postSession(c: Context<{ Bindings: Env }>): Promise<Respon
   const body: unknown = await c.req.json().catch(() => null)
   const given = body && typeof body === 'object' && typeof (body as { code?: unknown }).code === 'string' ? (body as { code: string }).code : ''
   if (!given || !(await safeEqual(given, code))) return c.json({ error: 'Wrong access code' }, 401)
+  const secure = isSecure(c)
   setCookie(c, COOKIE, toHex(await sha256(code)), {
+    ...(secure ? { prefix: 'host' as const } : {}),
     httpOnly: true,
     sameSite: 'Lax',
-    secure: new URL(c.req.url).protocol === 'https:',
+    secure,
     path: '/',
     maxAge: 60 * 60 * 24 * 30,
   })
