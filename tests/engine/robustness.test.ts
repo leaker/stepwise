@@ -349,3 +349,17 @@ describe('detection on markup the demo site does not have', () => {
     expect(strings(element(ui, '"230 points" text').locators)).toEqual(['xpath=//span', "xpath=//span[text()='230 points']"])
   })
 })
+
+describe('a test that never opens a page', () => {
+  it('says that a Navigate step is missing instead of only "not found"', async () => {
+    await page.setContent(html('<button type="submit">Sign in</button>'))
+    const target = ref(await capture(page, 'ui'), '"Sign in" button')
+
+    await page.goto('about:blank')
+    const r = await run(page, [step('click', { target })], baseUrl, { heal: true, waitMs: 300 })
+    expect(r.status).toBe('failed')
+    expect(r.results[0].error).toContain('was not found')
+    expect(r.results[0].error).toContain('no Navigate step has run before this step')
+    expect(r.results[0].heal).toBeUndefined()
+  })
+})

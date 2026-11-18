@@ -144,6 +144,9 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
         : step.command === 'assert_exists'
           ? `AssertionError: UI element does not exist (${locatorToString(locator)})`
           : `UI element ${target.name} was not found (${locatorToString(locator)})`
+    // Nothing was opened yet: no locator can match, and repairing is pointless.
+    const blank = page.url() === 'about:blank' && (await page.evaluate(() => !document.body || document.body.childNodes.length === 0).catch(() => false))
+    if (blank) throw new StepError(`${missing}. The page is still blank: no Navigate step has run before this step, so add one that opens the page first`)
     if (!opts.heal || !def.healable) throw new StepError(missing)
 
     log(`[${n}] ${missing}`)

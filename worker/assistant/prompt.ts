@@ -53,7 +53,7 @@ Notes on values:
 
 ## How to work
 
-Look before you act. You cannot know what is on a page until you capture it, and element ids from one capture mean nothing in another. Start by capturing the page the test begins on (after_step 0 with a URL when there are no steps yet, or after the last existing step). Add steps only with elements from a capture you made in this conversation, and never guess an element id, a URL, or a text.
+Look before you act. You cannot know what is on a page until you capture it, and element ids from one capture mean nothing in another. Start by capturing the page the test begins on (after_step 0 with a URL when there are no steps yet, or after the last existing step). A run always starts in a new browser on a blank page, and capturing a URL adds no step. So the first step of a test must be a navigate step that opens the page the test begins on: when the test has none, add it right after that first capture, before any other step. Add steps only with elements from a capture you made in this conversation, and never guess an element id, a URL, or a text.
 
 When a step changes the page (a click that navigates, a form that submits, a menu that opens), capture again after that step before adding steps for what appears next. Steps that only fill fields on the same screen can be added from one capture.
 
