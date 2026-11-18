@@ -12,7 +12,7 @@
 }
 * { box-sizing: border-box; }
 html { font-family: 'Avenir Next', 'Segoe UI', system-ui, sans-serif; color: var(--ink); background: var(--paper); }
-body { margin: 0; min-height: 100vh; display: flex; flex-direction: column; line-height: 1.5; }
+body { margin: 0; min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; line-height: 1.5; overflow-wrap: break-word; }
 a { color: var(--brand); }
 h1, h2, h3 { font-family: Georgia, 'Times New Roman', serif; line-height: 1.2; margin: 0 0 12px; }
 h1 { font-size: 34px; }
@@ -22,13 +22,18 @@ p { margin: 0 0 12px; }
 
 .site-header { position: relative; background: var(--card); border-bottom: 1px solid var(--line); }
 .site-header .inner, .site-footer .inner, main { width: 100%; max-width: 1040px; margin: 0 auto; padding: 0 24px; }
-.site-header .inner { display: flex; align-items: center; gap: 24px; height: 68px; }
+.site-header .inner { display: flex; align-items: center; gap: 24px; min-height: 68px; }
 .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-family: Georgia, serif; font-size: 20px; font-weight: 700; color: var(--brand); }
 .brand img { width: 36px; height: 36px; }
 .site-nav { margin-left: auto; display: flex; gap: 6px; }
 .nav-link, .menu-item { padding: 8px 12px; border-radius: 8px; text-decoration: none; color: var(--ink); font-weight: 600; font-size: 15px; }
 .nav-link:hover, .menu-item:hover { background: var(--paper); }
+.nav-link:active, .menu-item:active { background: var(--line); }
+/* The page you are on: marked for assistive technology in the markup, and underlined (not by colour alone). */
+.site-nav [aria-current='page'] { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 6px; }
 .nav-toggle { display: none; margin-left: auto; padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--ink); font: inherit; font-weight: 600; font-size: 15px; cursor: pointer; }
+.nav-toggle:hover { background: var(--paper); }
+.nav-toggle:active { background: var(--line); }
 main { flex: 1; padding-top: 36px; padding-bottom: 56px; }
 
 .hero { display: grid; grid-template-columns: 1.2fr 1fr; gap: 32px; align-items: center; background: var(--brand); color: #fff; border-radius: 16px; padding: 44px; margin-bottom: 40px; }
@@ -40,7 +45,9 @@ main { flex: 1; padding-top: 36px; padding-bottom: 56px; }
 .btn { display: inline-block; border: 0; border-radius: 8px; padding: 11px 20px; font: inherit; font-weight: 700; cursor: pointer; text-decoration: none; }
 .btn-primary, .btn-solid { background: var(--accent); color: var(--accent-ink); }
 .btn-primary:hover, .btn-solid:hover { filter: brightness(1.08); }
+.btn:active { filter: brightness(0.92); }
 .btn-quiet { background: transparent; color: var(--brand); border: 1px solid var(--line); }
+.btn-quiet:hover { background: var(--paper); }
 .btn-block { width: 100%; }
 
 .rooms { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
@@ -59,7 +66,7 @@ input[type='text'], input[type='email'], input[type='password'], input[type='dat
   width: 100%; padding: 10px 12px; border: 1px solid #b9c4cf; border-radius: 8px; font: inherit; background: #fff; color: var(--ink);
 }
 textarea { min-height: 84px; resize: vertical; }
-.choice { display: flex; align-items: center; gap: 8px; font-size: 15px; margin-bottom: 8px; }
+.choice { display: flex; align-items: center; gap: 8px; min-height: 24px; font-size: 15px; margin-bottom: 8px; }
 fieldset { border: 0; padding: 0; margin: 0 0 16px; }
 .hint { color: var(--muted); font-size: 13px; }
 .form-error, .notice-danger { background: #fdecea; color: #a12a1b; border: 1px solid #f3b8b0; border-radius: 8px; padding: 10px 12px; margin-bottom: 16px; font-size: 14px; }
@@ -89,6 +96,8 @@ table.stays th { background: #eef2f6; font-size: 13px; text-transform: none; col
 .theme-v2 .site-header { background: var(--brand); border-bottom: 0; }
 .theme-v2 .brand, .theme-v2 .menu-item, .theme-v2 .nav-link { color: #fff; }
 .theme-v2 .menu-item:hover { background: rgba(255, 255, 255, 0.12); }
+.theme-v2 .menu-item:active, .theme-v2 .nav-toggle:active { background: rgba(255, 255, 255, 0.22); }
+.theme-v2 .nav-toggle:hover { background: rgba(255, 255, 255, 0.12); }
 .theme-v2 .nav-toggle { color: #fff; border-color: rgba(255, 255, 255, 0.35); border-radius: 999px; }
 .theme-v2 .btn { border-radius: 999px; }
 .theme-v2 .auth-card { max-width: 480px; }
@@ -101,10 +110,14 @@ table.stays th { background: #eef2f6; font-size: 13px; text-transform: none; col
 /* Phones: the navigation moves into a drawer behind the "Menu" button. */
 @media (max-width: 639px) {
   .site-header .inner, .site-footer .inner, main { padding-left: 16px; padding-right: 16px; }
-  .site-header .inner { height: 60px; gap: 12px; }
+  .site-header .inner { min-height: 60px; gap: 12px; }
   .nav-toggle { display: block; }
   .site-nav { display: none; position: absolute; z-index: 20; top: 100%; left: 0; right: 0; margin: 0; padding: 8px 16px 14px; flex-direction: column; gap: 2px; background: var(--card); border-bottom: 1px solid var(--line); box-shadow: 0 12px 24px rgba(16, 28, 43, 0.14); }
   .nav-open .site-nav { display: flex; }
+  /* Where the Popover API exists the script makes the navigation a popover (Escape and a tap outside close
+     it); it then sits in the top layer, so it is placed against the viewport, under the header. */
+  .site-nav[popover] { position: fixed; inset: auto 0; inset-block-start: 60px; width: auto; height: auto; max-block-size: calc(100dvh - 60px); overflow: auto; border-width: 0 0 1px; color: inherit; }
+  .site-nav:popover-open { display: flex; }
   .site-nav .nav-link, .site-nav .menu-item { padding: 12px; font-size: 16px; }
   .theme-v2 .site-nav { background: var(--brand); border-bottom: 0; }
   main { padding-top: 24px; padding-bottom: 40px; }
@@ -117,4 +130,10 @@ table.stays th { background: #eef2f6; font-size: 13px; text-transform: none; col
   table.stays { display: block; overflow-x: auto; white-space: nowrap; }
   .site-footer .inner { gap: 12px 20px; }
   .site-footer .spacer { flex-basis: 100%; height: 0; }
+}
+
+/* Touch screens: controls are at least 44px tall. */
+@media (pointer: coarse) {
+  .choice { min-height: 44px; margin-bottom: 0; }
+  .nav-toggle { min-height: 44px; }
 }

@@ -61,20 +61,64 @@
       })
     }
     var user = getUser()
+    var onDashboard = /dashboard\.html$/.test(location.pathname)
     each('.session-link', function (a) {
       if (user) {
         a.textContent = 'My stays'
         a.setAttribute('href', url('dashboard.html'))
+        // The link now leads to the guest area: it is the current page there, and no longer on the sign-in page.
+        if (onDashboard && a.closest('.site-nav')) a.setAttribute('aria-current', 'page')
+        else a.removeAttribute('aria-current')
       }
     })
-    // Phone layout: the "Menu" button opens and closes the navigation drawer.
+    // Phone layout: the "Menu" button opens and closes the navigation under the header.
     var toggle = document.querySelector('.nav-toggle')
     var header = document.querySelector('.site-header')
-    if (toggle && header) {
-      toggle.addEventListener('click', function () {
-        var open = header.classList.toggle('nav-open')
+    var nav = document.querySelector('.site-nav')
+    if (toggle && header && nav) {
+      var setOpen = function (open) {
+        header.classList.toggle('nav-open', open)
         toggle.setAttribute('aria-expanded', open ? 'true' : 'false')
-      })
+      }
+      if ('popover' in HTMLElement.prototype && window.matchMedia) {
+        // A native popover while the phone layout applies: the browser closes it on Escape and on a tap
+        // outside, and the button opens it declaratively. On wide screens the navigation is a plain row.
+        var narrow = window.matchMedia('(max-width: 639px)')
+        var sync = function () {
+          if (narrow.matches) {
+            nav.setAttribute('popover', 'auto')
+            toggle.setAttribute('popovertarget', nav.id)
+          } else {
+            if (nav.hasAttribute('popover') && nav.matches(':popover-open')) nav.hidePopover()
+            nav.removeAttribute('popover')
+            toggle.removeAttribute('popovertarget')
+            setOpen(false)
+          }
+        }
+        nav.addEventListener('beforetoggle', function (event) {
+          // The popover is in the top layer: keep it under the header wherever the page is scrolled to.
+          if (event.newState === 'open') nav.style.insetBlockStart = Math.max(0, header.getBoundingClientRect().bottom) + 'px'
+        })
+        nav.addEventListener('toggle', function (event) {
+          setOpen(event.newState === 'open')
+        })
+        if (narrow.addEventListener) narrow.addEventListener('change', sync)
+        sync()
+      } else {
+        // Without the Popover API: the same button toggles a class, and Escape or a press outside closes it.
+        toggle.addEventListener('click', function () {
+          setOpen(!header.classList.contains('nav-open'))
+        })
+        document.addEventListener('keydown', function (event) {
+          if (event.key === 'Escape' && header.classList.contains('nav-open')) {
+            setOpen(false)
+            toggle.focus()
+          }
+        })
+        document.addEventListener('click', function (event) {
+          if (header.classList.contains('nav-open') && !header.contains(event.target)) setOpen(false)
+        })
+      }
     }
     document.documentElement.classList.add('ready')
   }

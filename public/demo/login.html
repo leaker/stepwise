@@ -16,7 +16,7 @@
           <a class="nav-link" data-v2-class="menu-item" href="index.html">Home</a>
           <a class="nav-link" data-v2-class="menu-item" href="index.html#rooms">Rooms</a>
           <a class="nav-link" data-v2-class="menu-item" href="reserve.html">Reserve</a>
-          <a class="nav-link session-link" data-v2-class="menu-item session-link" href="login.html">Sign in</a>
+          <a class="nav-link session-link" data-v2-class="menu-item session-link" aria-current="page" href="login.html">Sign in</a>
         </nav>
       </div>
     </header>
@@ -57,15 +57,44 @@
         var password = document.getElementById('password')
         var remember = document.getElementById('remember')
         var error = document.getElementById('login-error')
+        // The form validates itself (novalidate), so it also tells assistive technology which field is wrong:
+        // aria-invalid plus a pointer to the message while it applies, and focus on the first such field.
+        var inputs = [email, password]
+        function mark(field, invalid) {
+          field.setAttribute('aria-invalid', invalid ? 'true' : 'false')
+          // Read at run time: the redesign (?ui=v2) renames the message element.
+          if (invalid) field.setAttribute('aria-describedby', error.id)
+          else field.removeAttribute('aria-describedby')
+        }
+        inputs.forEach(function (field) {
+          mark(field, false)
+          field.addEventListener('input', function () {
+            mark(field, false)
+          })
+        })
         form.addEventListener('submit', function (event) {
           event.preventDefault()
           error.textContent = ''
+          inputs.forEach(function (field) {
+            mark(field, false)
+          })
           if (!email.value.trim() || !password.value) {
             error.textContent = 'Enter your email and password.'
+            var empty = inputs.filter(function (field) {
+              return !field.value.trim()
+            })
+            empty.forEach(function (field) {
+              mark(field, true)
+            })
+            empty[0].focus()
             return
           }
           if (email.value.trim().toLowerCase() !== 'demo@example.com' || password.value !== 'demo1234') {
             error.textContent = 'The email or password is incorrect.'
+            inputs.forEach(function (field) {
+              mark(field, true)
+            })
+            email.focus()
             return
           }
           Harbor.setUser({ name: 'Demo User', email: 'demo@example.com', remember: remember.checked })

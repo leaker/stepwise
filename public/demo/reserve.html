@@ -15,7 +15,7 @@
         <nav class="site-nav" id="site-nav" aria-label="Main">
           <a class="nav-link" data-v2-class="menu-item" href="index.html">Home</a>
           <a class="nav-link" data-v2-class="menu-item" href="index.html#rooms">Rooms</a>
-          <a class="nav-link" data-v2-class="menu-item" href="reserve.html">Reserve</a>
+          <a class="nav-link" data-v2-class="menu-item" aria-current="page" href="reserve.html">Reserve</a>
           <a class="nav-link session-link" data-v2-class="menu-item session-link" href="login.html">Sign in</a>
         </nav>
       </div>
@@ -119,18 +119,35 @@
 
         form.addEventListener('input', render)
         form.addEventListener('change', render)
+        // The form validates itself (novalidate), so it also tells assistive technology which field is wrong:
+        // aria-invalid plus a pointer to the message while it applies, and focus on that field.
+        var checked = [fields.checkin, fields.name]
+        function mark(field, invalid) {
+          field.setAttribute('aria-invalid', invalid ? 'true' : 'false')
+          // Read at run time: the redesign (?ui=v2) renames the message element.
+          if (invalid) field.setAttribute('aria-describedby', error.id)
+          else field.removeAttribute('aria-describedby')
+        }
+        function fail(field, message) {
+          error.textContent = message
+          mark(field, true)
+          field.focus()
+        }
+        checked.forEach(function (field) {
+          mark(field, false)
+          field.addEventListener('input', function () {
+            mark(field, false)
+          })
+        })
         form.addEventListener('submit', function (event) {
           event.preventDefault()
           var data = read()
           error.textContent = ''
-          if (!data.checkin) {
-            error.textContent = 'Choose a check-in date.'
-            return
-          }
-          if (!data.name) {
-            error.textContent = 'Enter the name of the main guest.'
-            return
-          }
+          checked.forEach(function (field) {
+            mark(field, false)
+          })
+          if (!data.checkin) return fail(fields.checkin, 'Choose a check-in date.')
+          if (!data.name) return fail(fields.name, 'Enter the name of the main guest.')
           data.id = 'HB-' + String(Math.floor(Math.random() * 90000) + 10000)
           sessionStorage.setItem('harbor.reservation', JSON.stringify(data))
           Harbor.go('confirm.html')
