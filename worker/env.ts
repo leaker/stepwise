@@ -1,4 +1,5 @@
 import type { BrowserWorker } from '@cloudflare/playwright'
+import type { ApiErrorCode } from '../shared/types'
 
 export interface Env {
   DB: D1Database
@@ -12,6 +13,8 @@ export interface Env {
   ALLOWED_HOSTS?: string
   /** Optional secret. When set, the AI assistant is available (worker/assistant). */
   ANTHROPIC_API_KEY?: string
+  /** Optional rate limiting binding. When present, wrong access codes are counted per client address (worker/auth.ts). */
+  ACCESS_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> }
   /** Optional. Assistant sessions the whole deployment may start in 24 hours (default 100). */
   ASSISTANT_DAILY_SESSIONS?: string
   /** Optional. Estimated assistant spend in USD per 24 hours after which no new session starts (default 40). */
@@ -26,7 +29,13 @@ export interface Env {
 }
 
 /** `origin` is the app's own origin at enqueue time; it is always an allowed navigation target. */
-export type QueueMessage = { runId: string; origin: string } | { batchRunId: string; origin: string } | { assistantSessionId: string; origin: string; override?: AssistantOverride }
+export type QueueMessage =
+  | { runId: string; origin: string }
+  /** `resumed`: the rest of a batch that an earlier invocation handed on when its time was nearly up. */
+  | { batchRunId: string; origin: string; resumed?: boolean }
+  | { assistantSessionId: string; origin: string; override?: AssistantOverride }
+  /** Screenshots of deleted projects, test cases and runs: objects by key, and everything under a prefix. */
+  | { cleanup: { keys?: string[]; prefixes?: string[] } }
 
 /** A model (and effort) for one assistant session instead of the deployment's; see ASSISTANT_DEV_OVERRIDE. */
 export interface AssistantOverride {
@@ -36,9 +45,12 @@ export interface AssistantOverride {
 
 export class HttpError extends Error {
   readonly status: 400 | 401 | 404 | 409 | 429 | 502 | 503
-  constructor(status: 400 | 401 | 404 | 409 | 429 | 502 | 503, message: string) {
+  /** A machine-readable reason, for the errors the app reacts to (shared/types.ts: ApiErrorCode). */
+  readonly code?: ApiErrorCode
+  constructor(status: 400 | 401 | 404 | 409 | 429 | 502 | 503, message: string, code?: ApiErrorCode) {
     super(message)
     this.status = status
+    if (code) this.code = code
   }
 }
 

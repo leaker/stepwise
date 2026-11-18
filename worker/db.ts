@@ -1,8 +1,9 @@
 // D1 access helpers: row <-> shared type mapping and the queries used by more than one route.
 import { DEVICES, deviceOf } from '../shared/devices'
 import { settledPatterns } from '../shared/data'
+import { stepsRevision } from '../shared/revision'
 import type { BatchRun, DataTable, Project, Run, RunPattern, RunStatus, Step, StepResult, TestCase, Ui, UiElement } from '../shared/types'
-import { HttpError } from './env'
+import { HttpError, type QueueMessage } from './env'
 
 export const now = (): string => new Date().toISOString()
 export const newId = (): string => crypto.randomUUID().replace(/-/g, '').slice(0, 16)
@@ -133,6 +134,7 @@ export function toTestCase(r: TestCaseRow, lastRun: TestCase['lastRun'] = null):
     description: r.description,
     device: deviceOf(r.device).id,
     steps: parseJson<Step[]>(r.steps, []),
+    stepsRev: stepsRevision(r.steps),
     data: parseJson<DataTable | null>(r.data, null),
     createdAt: r.created_at,
     updatedAt: r.updated_at,
@@ -316,19 +318,75 @@ export async function lastRunsFor(db: D1Database, where: { projectId: string } |
 
 // ---- R2 cleanup ----
 
-/** Delete objects best-effort; a failure here must never fail the request. */
-export async function deleteShots(bucket: R2Bucket, keys: string[], prefixes: string[] = []): Promise<void> {
-  try {
-    for (let i = 0; i < keys.length; i += 500) await bucket.delete(keys.slice(i, i + 500))
-    for (const prefix of prefixes) {
+const R2_DELETE_MAX = 1000
+/** Prefixes (runs) worked on at the same time: far fewer round trips in a row than one after the other. */
+const PREFIXES_AT_ONCE = 10
+
+export interface ShotWork {
+  keys: string[]
+  prefixes: string[]
+}
+
+/**
+ * Delete objects by key and everything under the prefixes. Best-effort: it never throws, one prefix that
+ * fails does not stop the others, and what could not be deleted is returned so the caller can try again.
+ */
+export async function deleteShots(bucket: R2Bucket, keys: string[], prefixes: string[] = []): Promise<ShotWork> {
+  const left: ShotWork = { keys: [], prefixes: [] }
+  for (let i = 0; i < keys.length; i += R2_DELETE_MAX) {
+    const chunk = keys.slice(i, i + R2_DELETE_MAX)
+    try {
+      await bucket.delete(chunk)
+    } catch (e) {
+      console.error('screenshot cleanup failed', e)
+      left.keys.push(...chunk)
+    }
+  }
+  const one = async (prefix: string): Promise<void> => {
+    try {
       let cursor: string | undefined
       do {
         const page = await bucket.list({ prefix, cursor })
         if (page.objects.length) await bucket.delete(page.objects.map((o) => o.key))
         cursor = page.truncated ? page.cursor : undefined
       } while (cursor)
+    } catch (e) {
+      console.error(`screenshot cleanup failed for ${prefix}`, e)
+      left.prefixes.push(prefix)
     }
+  }
+  for (let i = 0; i < prefixes.length; i += PREFIXES_AT_ONCE) await Promise.all(prefixes.slice(i, i + PREFIXES_AT_ONCE).map(one))
+  return left
+}
+
+/** What one request deletes itself after responding; more than this goes to the queue, where it can take its time and be retried. */
+const INLINE_PREFIXES = 20
+const PREFIXES_PER_MESSAGE = 100
+const KEYS_PER_MESSAGE = 500
+
+/**
+ * Remove the screenshots of something that was just deleted from the database. Nothing points at these
+ * objects any more, so whatever is not deleted now would stay for good: a small job is done right after
+ * the response and what it could not delete is queued; a large one (a project with hundreds of runs) is
+ * queued in pieces from the start, because a request's time after the response is short.
+ */
+export async function removeShots(env: { SHOTS: R2Bucket; RUN_QUEUE: Queue<QueueMessage> }, keys: string[], prefixes: string[] = []): Promise<void> {
+  const enqueue = async (work: ShotWork): Promise<void> => {
+    const messages: QueueMessage[] = []
+    for (let i = 0; i < work.keys.length; i += KEYS_PER_MESSAGE) messages.push({ cleanup: { keys: work.keys.slice(i, i + KEYS_PER_MESSAGE) } })
+    for (let i = 0; i < work.prefixes.length; i += PREFIXES_PER_MESSAGE) messages.push({ cleanup: { prefixes: work.prefixes.slice(i, i + PREFIXES_PER_MESSAGE) } })
+    for (const body of messages) await env.RUN_QUEUE.send(body)
+  }
+  try {
+    if (prefixes.length > INLINE_PREFIXES) {
+      await enqueue({ keys, prefixes })
+      return
+    }
+    const left = await deleteShots(env.SHOTS, keys, prefixes)
+    if (left.keys.length || left.prefixes.length) await enqueue(left)
   } catch (e) {
-    console.error('screenshot cleanup failed', e)
+    // The queue did not take it: do what can be done here.
+    console.error('screenshot cleanup could not be queued', e)
+    await deleteShots(env.SHOTS, keys, prefixes)
   }
 }

@@ -200,6 +200,11 @@ export interface TestCase {
   /** Device profile captures and runs of this test case use. A shared step called from a test case runs on the caller's device. */
   device: DeviceId
   steps: Step[]
+  /**
+   * Which version of `steps` this is (shared/revision.ts). Sent back as `baseStepsRev` with a save of the
+   * steps, so a save based on an older list is refused with 409 `steps_changed`.
+   */
+  stepsRev: string
   /** Test cases only; null when the test case has no data table. */
   data: DataTable | null
   /** Shared steps only, on the routes that say so: the test cases that call it. */
@@ -386,13 +391,25 @@ export interface CaptureRequest {
   /** Data-driven test cases: the 1-based data row whose values the replay uses. Default 1. */
   row?: number
 }
+/**
+ * `code` of an error response ({ error, code? }), for the conflicts the editor handles itself:
+ * the assistant is editing the steps, or the steps were changed since the editor loaded them.
+ */
+export type ApiErrorCode = 'assistant_busy' | 'steps_changed'
+
 export interface CaptureResponse {
   ui: Ui
   /**
    * Set when the replay stopped early because a step failed; the capture shows the page at that point.
    * `stepId` is a step of the test case: for a failure inside a shared step it is the call, and the message says where.
+   * A replay that stopped before it opened any page captures nothing: the request fails with the reason instead.
    */
   replayError?: { stepId: string; message: string }
+  /**
+   * Assertions that failed during the replay but are set to continue on failure. They did not stop it: the
+   * capture shows the page after the step that was asked for.
+   */
+  tolerated?: { stepId: string; message: string }[]
 }
 
 // ---- AI assistant ----

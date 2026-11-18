@@ -14,7 +14,7 @@ import { MAX_BODY_BYTES } from './validate'
 const app = new Hono<{ Bindings: Env }>()
 
 app.onError((err, c) => {
-  if (err instanceof HttpError) return c.json({ error: err.message }, err.status)
+  if (err instanceof HttpError) return c.json({ error: err.message, ...(err.code ? { code: err.code } : {}) }, err.status)
   // Details (database errors, parse errors of stored data, ...) stay in the Worker log.
   console.error(err)
   return c.json({ error: 'Internal error' }, 500)

@@ -1,9 +1,10 @@
 // Everything that drives a real browser: UI capture, trial runs, and the queue consumer that executes
 // runs and assistant sessions.
 import { launch, type Browser, type BrowserContext } from '@cloudflare/playwright'
+import { nextUiName } from '../shared/commands'
 import { aggregateStatus, patternLogHeading, runVariables, SUMMARY_LOG_HEADING } from '../shared/data'
 import { deviceOf, type DeviceProfile } from '../shared/devices'
-import { flatRange, positionsOf } from '../shared/expand'
+import { flatRange, positionLabel, positionsOf } from '../shared/expand'
 import { makePreview, type Preview } from './assistant/preview'
 import { processAssistantSession } from './assistant/session'
 import type { CaptureResponse, RunPattern, RunStatus, Step, StepResult, Ui } from '../shared/types'
@@ -24,7 +25,8 @@ class NotRun extends Error {}
 
 async function openBrowser(env: Env): Promise<Browser> {
   try {
-    return await launch(env.BROWSER)
+    // The longest idle time Browser Run allows. A long fixed wait also keeps the session busy itself (executor.ts).
+    return await launch(env.BROWSER, { keep_alive: 600_000 })
   } catch (e) {
     throw new BrowserLaunchError(e)
   }
@@ -93,6 +95,8 @@ export async function captureScreen(env: Env, input: CaptureInput, shared?: Brow
     const guard = guarded.guard
     const page = await context.newPage()
     let replayError: CaptureResponse['replayError']
+    const tolerated: NonNullable<CaptureResponse['tolerated']> = []
+    let stoppedAt = ''
 
     if (input.replayTo !== null) {
       const positions = positionsOf(input.steps)
@@ -118,16 +122,29 @@ export async function captureScreen(env: Env, input: CaptureInput, shared?: Brow
           takeBlockedNavigation: guard.takeBlockedNavigation,
           shouldAbort: input.shouldAbort,
         })
-        if (outcome.status === 'failed') {
-          const failed = outcome.results.findLast((r) => r.status === 'failed')
-          replayError = at(input.steps.find((s) => s.id === failed?.stepId) ?? lastStep, failed?.error ?? 'A step failed during the replay')
+        // An assertion that failed but is set to continue did not stop the replay: the page is the one asked for.
+        for (const r of outcome.results) {
+          if (r.status !== 'failed' || r === outcome.stoppedBy) continue
+          const step = input.steps.find((s) => s.id === r.stepId)
+          if (step) tolerated.push(at(step, r.error ?? 'The assertion failed'))
+        }
+        if (outcome.stoppedBy) {
+          const failed = outcome.stoppedBy
+          const step = input.steps.find((s) => s.id === failed.stepId) ?? lastStep
+          replayError = at(step, failed.error ?? 'A step failed during the replay')
+          stoppedAt = positionLabel(positions[input.steps.indexOf(step)] ?? { number: input.replayTo })
         } else if (outcome.status === 'aborted') {
           const next = input.steps.slice(0, range.to).find((s) => !s.disabled && !s.call && !outcome.results.some((r) => r.stepId === s.id))
           replayError = at(next ?? lastStep, 'The replay was stopped before this step (the session was aborted or ran out of time)')
+          stoppedAt = positionLabel(positions[input.steps.indexOf(next ?? lastStep)] ?? { number: input.replayTo })
         }
       } catch (e) {
         replayError = at(lastStep, errorMessage(e))
+        stoppedAt = `${input.replayTo}`
       }
+      // The replay ended before it opened anything: a capture of the empty page would be a screen with no
+      // elements that only gets in the way. The caller is told why instead.
+      if (replayError && page.url() === 'about:blank') throw new HttpError(400, `Nothing was captured: the replay stopped at step ${stoppedAt} before any page was opened. ${replayError.message}`)
     } else if (input.url) {
       try {
         await page.goto(input.url.href, { waitUntil: 'load', timeout: 30_000 })
@@ -146,11 +163,11 @@ export async function captureScreen(env: Env, input: CaptureInput, shared?: Brow
     const screenshotKey = `ui/${id}.jpg`
     await env.SHOTS.put(screenshotKey, capture.screenshot, { httpMetadata: { contentType: 'image/jpeg' } })
 
-    const count = await env.DB.prepare('SELECT COUNT(*) AS n FROM uis WHERE test_case_id = ?').bind(input.testCase.id).first<{ n: number }>()
+    const { results: names } = await env.DB.prepare('SELECT name FROM uis WHERE test_case_id = ?').bind(input.testCase.id).all<{ name: string }>()
     const row: UiRow = {
       id,
       test_case_id: input.testCase.id,
-      name: `UI${(count?.n ?? 0) + 1}`,
+      name: nextUiName(names.map((n) => n.name)),
       url: capture.url,
       title: capture.title,
       width: Math.round(capture.width),
@@ -173,7 +190,7 @@ export async function captureScreen(env: Env, input: CaptureInput, shared?: Brow
       throw e
     }
     const ui: Ui = toUi(row)
-    return { ui, ...(replayError ? { replayError } : {}), ...(preview ? { preview } : {}) }
+    return { ui, ...(replayError ? { replayError } : {}), ...(tolerated.length ? { tolerated } : {}), ...(preview ? { preview } : {}) }
   } finally {
     if (shared) await context?.close().catch(() => {})
     else await browser.close().catch(() => {})
@@ -230,11 +247,55 @@ async function failRun(env: Env, runId: string, message: string): Promise<void> 
     .run()
 }
 
+/** The run's row could not take what was written to it: results and log are one row, and D1 bounds a row. */
+class RunTooBig extends Error {
+  constructor() {
+    super('The run produced more data than one run can hold (its results and its log are stored together). Shorten long step values, remove data rows, or split the test case.')
+  }
+}
+const isTooBig = (e: unknown): boolean => /too ?big|TOOBIG/i.test(errorMessage(e))
+
+export interface RunEnd {
+  status: RunStatus
+  finishedAt: string
+  results: StepResult[]
+  patterns: RunPattern[] | null
+  /** The whole log of a run that ended by itself. */
+  log: string
+  /** What the consumer last wrote while the run was running: the results, and the log. */
+  written: { results: string; log: string }
+  /** The log without its last line (the verdict): a run that was ended from outside gets the part of this after `written.log`, since it has its own last word. */
+  body: string
+}
+
+/**
+ * Record how a run ended. While the run is still `running` this is the verdict. A run that was ended from
+ * outside in the meantime (aborted by the user, failed by the stale-run sweep) keeps its status, its
+ * finishing time and the lines written to its log since; and because such a run can be reviewed at once,
+ * its results are completed only while they are still the ones this consumer wrote, so a repair that
+ * was approved or rejected in between is never undone.
+ */
+export async function recordRunEnd(db: D1Database, runId: string, end: RunEnd): Promise<void> {
+  const results = JSON.stringify(end.results)
+  const patterns = end.patterns ? JSON.stringify(end.patterns) : null
+  const own = await db
+    .prepare("UPDATE runs SET results = ?1, log = ?2, status = ?3, finished_at = ?4, patterns = ?5 WHERE id = ?6 AND status = 'running'")
+    .bind(results, end.log, end.status, end.finishedAt, patterns, runId)
+    .run()
+  if (own.meta.changes > 0) return
+  const late = end.body.startsWith(end.written.log) ? end.body.slice(end.written.log.length).replace(/^\n+/, '') : ''
+  await db.batch([
+    db.prepare("UPDATE runs SET results = ?1, patterns = ?2 WHERE id = ?3 AND status <> 'running' AND results = ?4").bind(results, patterns, runId, end.written.results),
+    ...(late ? [db.prepare("UPDATE runs SET log = log || CASE WHEN log = '' THEN '' ELSE char(10) END || ?1 WHERE id = ?2 AND status <> 'running'").bind(late, runId)] : []),
+  ])
+}
+
 /**
  * Execute one run. A data-driven run executes its steps once per pattern (data row), one after the other,
  * each in a browser context of its own, and goes on after a pattern that failed. The browser comes from a
  * lease, so one that went away during a pattern is replaced for the next. Every write is conditional
- * on the run still being `running`, so an abort (or the stale-run sweep) is never overwritten by late progress.
+ * on the run still being `running`, so an abort (or the stale-run sweep) is never overwritten by late progress;
+ * see recordRunEnd for the last one.
  */
 async function executeRun(env: Env, lease: BrowserLease, runId: string, heal: boolean, appOrigin: string): Promise<void> {
   const startedAt = now()
@@ -264,7 +325,27 @@ async function executeRun(env: Env, lease: BrowserLease, runId: string, heal: bo
       ...(patterns ? [`Data-driven: ${patterns.length === 1 ? `data row ${patterns[0].index} only` : `${patterns.length} patterns (data rows), one after the other, each in a fresh browser context`}`] : []),
       `Started: ${startedAt}`,
     ].join('\n')
-    await env.DB.prepare("UPDATE runs SET log = ? WHERE id = ? AND status = 'running'").bind(header, runId).run()
+    /** What this consumer last wrote to the row, for recordRunEnd. */
+    const written = { results: run.results, log: run.log ?? '' }
+    const write = async (fields: { results?: StepResult[]; patterns?: RunPattern[]; log: string }): Promise<void> => {
+      const sets = ['log = ?1']
+      const args: unknown[] = [fields.log]
+      const results = fields.results ? JSON.stringify(fields.results) : null
+      if (results !== null) sets.push(`results = ?${args.push(results)}`)
+      if (fields.patterns) sets.push(`patterns = ?${args.push(JSON.stringify(fields.patterns))}`)
+      let saved
+      try {
+        saved = await env.DB.prepare(`UPDATE runs SET ${sets.join(', ')} WHERE id = ?${args.push(runId)} AND status = 'running'`)
+          .bind(...args)
+          .run()
+      } catch (e) {
+        throw isTooBig(e) ? new RunTooBig() : e
+      }
+      if (saved.meta.changes === 0) return
+      written.log = fields.log
+      if (results !== null) written.results = results
+    }
+    await write({ log: header })
 
     /** Results of the patterns that have finished, then the log sections of those patterns. */
     const done: StepResult[] = []
@@ -276,6 +357,7 @@ async function executeRun(env: Env, lease: BrowserLease, runId: string, heal: bo
     let stopped = false
     // Set when the browser went away and no other could be started: the patterns that are left cannot run.
     let noBrowser = ''
+    let tooBig: RunTooBig | undefined
 
     for (const pattern of patterns ?? [null]) {
       if (pattern && stopped) {
@@ -289,17 +371,18 @@ async function executeRun(env: Env, lease: BrowserLease, runId: string, heal: bo
             .map(([k, v]) => `${k}=${shown(v)}`)
             .join(', ')}`
         : ''
-      if (pattern && patterns) {
-        pattern.status = 'running'
-        pattern.startedAt = now()
-        await env.DB.prepare("UPDATE runs SET patterns = ?, log = ? WHERE id = ? AND status = 'running'").bind(JSON.stringify(patterns), logWith(heading), runId).run()
-      }
 
       let own: StepResult[] = []
       let engineLog = ''
       let context: BrowserContext | undefined
       let outcome: RunOutcome
       try {
+        if (tooBig) throw new NotRun(tooBig.message)
+        if (pattern && patterns) {
+          pattern.status = 'running'
+          pattern.startedAt = now()
+          await write({ patterns, log: logWith(heading) })
+        }
         if (noBrowser) throw new NotRun(noBrowser)
         const guarded = await newGuardedContext(await lease.get(), env, appOrigin, device)
         context = guarded.context
@@ -328,9 +411,7 @@ async function executeRun(env: Env, lease: BrowserLease, runId: string, heal: bo
             if (at >= 0) own[at] = result
             else own.push(result)
             engineLog = log
-            await env.DB.prepare("UPDATE runs SET results = ?, log = ? WHERE id = ? AND status = 'running'")
-              .bind(JSON.stringify([...done, ...own]), logWith(appendLog(heading, log)), runId)
-              .run()
+            await write({ results: [...done, ...own], log: logWith(appendLog(heading, log)) })
           },
           shouldAbort: async () => {
             const row = await env.DB.prepare('SELECT status FROM runs WHERE id = ?').bind(runId).first<{ status: string }>()
@@ -342,7 +423,8 @@ async function executeRun(env: Env, lease: BrowserLease, runId: string, heal: bo
       } catch (e) {
         // The run has started, so a launch failure is not retried through the queue: this pattern and the rest fail with the reason.
         if (e instanceof BrowserLaunchError) noBrowser = errorMessage(e)
-        const line = e instanceof NotRun ? `Not run: ${e.message}` : e instanceof BrowserLaunchError ? errorMessage(e) : `Unexpected error: ${errorMessage(e)}`
+        if (e instanceof RunTooBig) tooBig = e
+        const line = e instanceof NotRun ? `Not run: ${e.message}` : e instanceof BrowserLaunchError || e instanceof RunTooBig ? errorMessage(e) : `Unexpected error: ${errorMessage(e)}`
         outcome = { status: 'failed', results: own, log: appendLog(engineLog, line) }
       } finally {
         await context?.close().catch(() => {})
@@ -359,17 +441,33 @@ async function executeRun(env: Env, lease: BrowserLease, runId: string, heal: bo
       }
     }
 
+    if (tooBig) {
+      // The full results are what did not fit: the row keeps what was last written, and the reason.
+      await failRun(env, runId, tooBig.message)
+      return
+    }
+    // Ended from outside by the time limit, not by the user: the pattern it stopped in failed with the run.
+    const outside = await env.DB.prepare('SELECT status FROM runs WHERE id = ?').bind(runId).first<{ status: string }>()
+    if (outside?.status === 'failed' && patterns) for (const p of patterns) if (p.status === 'aborted' && p.startedAt) p.status = 'failed'
     const status: RunStatus = patterns ? aggregateStatus(patterns.map((p) => p.status)) : last
     const finishedAt = now()
     const summary = patterns ? [SUMMARY_LOG_HEADING, ...patterns.map((p) => `Pattern ${p.index}: ${p.startedAt ? p.status : 'not run'}`)].join('\n') : ''
-    const log = appendLog(logWith(summary), `Finished: ${finishedAt} - ${status}`)
-    // Keep a status that was set from outside (aborted / timed out); otherwise record the engine's verdict.
-    await env.DB.prepare("UPDATE runs SET results = ?1, log = ?2, status = CASE WHEN status = 'running' THEN ?3 ELSE status END, finished_at = COALESCE(finished_at, ?4), patterns = ?6 WHERE id = ?5")
-      .bind(JSON.stringify(done), log, status, finishedAt, runId, patterns ? JSON.stringify(patterns) : null)
-      .run()
+    const body = logWith(summary)
+    const log = appendLog(body, `Finished: ${finishedAt} - ${status}`)
+    try {
+      await recordRunEnd(env.DB, runId, { status, finishedAt, results: done, patterns, log, written, body })
+    } catch (e) {
+      if (!isTooBig(e)) throw e
+      await failRun(env, runId, new RunTooBig().message)
+    }
   } catch (e) {
     console.error(`run ${runId} crashed`, e)
     await failRun(env, runId, `Unexpected error: ${errorMessage(e)}`)
+  } finally {
+    // The run (its test case, its project) was deleted while it was executing: the clean-up that went with
+    // the deletion could not see the screenshots taken after it.
+    const exists = await env.DB.prepare('SELECT 1 AS x FROM runs WHERE id = ?').bind(runId).first().catch(() => true)
+    if (!exists) await deleteShots(env.SHOTS, [], [`run/${runId}/`])
   }
 }
 
@@ -396,15 +494,55 @@ async function processSingle(env: Env, runId: string, appOrigin: string, canRetr
   return 'done'
 }
 
-async function processBatch(env: Env, batchRunId: string, appOrigin: string, canRetry: boolean): Promise<Processed> {
-  const { results: runs } = await env.DB.prepare('SELECT id FROM runs WHERE batch_run_id = ? ORDER BY run_order').bind(batchRunId).all<{ id: string }>()
-  if (runs.length === 0) return 'done'
+/**
+ * How long one consumer invocation goes on starting test cases of a batch. The platform ends an invocation
+ * after 15 minutes of wall-clock time, in the middle of whatever is running; a batch that is not through
+ * by this point hands the rest to a new invocation instead (a new queue message).
+ */
+export const BATCH_SLICE_MS = 8 * 60 * 1000
+const INTERRUPTED = 'Interrupted: the worker that was executing this batch was stopped by the platform before this test case finished (a batch gets a limited time per stretch). The test case did not fail by itself; run it again.'
+
+/**
+ * The runs of a batch that an earlier invocation left `running`. A batch is executed by one invocation at
+ * a time, so when a later one starts (a redelivery, or the continuation of a long batch) nobody is working
+ * on them any more: they are failed with what happened, at once, instead of sitting as running until the
+ * stale-run sweep calls it a timeout.
+ */
+export async function failInterruptedRuns(db: D1Database, batchRunId: string): Promise<number> {
+  const out = await db
+    .prepare("UPDATE runs SET status = 'failed', finished_at = ?1, log = log || CASE WHEN log = '' THEN '' ELSE char(10) END || ?2 WHERE batch_run_id = ?3 AND status = 'running'")
+    .bind(now(), INTERRUPTED, batchRunId)
+    .run()
+  return out.meta.changes
+}
+
+async function processBatch(env: Env, body: Extract<QueueMessage, { batchRunId: string }>, canRetry: boolean, redelivered: boolean, clock: () => number = Date.now): Promise<Processed> {
+  const batchRunId = body.batchRunId
+  const appOrigin = body.origin
+  const started = clock()
+  if (redelivered || body.resumed) await failInterruptedRuns(env.DB, batchRunId)
+  const { results: runs } = await env.DB.prepare("SELECT id FROM runs WHERE batch_run_id = ? AND status = 'queued' ORDER BY run_order").bind(batchRunId).all<{ id: string }>()
+  if (runs.length === 0) {
+    await refreshBatchRun(env.DB, batchRunId)
+    return 'done'
+  }
   const lease = leaseBrowser(env)
+  let executed = 0
   try {
     for (const { id } of runs) {
+      // Never before the first test case: every invocation gets something done.
+      if (executed > 0 && clock() - started >= BATCH_SLICE_MS) {
+        // Sent while the rest is still queued; if it cannot be sent, this invocation goes on as far as it gets.
+        const handed = await env.RUN_QUEUE.send({ batchRunId, origin: appOrigin, resumed: true }).then(
+          () => true,
+          (e) => (console.error('could not hand the batch on', e), false),
+        )
+        if (handed) break
+      }
       // One browser for the whole batch; if it died mid-way, the lease starts another for the remaining cases.
       await lease.get()
       await executeRun(env, lease, id, true, appOrigin) // only claims runs that are still queued
+      executed++
       await refreshBatchRun(env.DB, batchRunId)
     }
   } catch (e) {
@@ -425,24 +563,32 @@ async function processBatch(env: Env, batchRunId: string, appOrigin: string, can
 const LAUNCH_RETRIES = 3
 const LAUNCH_RETRY_DELAY_S = 30
 
+/** One clean-up message: true when everything it names is gone. */
+async function cleanUpShots(bucket: R2Bucket, work: { keys?: string[]; prefixes?: string[] }): Promise<boolean> {
+  const left = await deleteShots(bucket, work.keys ?? [], work.prefixes ?? [])
+  return left.keys.length === 0 && left.prefixes.length === 0
+}
+
 /**
  * Queue consumer. A message is delivered again only when no browser could be started (Browser Run's
  * concurrency and rate limits are transient); after the last attempt the run is marked failed with that
- * reason. A run that started is never retried: it either finishes or is marked failed.
+ * reason. A run that started is never retried: it either finishes or is marked failed. A screenshot
+ * clean-up that could not delete everything is delivered again too.
  */
-export async function handleQueue(batch: MessageBatch<QueueMessage>, env: Env): Promise<void> {
+export async function handleQueue(batch: MessageBatch<QueueMessage>, env: Env, clock: () => number = Date.now): Promise<void> {
   for (const message of batch.messages) {
     const body = message.body
     let processed: Processed = 'done'
     try {
       const canRetry = message.attempts <= LAUNCH_RETRIES
-      if ('assistantSessionId' in body) await processAssistantSession(env, body.assistantSessionId, body.origin, undefined, body.override)
-      else processed = 'batchRunId' in body ? await processBatch(env, body.batchRunId, body.origin, canRetry) : await processSingle(env, body.runId, body.origin, canRetry)
+      if ('cleanup' in body) processed = (await cleanUpShots(env.SHOTS, body.cleanup)) || !canRetry ? 'done' : 'retry'
+      else if ('assistantSessionId' in body) await processAssistantSession(env, body.assistantSessionId, body.origin, undefined, body.override)
+      else processed = 'batchRunId' in body ? await processBatch(env, body, canRetry, message.attempts > 1, clock) : await processSingle(env, body.runId, body.origin, canRetry)
     } catch (e) {
       console.error('queue message failed', body, e)
     }
     if (processed === 'retry') {
-      console.warn(`No browser available (attempt ${message.attempts}); retrying in ${LAUNCH_RETRY_DELAY_S} s`, body)
+      console.warn(`${'cleanup' in body ? 'Screenshot clean-up incomplete' : 'No browser available'} (attempt ${message.attempts}); retrying in ${LAUNCH_RETRY_DELAY_S} s`)
       message.retry({ delaySeconds: LAUNCH_RETRY_DELAY_S })
     } else message.ack()
   }

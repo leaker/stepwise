@@ -1,10 +1,12 @@
 // In-browser stand-in for the Worker API. Loaded only when VITE_MOCK is set (see main.tsx);
 // it exists so the UI can be exercised before, or without, the real backend.
-import { COMMAND_BY_ID, sharedLabel, stepSentence, validateSteps } from '../../shared/commands'
+import { COMMAND_BY_ID, nextUiName, sharedLabel, stepSentence, validateSteps } from '../../shared/commands'
+import { stepsRevision } from '../../shared/revision'
 import { aggregateStatus, describeDataProblem, hasPatterns, patternLogHeading, rowValues, settledPatterns, SUMMARY_LOG_HEADING, validateDataTable } from '../../shared/data'
 import { DEVICES } from '../../shared/devices'
 import { expandSteps, flatRange, NESTED_SHARED_MESSAGE, positionLabel, positionsOf, reportedSteps, type SharedLookup } from '../../shared/expand'
 import type {
+  ApiErrorCode,
   AssistantEvent,
   AssistantSession,
   BatchRun,
@@ -349,7 +351,7 @@ function seed() {
   counters.set(p.id, { tc: 6, batch: 3, shared: 3 })
   counters.set('p_empty', { tc: 1, batch: 1, shared: 1 })
 
-  const tc1: TestCase = { id: 'tc_signin', projectId: p.id, kind: 'test', data: null, number: 1, name: 'Sign in with a valid account', description: 'Happy path: a registered customer signs in and lands on the catalog.', device: 'desktop', steps: [], createdAt: ago(5000), updatedAt: ago(40), lastRun: null }
+  const tc1: TestCase = { id: 'tc_signin', projectId: p.id, kind: 'test', data: null, number: 1, name: 'Sign in with a valid account', description: 'Happy path: a registered customer signs in and lands on the catalog.', device: 'desktop', steps: [], stepsRev: '', createdAt: ago(5000), updatedAt: ago(40), lastRun: null }
   const login = makeUi(tc1.id, PAGES[0], 'Sign in page')
   const catalog = makeUi(tc1.id, PAGES[1], 'Catalog after sign-in')
   uis.push(login, catalog)
@@ -365,7 +367,7 @@ function seed() {
     { id: 's9', command: 'comment', value: 'Cart checks live in test case #2', disabled: true },
   ]
   // A shared step with its own captured screen, called by two test cases; and one that nothing uses yet.
-  const sh1: TestCase = { id: 'sh_signin', projectId: p.id, kind: 'shared', data: null, number: 1, name: 'Sign in', description: 'Signs in as the customer in USER_EMAIL / USER_PASSWORD and lands on the catalog.', device: 'desktop', steps: [], createdAt: ago(4500), updatedAt: ago(400), lastRun: null }
+  const sh1: TestCase = { id: 'sh_signin', projectId: p.id, kind: 'shared', data: null, number: 1, name: 'Sign in', description: 'Signs in as the customer in USER_EMAIL / USER_PASSWORD and lands on the catalog.', device: 'desktop', steps: [], stepsRev: '', createdAt: ago(4500), updatedAt: ago(400), lastRun: null }
   const sharedLogin = makeUi(sh1.id, PAGES[0], 'Sign in page')
   uis.push(sharedLogin)
   sh1.steps = [
@@ -374,10 +376,10 @@ function seed() {
     { id: 'h3', command: 'input', value: '${USER_PASSWORD}', target: ref(sharedLogin, 4) },
     { id: 'h4', command: 'click', target: ref(sharedLogin, 7) },
   ]
-  const sh2: TestCase = { id: 'sh_signout', projectId: p.id, kind: 'shared', data: null, number: 2, name: 'Sign out', description: '', device: 'desktop', steps: [{ id: 'o1', command: 'click', target: ref(catalog, 3) }], createdAt: ago(900), updatedAt: ago(900), lastRun: null }
-  const tc2: TestCase = { id: 'tc_cart', projectId: p.id, kind: 'test', data: null, number: 2, name: 'Add a book to the cart', description: '', device: 'desktop', steps: [{ id: 'c1', command: 'shared_step', value: sh1.id }, { id: 'c2', command: 'click', target: ref(catalog, 8) }, { id: 'c3', command: 'assert_text_contains', value: 'Cart (1)', target: ref(catalog, 2) }], createdAt: ago(4000), updatedAt: ago(90), lastRun: null }
-  const tc3: TestCase = { id: 'tc_new', projectId: p.id, kind: 'test', data: null, number: 3, name: 'New test', description: '', device: 'desktop', steps: [], createdAt: ago(10), updatedAt: ago(10), lastRun: null }
-  const tc4: TestCase = { id: 'tc_search', projectId: p.id, kind: 'test', data: null, number: 4, name: 'Search the catalog', description: 'Signs in through the shared step, then searches.', device: 'desktop', steps: [{ id: 'q1', command: 'shared_step', value: sh1.id }, { id: 'q2', command: 'input', value: 'fog', target: ref(catalog, 1) }, { id: 'q3', command: 'press_key', value: 'Enter' }, { id: 'q4', command: 'assert_url_contains', value: '/demo/catalog' }], createdAt: ago(800), updatedAt: ago(70), lastRun: null }
+  const sh2: TestCase = { id: 'sh_signout', projectId: p.id, kind: 'shared', data: null, number: 2, name: 'Sign out', description: '', device: 'desktop', stepsRev: '', steps: [{ id: 'o1', command: 'click', target: ref(catalog, 3) }], createdAt: ago(900), updatedAt: ago(900), lastRun: null }
+  const tc2: TestCase = { id: 'tc_cart', projectId: p.id, kind: 'test', data: null, number: 2, name: 'Add a book to the cart', description: '', device: 'desktop', stepsRev: '', steps: [{ id: 'c1', command: 'shared_step', value: sh1.id }, { id: 'c2', command: 'click', target: ref(catalog, 8) }, { id: 'c3', command: 'assert_text_contains', value: 'Cart (1)', target: ref(catalog, 2) }], createdAt: ago(4000), updatedAt: ago(90), lastRun: null }
+  const tc3: TestCase = { id: 'tc_new', projectId: p.id, kind: 'test', data: null, number: 3, name: 'New test', description: '', device: 'desktop', steps: [], stepsRev: '', createdAt: ago(10), updatedAt: ago(10), lastRun: null }
+  const tc4: TestCase = { id: 'tc_search', projectId: p.id, kind: 'test', data: null, number: 4, name: 'Search the catalog', description: 'Signs in through the shared step, then searches.', device: 'desktop', stepsRev: '', steps: [{ id: 'q1', command: 'shared_step', value: sh1.id }, { id: 'q2', command: 'input', value: 'fog', target: ref(catalog, 1) }, { id: 'q3', command: 'press_key', value: 'Enter' }, { id: 'q4', command: 'assert_url_contains', value: '/demo/catalog' }], createdAt: ago(800), updatedAt: ago(70), lastRun: null }
   // A data-driven test case: the sign-in shared step with three accounts; the mock fails a step whose value contains "!fail".
   const tc5: TestCase = {
     id: 'tc_accounts',
@@ -387,6 +389,7 @@ function seed() {
     name: 'Sign in with several accounts',
     description: 'Runs once for every row of its data table.',
     device: 'desktop',
+    stepsRev: '',
     data: {
       columns: ['USER_EMAIL', 'USER_PASSWORD', 'GREETING'],
       rows: [
@@ -505,7 +508,7 @@ function simulateAssistant(session: AssistantSession, tc: TestCase) {
     },
     () => {
       turn(120)
-      ui = makeUi(tc.id, PAGES[0], `UI${uis.filter((u) => u.testCaseId === tc.id).length + 1}`)
+      ui = makeUi(tc.id, PAGES[0], nextUiName(uis.filter((u) => u.testCaseId === tc.id).map((u) => u.name)))
       uis.push(ui)
       say({ kind: 'tool', tool: 'capture_screen', text: `Captured screen of ${ui.url} (${ui.name}, ${ui.elements.length} elements)` })
     },
@@ -543,11 +546,14 @@ function simulateAssistant(session: AssistantSession, tc: TestCase) {
 
 class HttpError extends Error {
   status: number
-  constructor(status: number, message: string) {
+  code?: ApiErrorCode
+  constructor(status: number, message: string, code?: ApiErrorCode) {
     super(message)
     this.status = status
+    this.code = code
   }
 }
+const revisionOf = (tc: TestCase): string => stepsRevision(JSON.stringify(tc.steps))
 const need = <T,>(v: T | undefined, what: string): T => {
   if (v === undefined) throw new HttpError(404, `${what} not found`)
   return v
@@ -593,7 +599,7 @@ async function handle(method: string, path: string, body: Record<string, unknown
       return cases.filter((x) => x.projectId === b && x.kind === 'shared').sort((x, y) => x.number - y.number).map(withUsedBy)
     case 'POST projects/:/shared-steps': {
       const ctr = need(counters.get(b), 'Project')
-      const tc: TestCase = { id: id('sh'), projectId: b, kind: 'shared', data: null, number: ctr.shared++, name: String(body.name ?? 'New shared step'), description: String(body.description ?? ''), device: 'desktop', steps: [], createdAt: now(), updatedAt: now(), lastRun: null }
+      const tc: TestCase = { id: id('sh'), projectId: b, kind: 'shared', data: null, number: ctr.shared++, name: String(body.name ?? 'New shared step'), description: String(body.description ?? ''), device: 'desktop', steps: [], stepsRev: '', createdAt: now(), updatedAt: now(), lastRun: null }
       cases.push(tc)
       return withUsedBy(tc)
     }
@@ -608,7 +614,7 @@ async function handle(method: string, path: string, body: Record<string, unknown
       if (moved.some((s) => s.command === 'shared_step')) throw new HttpError(400, `The selection contains a shared step call. ${NESTED_SHARED_MESSAGE}.`)
       if (validateSteps(moved).length) throw new HttpError(400, 'The selection must contain whole If ... End branch blocks: a shared step cannot start or end in the middle of one')
       await sleep(300)
-      const shared: TestCase = { id: id('sh'), projectId: src.projectId, kind: 'shared', data: null, number: ctr.shared++, name: String(body.name ?? 'New shared step'), description: '', device: src.device, steps: [], createdAt: now(), updatedAt: now(), lastRun: null }
+      const shared: TestCase = { id: id('sh'), projectId: src.projectId, kind: 'shared', data: null, number: ctr.shared++, name: String(body.name ?? 'New shared step'), description: '', device: src.device, steps: [], stepsRev: '', createdAt: now(), updatedAt: now(), lastRun: null }
       // The shared step gets its own copies of the screens its steps point at.
       const copies = new Map<string, string>()
       for (const s of moved) {
@@ -626,7 +632,7 @@ async function handle(method: string, path: string, body: Record<string, unknown
     }
     case 'POST projects/:/test-cases': {
       const ctr = need(counters.get(b), 'Project')
-      const tc: TestCase = { id: id('tc'), projectId: b, kind: 'test', data: null, number: ctr.tc++, name: String(body.name ?? 'New test'), description: String(body.description ?? ''), device: 'desktop', steps: [], createdAt: now(), updatedAt: now(), lastRun: null }
+      const tc: TestCase = { id: id('tc'), projectId: b, kind: 'test', data: null, number: ctr.tc++, name: String(body.name ?? 'New test'), description: String(body.description ?? ''), device: 'desktop', steps: [], stepsRev: '', createdAt: now(), updatedAt: now(), lastRun: null }
       cases.push(tc)
       return tc
     }
@@ -656,13 +662,21 @@ async function handle(method: string, path: string, body: Record<string, unknown
       await sleep(250)
       const nested = tc.kind === 'shared' && Array.isArray(body.steps) ? (body.steps as Step[]).findIndex((s) => s.command === 'shared_step') : -1
       if (nested >= 0) throw new HttpError(400, `Step ${nested + 1}: ${NESTED_SHARED_MESSAGE}`)
+      // As the Worker: a save of the steps is refused while the assistant edits them, or when it was based on an older list.
+      if (Array.isArray(body.steps)) {
+        if (assistantSessions.some((x) => x.testCaseId === b && (x.status === 'queued' || x.status === 'running'))) throw new HttpError(409, 'The assistant is editing the steps of this test case. Wait for it to finish, or abort it, then try again.', 'assistant_busy')
+        if (typeof body.baseStepsRev === 'string' && body.baseStepsRev !== revisionOf(tc)) {
+          throw new HttpError(409, 'The steps were changed somewhere else in the meantime (another tab, an approved repair or the assistant). Reload them before editing, so that neither change is lost.', 'steps_changed')
+        }
+      }
+      const { baseStepsRev: _base, ...fields } = body
       if (body.data) {
         const table = body.data as DataTable
         if (tc.kind === 'shared') throw new HttpError(400, 'A shared step cannot have a data table: it uses the data of the test case that calls it')
         const problem = validateDataTable(table)[0]
         if (problem) throw new HttpError(400, `Data: ${describeDataProblem(table, problem)}`)
       }
-      Object.assign(tc, body, { updatedAt: now() })
+      Object.assign(tc, fields, { updatedAt: now() })
       return withUsedBy(tc)
     }
     case 'DELETE test-cases/:': {
@@ -688,16 +702,21 @@ async function handle(method: string, path: string, body: Record<string, unknown
       const upto = req.afterStepId ? tc.steps.findIndex((s) => s.id === req.afterStepId) : -1
       // The replay goes through shared step calls: a call counts with all of its steps.
       const expanded = expand(tc).steps
+      const broken = upto < 0 ? undefined : validateSteps(expanded, { from: 1, to: flatRange(expanded, { from: 1, to: upto + 1 }).to })[0]
+      if (broken) throw new HttpError(400, `Step ${positionLabel(positionsOf(expanded)[expanded.findIndex((s) => s.id === broken.stepId)])}: ${broken.message}. Fix the branch structure, then capture again.`)
       const replayed = (upto < 0 ? [] : expanded.slice(0, flatRange(expanded, { from: 1, to: upto + 1 }).to)).filter((s) => !s.disabled && !s.call)
-      const failed = replayed.find((s) => (s.value ?? '').includes('!fail'))
+      // An assertion set to continue on failure does not stop the replay; it is reported next to the capture.
+      const failing = replayed.filter((s) => (s.value ?? '').includes('!fail'))
+      const failed = failing.find((s) => !(COMMAND_BY_ID[s.command]?.assertion && s.continueOnFailure))
+      const tolerated = failing.slice(0, failed ? failing.indexOf(failed) : failing.length).map((s) => ({ stepId: s.origin?.callId ?? s.id, message: 'AssertionError: the value contained "!fail", which the mock treats as a failing step' }))
       // A failure inside a shared step is reported on the call, as the Worker does.
       const bad = failed && { id: failed.origin?.callId ?? failed.id }
       const clicks = replayed.filter((s) => s.command === 'click').length
       const page = /catalog/.test(req.url ?? '') || (clicks > 0 && !bad) ? PAGES[1] : PAGES[0]
-      const ui = makeUi(tc.id, page, `UI${uis.filter((u) => u.testCaseId === tc.id).length + 1}`)
+      const ui = makeUi(tc.id, page, nextUiName(uis.filter((u) => u.testCaseId === tc.id).map((u) => u.name)))
       if (req.url) ui.url = req.url
       uis.push(ui)
-      return { ui, ...(bad ? { replayError: { stepId: bad.id, message: 'TimeoutError: locator not found after 10 s (the mock fails any step whose value contains "!fail")' } } : {}) }
+      return { ui, ...(tolerated.length ? { tolerated } : {}), ...(bad ? { replayError: { stepId: bad.id, message: 'TimeoutError: locator not found after 10 s (the mock fails any step whose value contains "!fail")' } } : {}) }
     }
     case 'PATCH uis/:': {
       const ui = need(uis.find((u) => u.id === b), 'UI')
@@ -713,8 +732,13 @@ async function handle(method: string, path: string, body: Record<string, unknown
       const tc = need(cases.find((x) => x.id === b), 'Test case')
       const problem = expand(tc).problems[0]
       if (problem) throw new HttpError(400, `Step ${tc.steps.findIndex((s) => s.id === problem.stepId) + 1}: ${problem.message}`)
+      const range = (body.range as Run['range']) ?? null
+      const expanded = expand(tc).steps
+      const broken = validateSteps(expanded, range ? { from: 1, to: flatRange(expanded, range).to } : null)[0]
+      if (broken) throw new HttpError(400, `Step ${positionLabel(positionsOf(expanded)[expanded.findIndex((s) => s.id === broken.stepId)])}: ${broken.message}`)
+      if (range && reportedSteps(expanded, range).length === 0) throw new HttpError(400, range.from === range.to ? `Step ${range.from} is disabled, so there is nothing to run` : `Steps ${range.from}-${range.to} are all disabled, so there is nothing to run`)
       const run = makeRun(tc, 'queued', { minutesAgo: 0 })
-      run.range = (body.range as Run['range']) ?? null
+      run.range = range
       // A partial run of a data-driven test case uses one data row.
       if (run.range && run.patterns) run.patterns = patternsFor(tc, [Math.min(Number(body.row) || 1, run.patterns.length)])
       tc.lastRun = { id: run.id, status: 'queued', finishedAt: null }
@@ -818,10 +842,12 @@ export function installMock() {
     try {
       const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {}
       const data = await handle(method, url.pathname.slice(4), body)
+      // Test cases are answered from the objects in `cases`: each carries the revision of its steps as they are now.
+      for (const tc of cases) tc.stepsRev = revisionOf(tc)
       return new Response(JSON.stringify(structuredClone(data)), { status: 200, headers: { 'content-type': 'application/json' } })
     } catch (err) {
       const status = err instanceof HttpError ? err.status : 500
-      return new Response(JSON.stringify({ error: err instanceof Error ? err.message : 'Mock error' }), { status, headers: { 'content-type': 'application/json' } })
+      return new Response(JSON.stringify({ error: err instanceof Error ? err.message : 'Mock error', ...(err instanceof HttpError && err.code ? { code: err.code } : {}) }), { status, headers: { 'content-type': 'application/json' } })
     }
   }
   console.info('[stepwise] Using the in-browser mock API (VITE_MOCK).')
