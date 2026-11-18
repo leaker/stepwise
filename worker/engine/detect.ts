@@ -278,7 +278,7 @@ export function scanPage(args: ScanArgs): ScanResult {
     const last = s.split(/[-_]/).pop() || ''
     return last.length >= 6 && (last.match(/\d/g) || []).length >= 2 && /[a-z]/i.test(last)
   }
-  const STATE_CLASS = /^(active|selected|open|opened|closed|show|shown|hidden|hide|disabled|enabled|focus|focused|hover|current|checked|loading|visible|is-.*|has-.*)$/i
+  const STATE_CLASS = /^(active|selected|open|opened|closed|show|shown|hidden|hide|disabled|enabled|focus|focused|hover|current|checked|loading|visible|today|highlight|highlighted|pressed|expanded|collapsed|is-.*|has-.*|ui-state-.*|.*[-_](active|selected|current|today|hover|focus|focused|highlight|highlighted|checked|disabled|open|expanded|collapsed))$/i
   const stableClasses = (el: any): string[] => {
     const out: string[] = []
     const raw = typeof el.className === 'string' ? el.className : attr(el, 'class')

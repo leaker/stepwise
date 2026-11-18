@@ -363,3 +363,12 @@ describe('a test that never opens a page', () => {
     expect(r.results[0].heal).toBeUndefined()
   })
 })
+
+describe('a class that says what state an element is in', () => {
+  it('is not used as a locator: it moves to another element later', async () => {
+    await page.setContent(html('<table><tr><td><a class="ui-state-default" href="#">19</a></td><td><a class="ui-state-default ui-state-active day-selected" href="#">20</a></td></tr></table>'))
+    const target = ref(await capture(page, 'ui'), '"20" link')
+    const all = strings([target.locator, ...target.candidates]).join(' | ')
+    expect(all).not.toMatch(/ui-state-|day-selected/)
+  })
+})
