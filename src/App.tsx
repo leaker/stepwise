@@ -47,7 +47,9 @@ function GateOverlay({ children }: { children: ReactNode }) {
     const el = ref.current
     if (!el) return
     const open = () => {
-      if (el.isConnected && !el.open) el.showModal()
+      if (!el.isConnected || el.open) return
+      el.showModal()
+      el.querySelector<HTMLElement>('input')?.focus()
     }
     const onCancel = (e: Event) => e.preventDefault()
     // A second Escape in a row is not cancelable in every browser: the dialog is opened again.

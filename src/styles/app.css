@@ -18,6 +18,7 @@
 }
 /* The access form over a page that is already open (the session ended while it was in use). */
 .gate-over {
+  margin: auto;
   padding: 0;
   border: 0;
   background: transparent;
