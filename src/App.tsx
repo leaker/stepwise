@@ -87,12 +87,15 @@ function AccessGate({ children }: { children: ReactNode }) {
           placeholder="Access code"
           value={code}
           onChange={(e) => {
-            e.target.setCustomValidity('')
             setCode(e.target.value)
             // The rejected code is being changed: the server's verdict no longer describes the field.
             if (signIn.isError) signIn.reset()
           }}
-          onInput={(e) => syncInvalid(e.currentTarget)}
+          // React runs onInput before onChange: the "only spaces" message is withdrawn here, before the state is read.
+          onInput={(e) => {
+            e.currentTarget.setCustomValidity('')
+            syncInvalid(e.currentTarget)
+          }}
           onBlur={(e) => syncInvalid(e.currentTarget)}
           onInvalid={(e) => syncInvalid(e.currentTarget)}
           aria-invalid={signIn.isError || userInvalid}

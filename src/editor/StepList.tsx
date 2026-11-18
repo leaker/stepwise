@@ -75,7 +75,17 @@ export function StepList(p: StepListProps) {
 
   // Announced to screen readers, which do not see a row change places.
   const [moved, setMoved] = useState('')
+  // A row that changes places is taken out of the document and put back, which drops focus to the page. When
+  // the move came from the row's menu button, focus goes back to that button in the row's new place.
+  const refocusMenu = useRef<string | null>(null)
+  useEffect(() => {
+    const id = refocusMenu.current
+    if (!id) return
+    refocusMenu.current = null
+    listRef.current?.querySelector<HTMLElement>(`[data-step="${id}"] .step-more`)?.focus()
+  }, [p.steps])
   const move = (step: Step, toIndex: number) => {
+    if (menu && 'el' in menu.anchor) refocusMenu.current = step.id
     p.onMove(step.id, toIndex)
     const at = toIndex > p.steps.indexOf(step) ? toIndex : toIndex + 1
     setMoved(`Step moved to position ${at} of ${p.steps.length}.`)

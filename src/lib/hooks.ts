@@ -25,6 +25,19 @@ export function isComposing(e: KeyboardEvent | { nativeEvent: KeyboardEvent }): 
  * the inert page, focus containment, Escape / back-gesture dismissal and the return of focus; `onClose` is
  * called for every way of dismissing it, and the owner unmounts the dialog in response.
  */
+// Safari on macOS does not focus a button that is clicked, so a dialog opened with the mouse has no invoker to
+// hand focus back to and it lands on <body>. The last control pressed is remembered for that case.
+let lastPressed: HTMLElement | null = null
+if (typeof document !== 'undefined') {
+  document.addEventListener(
+    'pointerdown',
+    (e) => {
+      lastPressed = e.target instanceof Element ? e.target.closest<HTMLElement>('button, a[href], [tabindex]') : null
+    },
+    true,
+  )
+}
+
 export function useModalDialog(onClose: () => void, initialFocus?: (el: HTMLDialogElement) => HTMLElement | null | undefined) {
   const ref = useRef<HTMLDialogElement>(null)
   const closeRef = useRef(onClose)
@@ -35,6 +48,8 @@ export function useModalDialog(onClose: () => void, initialFocus?: (el: HTMLDial
   useLayoutEffect(() => {
     const el = ref.current
     if (!el) return
+    const active = document.activeElement
+    const invoker = active instanceof HTMLElement && active !== document.body ? active : lastPressed
     if (!el.open) el.showModal()
     focusRef.current?.(el)?.focus()
 
@@ -68,6 +83,9 @@ export function useModalDialog(onClose: () => void, initialFocus?: (el: HTMLDial
       el.removeEventListener('pointerup', onUp)
       // Closing before React removes the node is what hands focus back to the invoker.
       if (el.open) el.close()
+      // WebKit can also leave focus on a control of the closed dialog, which is about to be removed.
+      const now = document.activeElement
+      if (invoker?.isConnected && (now === document.body || el.contains(now))) invoker.focus()
     }
   }, [])
   return ref

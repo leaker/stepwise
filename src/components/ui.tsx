@@ -636,15 +636,29 @@ export function InlineEdit({
   label: string
 }) {
   const [draft, setDraft] = useState<string | null>(null)
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  // Set when a key ended the edit: focus then returns to the button instead of being lost with the field.
+  // Leaving the field with the pointer or Tab also ends the edit, and focus stays where the user put it.
+  const refocus = useRef(false)
+  useEffect(() => {
+    if (draft != null || !refocus.current) return
+    refocus.current = false
+    buttonRef.current?.focus()
+  }, [draft])
   const commit = () => {
     if (draft == null) return
     const v = draft.trim()
     setDraft(null)
     if (v !== value && (v || multiline)) onSave(v)
   }
+  const endByKey = (save: boolean) => {
+    refocus.current = true
+    if (save) commit()
+    else setDraft(null)
+  }
   if (draft == null) {
     return (
-      <button type="button" className={cx('inline-edit', !value && 'is-empty', className)} onClick={() => setDraft(value)} title={`Edit ${label}`}>
+      <button ref={buttonRef} type="button" className={cx('inline-edit', !value && 'is-empty', className)} onClick={() => setDraft(value)} title={`Edit ${label}`}>
         {value || placeholder}
       </button>
     )
@@ -664,8 +678,8 @@ export function InlineEdit({
       onChange={(e) => setDraft(e.target.value)}
       onKeyDown={(e) => {
         if (isComposing(e)) return
-        if (e.key === 'Escape') setDraft(null)
-        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) commit()
+        if (e.key === 'Escape') endByKey(false)
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) endByKey(true)
       }}
     />
   ) : (
@@ -676,10 +690,10 @@ export function InlineEdit({
       onKeyDown={(e) => {
         // Enter and Escape that confirm or cancel an input method's conversion belong to the input method.
         if (isComposing(e)) return
-        if (e.key === 'Escape') setDraft(null)
+        if (e.key === 'Escape') endByKey(false)
         if (e.key === 'Enter') {
           e.preventDefault()
-          commit()
+          endByKey(true)
         }
       }}
     />

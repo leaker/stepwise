@@ -499,6 +499,46 @@ navigation uses it as an enhancement over a script fallback); the light and dark
 compact pixel heights for a mouse (the 44px minimum applies to touch screens); and `title` attributes remain
 as hover hints on controls that already have an accessible name.
 
+### Cross-browser verification
+
+The app and the sample site were exercised with the browser builds of Playwright 1.65.1, headless on macOS:
+Chromium 159.0.8154.6, WebKit 27.2 (the stand-in for Safari) and Firefox 159.0, against both the production
+build served by the local Worker and the in-browser mock API. Real Safari, iOS and platforms with classic
+(non-overlay) scrollbars were not tested. What differs per engine, and what the code does about it:
+
+- **Scrolling under a modal dialog.** `overscroll-behavior: contain` on the dialog and its backdrop keeps
+  the page still in Chromium only; WebKit and Firefox pass the wheel on to the document. The document
+  therefore does not scroll while a modal dialog is open (`html:has(dialog:modal)`), with the scrollbar
+  gutter of the scrolling pages reserved so they do not shift. The page keeps its position in all three.
+- **Focus ring of a checkbox.** WebKit paints no box shadow on a native checkbox or radio button, so their
+  ring is an outline, in every engine.
+- **Date field (sample site).** In WebKit the segments inside the field take focus: the field never matches
+  `:focus-visible` and `focus()` does not scroll it into view. The field gets the ring of the other fields
+  through `:focus-within`, and a failed submit scrolls the message and the field into view itself.
+- **`form.elements` by name (sample site).** Firefox drops a control from the named lookup once an id equal
+  to its name is changed, which stopped the redesigned reservation form (`?ui=v2`) from working there. The
+  controls are now looked up once with `querySelector`.
+- **Leaving while a route is still loading.** Firefox and WebKit fail a dynamic import that a navigation
+  interrupts, Chromium does not; the reload for a file that is gone after a deployment used to cancel that
+  navigation. It is skipped while the page is leaving, and still happens when the file is really missing.
+- **Focus after a dialog opened with the mouse.** Safari on macOS does not focus a button that is clicked,
+  so a dialog had no invoker to hand focus back to. The control last pressed is remembered and focused when
+  focus would otherwise end on `<body>`; the sample site's phone menu does the same.
+- **Text fields on a touch screen.** iOS zooms the page when a field with text under 16px takes focus, so
+  fields are at least 16px where the pointer is coarse (set from the media query; not tried on a device).
+- **`flex-wrap: balance`.** Chromium only. The eight command categories wrap 4 + 4 there and 7 + 1 in WebKit
+  and Firefox; this is the plain `wrap` fallback and is left as it is.
+- **Console only.** WebKit logs a warning that the page is not cross-origin isolated on a full-page
+  navigation (the `Cross-Origin-Opener-Policy` value is intended; nothing needs isolation). Behind the Vite
+  development and preview servers, which add `Vary: Origin`, WebKit downloads the two preloaded fonts twice;
+  with that header removed by a proxy it downloads them once. The deployed site's headers were not checked.
+
+The same pass fixed seven things that behaved alike in all three engines: a click on the description while the name was being edited was lost, because the name's field took the whole line and moved what was below it; the lightbox let the page header show through its bar; on a phone the *Copy* button covered the first line of the CI command and variable names were cut; keyboard focus was lost after
+*Move up* / *Move down* and after an inline rename confirmed with Enter or Escape; the "needs review" banner
+squeezed its text into a narrow column on a phone; the access code field stayed marked invalid for one
+keystroke after the "only spaces" message; and the sample site's *My stays* link was not marked as the
+current page when the address had no `.html`.
+
 ## Limits and non-goals
 
 - Speculation rules are refused inside the test browser: on Cloudflare Browser Run a mouse-down prefetch tears the browser session down. Rules sent as an HTTP header (for example by Cloudflare Speed Brain) are not loaded, and inline `<script type="speculationrules">` blocks (WordPress emits one by default) are taken out of the document as they appear. Pages behave the same, but prefetch/prerender behaviour itself cannot be tested.
