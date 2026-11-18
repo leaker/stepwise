@@ -26,11 +26,23 @@ const FROM = 'Stepwise (automatic check, not the user):'
  * The language a request is written in, where its script tells: the summary has to be in it, and a model
  * that has read pages and tool results in English for a whole session tends to answer in English.
  */
-export function requestLanguage(request: string): { name: string; script: RegExp } | null {
-  if (/[\u3040-\u30ff]/.test(request)) return { name: 'Japanese', script: /[\u3040-\u30ff]/ }
-  if (/[\uac00-\ud7af]/.test(request)) return { name: 'Korean', script: /[\uac00-\ud7af]/ }
-  if (/[\u3400-\u9fff]/.test(request)) return { name: 'Chinese', script: /[\u3400-\u9fff]/ }
+const count = (text: string, re: RegExp) => (text.match(re) ?? []).length
+/** The language a text is written in, when its script tells: Chinese, Japanese or Korean. */
+function languageOf(text: string): string | null {
+  const han = count(text, /[\u3400-\u9fff]/g)
+  const hiragana = count(text, /[\u3040-\u309f]/g)
+  const katakana = count(text, /[\u30a0-\u30ff]/g)
+  const hangul = count(text, /[\uac00-\ud7af]/g)
+  if (hangul > 0 && hangul >= han) return 'Korean'
+  // Japanese prose is held together by hiragana. A Chinese sentence that quotes a Japanese name or a text of
+  // a Japanese site has a few kana among many ideographs, and is still Chinese.
+  if (hiragana + katakana > 0 && (han === 0 || hiragana / (han + hiragana + katakana) >= 0.15)) return 'Japanese'
+  if (han > 0) return 'Chinese'
   return null
+}
+export function requestLanguage(request: string): { name: string; script: { test(text: string): boolean } } | null {
+  const name = languageOf(request)
+  return name ? { name, script: { test: (text) => languageOf(text) === name } } : null
 }
 const QUESTION = /[?？]\s*$/
 

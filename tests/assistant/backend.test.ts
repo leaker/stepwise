@@ -864,6 +864,16 @@ describe('the language of the summary', () => {
   })
 })
 
+describe('a Chinese request that quotes Japanese texts of the site', () => {
+  const request = '打开预订页面，姓名填 テスト太郎，确认方式选「希望しない」，提交后断言确认页上显示了 テスト太郎。'
+  it('is still a Chinese request, and a Japanese summary is sent back once', async () => {
+    expect(firstMessage({ testCaseName: 'x', device: DEVICES.desktop, baseUrl: '', variableNames: [], steps: [] }, request)).toContain('Language of the request: Chinese.')
+    const { tools } = await toolsFor({ captures: true, request })
+    expect(await tools.finish!('テストを作成し、全9ステップを実行して合格しました。')).toMatchObject({ ok: false, event: 'The summary was not written in Chinese, the language of the request' })
+    expect(await tools.finish!('测试已建好并通过，姓名填的是 テスト太郎，确认方式选了「希望しない」。')).toEqual({ ok: true })
+  })
+})
+
 describe('an element passed to a command that takes none', () => {
   it('is ignored, and the answer says so', async () => {
     const { tools, values } = await toolsFor({ captures: true })
