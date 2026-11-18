@@ -25,6 +25,9 @@
     // below the account's concurrent browser limit so a capture can still get a session.
     "consumers": [{ "queue": "stepwise-runs", "max_batch_size": 1, "max_retries": 3, "max_concurrency": 2 }]
   },
+  // Counts wrong access codes per client address (worker/auth.ts): after 10 in a minute the address is not
+  // listened to for a minute. namespace_id is any number that no other limiter of the account uses.
+  "ratelimits": [{ "name": "ACCESS_LIMITER", "namespace_id": "4101", "simple": { "limit": 10, "period": 60 } }],
   "vars": {
     // The Claude model the AI assistant asks: claude-haiku-5-5, claude-sonnet-5-5 or claude-opus-5-5
     // (worker/assistant/models.ts). Haiku is the cheapest one that passed every run of the benchmark

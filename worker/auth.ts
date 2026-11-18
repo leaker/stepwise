@@ -26,18 +26,73 @@ async function safeEqual(a: string, b: string): Promise<boolean> {
   return diff === 0
 }
 
-async function isAuthorized(c: Context<{ Bindings: Env }>): Promise<boolean> {
-  const code = c.env.ACCESS_CODE
-  if (!code) return true
+const bearerOf = (c: Context<{ Bindings: Env }>): string | null => {
   const header = c.req.header('Authorization')
-  if (header?.startsWith('Bearer ') && (await safeEqual(header.slice(7).trim(), code))) return true
+  return header?.startsWith('Bearer ') ? header.slice(7).trim() : null
+}
+
+async function hasSessionCookie(c: Context<{ Bindings: Env }>, code: string): Promise<boolean> {
   const cookie = isSecure(c) ? getCookie(c, COOKIE, 'host') : getCookie(c, COOKIE)
   return !!cookie && (await safeEqual(cookie, toHex(await sha256(code))))
 }
 
+async function isAuthorized(c: Context<{ Bindings: Env }>): Promise<boolean> {
+  const code = c.env.ACCESS_CODE
+  if (!code) return true
+  const bearer = bearerOf(c)
+  if (bearer !== null && !isLockedOut(c) && (await safeEqual(bearer, code))) return true
+  return hasSessionCookie(c, code)
+}
+
+// ---- guessing the access code ----
+// With the ACCESS_LIMITER rate limiting binding, wrong codes are counted per client address. An address
+// that went over the limit is not listened to for a minute: its codes are refused without being compared,
+// so guessing faster gains nothing. Only wrong codes count, and requests with a valid session cookie are
+// never affected. The binding counts per Cloudflare location and this memory is per Worker instance, so
+// this slows guessing down to a crawl; what makes a code safe is still its length.
+
+const LOCKOUT_MS = 60_000
+const TOO_MANY = 'Too many wrong access codes from this address. Wait a minute and try again.'
+const lockedUntil = new Map<string, number>()
+const clientKey = (c: Context<{ Bindings: Env }>): string => c.req.header('cf-connecting-ip') ?? 'unknown'
+
+function isLockedOut(c: Context<{ Bindings: Env }>): boolean {
+  if (!c.env.ACCESS_LIMITER) return false
+  const key = clientKey(c)
+  const until = lockedUntil.get(key)
+  if (until === undefined) return false
+  if (until > Date.now()) return true
+  lockedUntil.delete(key)
+  return false
+}
+
+/** Count a wrong code. True when this address is now over the limit. */
+async function countWrongCode(c: Context<{ Bindings: Env }>): Promise<boolean> {
+  const limiter = c.env.ACCESS_LIMITER
+  if (!limiter) return false
+  const key = clientKey(c)
+  // A limiter that cannot answer must not lock anybody out.
+  const { success } = await limiter.limit({ key }).catch(() => ({ success: true }))
+  if (success) return false
+  if (lockedUntil.size > 10_000) lockedUntil.clear()
+  lockedUntil.set(key, Date.now() + LOCKOUT_MS)
+  return true
+}
+
+const tooMany = (c: Context<{ Bindings: Env }>): Response => c.json({ error: TOO_MANY }, 429, { 'Retry-After': '60' })
+
 export const accessGate: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
   if (c.req.path === '/api/session') return next()
-  if (await isAuthorized(c)) return next()
+  const code = c.env.ACCESS_CODE
+  if (!code) return next()
+  const bearer = bearerOf(c)
+  if (bearer !== null) {
+    if (isLockedOut(c)) return (await hasSessionCookie(c, code)) ? next() : tooMany(c)
+    if (await safeEqual(bearer, code)) return next()
+    if (await hasSessionCookie(c, code)) return next()
+    return (await countWrongCode(c)) ? tooMany(c) : c.json({ error: 'Access code required' }, 401)
+  }
+  if (await hasSessionCookie(c, code)) return next()
   return c.json({ error: 'Access code required' }, 401)
 }
 
@@ -50,7 +105,8 @@ export async function postSession(c: Context<{ Bindings: Env }>): Promise<Respon
   if (!code) return c.json({ ok: true })
   const body: unknown = await c.req.json().catch(() => null)
   const given = body && typeof body === 'object' && typeof (body as { code?: unknown }).code === 'string' ? (body as { code: string }).code : ''
-  if (!given || !(await safeEqual(given, code))) return c.json({ error: 'Wrong access code' }, 401)
+  if (isLockedOut(c)) return tooMany(c)
+  if (!given || !(await safeEqual(given, code))) return (await countWrongCode(c)) ? tooMany(c) : c.json({ error: 'Wrong access code' }, 401)
   const secure = isSecure(c)
   setCookie(c, COOKIE, toHex(await sha256(code)), {
     ...(secure ? { prefix: 'host' as const } : {}),
