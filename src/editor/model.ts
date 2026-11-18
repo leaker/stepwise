@@ -1,4 +1,4 @@
-import { COMMAND_BY_ID, COMMANDS, SWIPE_DIRECTIONS, validateSteps, type CommandDef } from '../../shared/commands'
+import { COMMAND_BY_ID, COMMANDS, MAX_WAIT_SECONDS, SWIPE_DIRECTIONS, validateSteps, type CommandDef } from '../../shared/commands'
 import { callProblems, type SharedLookup, type SharedSource } from '../../shared/expand'
 import type { CommandId, ElementRef, Locator, Step, TestCase, Ui, UiElement } from '../../shared/types'
 import { uid } from '../lib/format'
@@ -118,13 +118,19 @@ function parameterError(s: Step): string | null {
     if (!value.trim()) return s.command === 'wait_seconds' ? 'Enter the number of seconds to wait.' : null
     const n = Number(value)
     if (!Number.isFinite(n) || n < 0) return `“${value}” is not a number of seconds.`
+    if (n > MAX_WAIT_SECONDS) return `A step can wait ${MAX_WAIT_SECONDS} seconds at most.`
   }
   return null
 }
 
-/** Errors that block a run: branch structure, element commands without an element, unusable parameters. */
-export function stepErrors(steps: Step[], shared?: SharedContext): Map<string, string> {
+/**
+ * Errors that block a run: branch structure, element commands without an element, unusable parameters.
+ * `upTo`: only what stops a partial run that ends at this step (1-based): the steps after it are not looked
+ * at, and a branch that is still open there is fine.
+ */
+export function stepErrors(all: Step[], shared?: SharedContext, upTo?: number): Map<string, string> {
   const map = new Map<string, string>()
+  const steps = upTo === undefined ? all : all.slice(0, upTo)
   if (shared && (shared.lookup || shared.nested)) {
     for (const p of callProblems(steps, shared.lookup ?? (() => undefined), shared.projectId, shared.nested)) map.set(p.stepId, `${p.message}.`)
   }
@@ -136,7 +142,7 @@ export function stepErrors(steps: Step[], shared?: SharedContext): Map<string, s
       if (problem) map.set(s.id, problem)
     }
   }
-  for (const e of validateSteps(steps)) if (!map.has(e.stepId)) map.set(e.stepId, e.message)
+  for (const e of validateSteps(steps, upTo === undefined ? null : { from: 1, to: steps.length })) if (!map.has(e.stepId)) map.set(e.stepId, e.message)
   return map
 }
 

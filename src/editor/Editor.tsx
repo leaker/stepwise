@@ -8,7 +8,7 @@ import { hasPatterns } from '../../shared/data'
 import { DEVICE_IDS, DEVICES, deviceOf } from '../../shared/devices'
 import { positionLabel, reportedSteps } from '../../shared/expand'
 import type { AssistantSession, CommandId, DeviceId, Step, StepResult, TestCase, Ui, UiElement } from '../../shared/types'
-import { api, qk } from '../api'
+import { api, ApiError, qk } from '../api'
 import { DataGrid, useDataDraft } from '../components/DataGrid'
 import { Button, Confirm, DeviceIcon, Dialog, ErrorState, Field, IconButton, Loading, MenuButton, Spinner, StatusIcon, toast, toastError } from '../components/ui'
 import { cx, isTerminal, plural, STATUS_LABEL, uid } from '../lib/format'
@@ -37,7 +37,9 @@ function EditorInner({ tid }: { tid: string }) {
   const uis = useMemo(() => uisQuery.data ?? [], [uisQuery.data])
   // A shared step is edited here like a test case; it cannot call other shared steps, so it does not load them.
   const isShared = tc.data?.kind === 'shared'
-  const sharedQuery = useQuery({ queryKey: qk.sharedSteps(pid ?? ''), queryFn: () => api.sharedSteps(pid!), enabled: !!pid && !isShared })
+  // Asked for again whenever the editor opens or the window gets the focus back: a call row shows the shared step's
+  // steps and its problems, and those are edited on another page (or in another tab).
+  const sharedQuery = useQuery({ queryKey: qk.sharedSteps(pid ?? ''), queryFn: () => api.sharedSteps(pid!), enabled: !!pid && !isShared, staleTime: 0, refetchOnMount: 'always', refetchOnWindowFocus: true })
   const shared = useMemo(() => sharedLookup(sharedQuery.data), [sharedQuery.data])
 
   // ----- steps, history, autosave -----
@@ -49,13 +51,33 @@ function EditorInner({ tid }: { tid: string }) {
   const save = useRef<{ dirty: boolean; timer: number; inflight: Promise<boolean> | null }>({ dirty: false, timer: 0, inflight: null })
   // While the assistant edits the steps on the server, the editor only follows: nothing here may change or save them.
   const lockedRef = useRef(false)
+  // The revision of the steps on the server that the steps on screen are based on. Every save says so, and the
+  // server refuses one that is based on an older list than it has.
+  const revRef = useRef<string | undefined>(undefined)
+  // The steps were changed somewhere else (another tab, an approved repair) since this editor loaded them.
+  // Editing stops until the saved steps are loaded: saving would undo that other change.
+  const [conflict, setConflict] = useState(false)
 
   useEffect(() => {
     if (ready || !tc.data || !tc.isFetchedAfterMount) return
     stepsRef.current = tc.data.steps
+    revRef.current = tc.data.stepsRev
     setSteps(tc.data.steps)
     setReady(true)
   }, [ready, tc.data, tc.isFetchedAfterMount])
+
+  /** Put the steps the server has on screen as the new starting point: nothing here is unsaved after this. */
+  const adopt = useCallback((saved: TestCase) => {
+    const s = save.current
+    window.clearTimeout(s.timer)
+    s.dirty = false
+    revRef.current = saved.stepsRev
+    if (JSON.stringify(saved.steps) !== JSON.stringify(stepsRef.current)) {
+      stepsRef.current = saved.steps
+      setSteps(saved.steps)
+    }
+    setSaveState('saved')
+  }, [])
 
   const flush = useCallback(async (): Promise<boolean> => {
     const s = save.current
@@ -71,14 +93,26 @@ function EditorInner({ tid }: { tid: string }) {
       s.dirty = false
       setSaveState('saving')
       const snapshot = stepsRef.current
-      s.inflight = api.updateTestCase(tid, { steps: snapshot }).then(
+      s.inflight = api.updateTestCase(tid, { steps: snapshot, baseStepsRev: revRef.current }).then(
         (next) => {
+          revRef.current = next.stepsRev
           qc.setQueryData(qk.testCase(tid), next)
+          // The test cases that call this shared step show its steps and check them: they must not go on using the old ones.
+          if (next.kind === 'shared') void qc.invalidateQueries({ queryKey: qk.sharedSteps(next.projectId) })
           return true
         },
         (err) => {
-          s.dirty = true
-          toastError(err)
+          const code = err instanceof ApiError ? err.code : undefined
+          if (code === 'steps_changed') {
+            // Trying again cannot work, and must not: the banner offers to load the saved steps.
+            setConflict(true)
+          } else {
+            s.dirty = true
+            // The assistant was started on this test case somewhere else: finding its session locks the editor
+            // and loads its steps when it is done.
+            if (code === 'assistant_busy') void qc.invalidateQueries({ queryKey: qk.assistant(tid) })
+            toastError(err)
+          }
           return false
         },
       )
@@ -375,6 +409,13 @@ function EditorInner({ tid }: { tid: string }) {
     void qc.invalidateQueries({ queryKey: qk.testCase(tid), refetchType: 'none' })
     const failed = finished.results.find((r) => r.status === 'failed' && r.pattern === shownPattern)
     if (failed) setSelectedId(ownerOf(failed.stepId))
+    // A partial run that executed none of its steps "succeeded" without checking anything: say so, and why.
+    if (finished.range && finished.status === 'succeeded' && finished.results.length === 0) {
+      const { from, to } = finished.range
+      const why = /^\[[\d.]+\] skipped: (.*)$/m.exec(finished.log)?.[1]
+      const row = finished.patterns?.length === 1 ? ` (data row ${finished.patterns[0].index})` : ''
+      toast(`${from === to ? `Step ${from} was` : `Steps ${from}–${to} were`} not executed${row}${why ? `: ${why}` : ''}. Nothing was checked.`, 'error')
+    }
   }, [finished?.id, finished?.status]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ----- assistant -----
@@ -394,23 +435,31 @@ function EditorInner({ tid }: { tid: string }) {
     }
   }
   const assistantStatus = useQuery({ queryKey: qk.assistantStatus, queryFn: api.assistantStatus, staleTime: 60_000 })
+  // The session whose edits the editor is following; it stays set until the final state has been loaded.
+  const [following, setFollowing] = useState<string | null>(null)
+  const followingRef = useRef<string | null>(null)
+  followingRef.current = following
   const sessionsQuery = useQuery({
     queryKey: qk.assistant(tid),
     queryFn: () => api.assistantSessions(tid),
     enabled: assistantStatus.data?.enabled === true,
     staleTime: 0,
     // A list that could not be loaded is asked for again: "no sessions" must be something the server said.
-    refetchInterval: (q) => (q.state.status === 'error' ? 5000 : q.state.data?.some(isActiveSession) ? 1500 : false),
+    // So is one that does not have the session being followed (an answer that was on its way before the
+    // session was created): without it the editor would stay locked with nothing to wait for.
+    refetchInterval: (q) =>
+      q.state.status === 'error' ? 5000 : q.state.data?.some(isActiveSession) || (followingRef.current && !q.state.data?.some((s) => s.id === followingRef.current)) ? 1500 : false,
   })
   const sessions = useMemo(() => sessionsQuery.data ?? [], [sessionsQuery.data])
   const activeSession = sessions.find(isActiveSession)
-  // The session whose edits the editor is following; it stays set until the final state has been loaded.
-  const [following, setFollowing] = useState<string | null>(null)
   const beforeAssistant = useRef<Step[] | null>(null)
   const ask = useMutation({
     mutationFn: async (message: string) => {
+      if (lockedRef.current && !followingRef.current) throw new Error('The steps were changed somewhere else. Load the saved steps first.')
       if (!(await flush())) throw new Error('The steps could not be saved, so the assistant was not started.')
       const before = stepsRef.current
+      // A list request that is under way was answered before the session exists; it must not replace the list that has it.
+      await qc.cancelQueries({ queryKey: qk.assistant(tid) })
       const session = await api.askAssistant(tid, message)
       beforeAssistant.current = before
       return session
@@ -419,7 +468,11 @@ function EditorInner({ tid }: { tid: string }) {
       qc.setQueryData<AssistantSession[]>(qk.assistant(tid), (old) => [...(old ?? []).filter((s) => s.id !== session.id), session])
       setFollowing(session.id)
     },
-    onError: toastError,
+    onError: (err) => {
+      // A session this tab does not know of is running (started in another tab): show it and follow it.
+      if (err instanceof ApiError && err.status === 409) void qc.invalidateQueries({ queryKey: qk.assistant(tid) })
+      toastError(err)
+    },
   })
   const abortAssistant = useMutation({
     mutationFn: (sid: string) => api.abortAssistant(sid),
@@ -429,8 +482,29 @@ function EditorInner({ tid }: { tid: string }) {
   useEffect(() => {
     if (activeSession) setFollowing(activeSession.id)
   }, [activeSession?.id]) // eslint-disable-line react-hooks/exhaustive-deps
-  const locked = ask.isPending || !!activeSession || !!following
+  const assisting = ask.isPending || !!activeSession || !!following
+  const locked = assisting || conflict
   lockedRef.current = locked
+  const reload = useMutation({
+    mutationFn: () => Promise.all([api.testCase(tid), api.uis(tid)]),
+    onSuccess: ([saved, savedUis]) => {
+      // What was on screen stays one undo away: undoing puts it back as a new edit on top of the saved steps.
+      const mine = stepsRef.current
+      qc.setQueryData(qk.testCase(tid), saved)
+      qc.setQueryData(qk.uis(tid), savedUis)
+      adopt(saved)
+      if (JSON.stringify(mine) !== JSON.stringify(saved.steps)) {
+        const h = hist.current
+        h.undo.push(mine)
+        h.redo = []
+        h.key = null
+      }
+      setPickForId(null)
+      setConflict(false)
+      toast('Loaded the saved steps. Undo brings back what was on screen here.')
+    },
+    onError: toastError,
+  })
 
   // Whenever the followed session reports something new, load the steps and screens it left on the server.
   const followed = sessions.find((s) => s.id === following)
@@ -454,10 +528,9 @@ function EditorInner({ tid }: { tid: string }) {
         const hadUis = qc.getQueryData<Ui[]>(qk.uis(tid))?.length ?? 0
         qc.setQueryData(qk.testCase(tid), nextCase)
         qc.setQueryData(qk.uis(tid), nextUis)
-        if (JSON.stringify(nextCase.steps) !== JSON.stringify(stepsRef.current)) {
-          stepsRef.current = nextCase.steps
-          setSteps(nextCase.steps)
-        }
+        // The assistant owns the steps now: an edit made here that could not be saved (the session was started
+        // in another tab) is dropped with them, and must not be saved over its work afterwards.
+        adopt(nextCase)
         // Selecting a row scrolls it into view: follow the newest step and the newest screen.
         if (added.length) setSelectedId(added[added.length - 1].id)
         if (nextUis.length > hadUis) setCurrentUiId(nextUis[nextUis.length - 1].id)
@@ -490,15 +563,22 @@ function EditorInner({ tid }: { tid: string }) {
   }, [following, followedState, syncRetry]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const enabledCount = steps.filter((s) => !s.disabled).length
-  const blocked = locked ? 'The assistant is editing the steps. Wait for it to finish, or abort it.' : errors.size > 0 ? 'Fix the highlighted steps before running.' : enabledCount === 0 ? 'Add a step before running.' : null
+  const CONFLICT_NOTE = 'The steps were changed somewhere else. Load the saved steps first.'
+  const unavailable = conflict ? CONFLICT_NOTE : assisting ? 'The assistant is editing the steps. Wait for it to finish, or abort it.' : enabledCount === 0 ? 'Add a step before running.' : null
+  const blocked = unavailable ?? (errors.size > 0 ? 'Fix the highlighted steps before running.' : null)
   const startRun = (range: { from: number; to: number } | null) => {
     if (running) return
-    if (blocked) {
-      toast(blocked, 'error')
-      const first = steps.find((s) => errors.has(s.id))
+    // A partial run executes the steps up to its last one: what is wrong further down (a branch that is still
+    // being built, a step without an element) does not stop it, as it does not stop the engine.
+    const problems = range ? stepErrors(steps, { lookup: sharedQuery.data ? shared : undefined, projectId: pid ?? '', nested: isShared }, range.to) : errors
+    const reason = unavailable ?? (problems.size > 0 ? (range ? `Fix the highlighted steps up to step ${range.to} before running them.` : 'Fix the highlighted steps before running.') : null)
+    if (reason) {
+      toast(reason, 'error')
+      const first = steps.find((s) => problems.has(s.id))
       if (first) setSelectedId(first.id)
       return
     }
+    if (range && steps.slice(range.from - 1, range.to).every((s) => s.disabled)) return toast(range.from === range.to ? `Step ${range.from} is disabled, so there is nothing to run.` : `Steps ${range.from}–${range.to} are all disabled, so there is nothing to run.`, 'error')
     start.mutate(range)
   }
 
@@ -539,7 +619,10 @@ function EditorInner({ tid }: { tid: string }) {
         setReplayError({ uiId: res.ui.id, stepId: res.replayError.stepId, message: res.replayError.message })
       } else {
         setReplayError(null)
-        toast(`Captured “${res.ui.name}” with ${res.ui.elements.length} elements`)
+        // Assertions set to continue on failure did not stop the replay: the capture is of the page asked for.
+        const numbers = [...new Set((res.tolerated ?? []).map((f) => stepsRef.current.findIndex((s) => s.id === f.stepId) + 1).filter((n) => n > 0))]
+        const passing = numbers.length ? ` On the way, the assertion${numbers.length === 1 ? '' : 's'} at step${numbers.length === 1 ? '' : 's'} ${numbers.join(', ')} failed and the replay continued.` : ''
+        toast(`Captured “${res.ui.name}” with ${res.ui.elements.length} elements.${passing}`)
       }
     },
   })
@@ -566,6 +649,7 @@ function EditorInner({ tid }: { tid: string }) {
     },
     onSuccess: ({ before, testCase, shared: created }) => {
       qc.setQueryData(qk.testCase(tid), testCase)
+      revRef.current = testCase.stepsRev
       void qc.invalidateQueries({ queryKey: qk.sharedSteps(testCase.projectId) })
       // One undo step puts the steps back in the test case; the shared step stays in the project.
       const h = hist.current
@@ -599,7 +683,7 @@ function EditorInner({ tid }: { tid: string }) {
       : 'Opening the URL and capturing…'
     : null
 
-  const LOCKED_NOTE = 'The assistant is working on this test case. Wait for it to finish, or abort it.'
+  const LOCKED_NOTE = conflict ? CONFLICT_NOTE : 'The assistant is working on this test case. Wait for it to finish, or abort it.'
   const launch = (url: string) => {
     if (lockedRef.current) return toast(LOCKED_NOTE, 'error')
     if (stepsRef.current.length === 0) {
@@ -731,7 +815,7 @@ function EditorInner({ tid }: { tid: string }) {
             {isShared ? `S${t.number}` : `#${t.number}`}
           </span>
         </nav>
-        <SaveBadge state={saveState} onRetry={() => void flush()} />
+        <SaveBadge state={saveState} onRetry={() => (conflict ? reload.mutate() : void flush())} />
         <MenuButton
           className="ed-device"
           label={isShared ? 'Device this shared step is captured on (a test case that calls it runs it on its own device)' : 'Device this test case is captured and run on'}
@@ -755,7 +839,7 @@ function EditorInner({ tid }: { tid: string }) {
           title={assistantOpen ? 'Close the assistant' : 'Build steps by describing the test'}
           onClick={() => toggleAssistant(!assistantOpen)}
         >
-          {locked ? <Spinner size={13} /> : <Sparkles size={14} />}
+          {assisting ? <Spinner size={13} /> : <Sparkles size={14} />}
           <span>Assistant</span>
         </button>
         {!isShared && <DataControl testCase={t} />}
@@ -841,13 +925,22 @@ function EditorInner({ tid }: { tid: string }) {
               <Redo2 size={16} />
             </IconButton>
           </div>
-          {locked && !syncError && (
+          {conflict && (
+            <div className="ed-locked is-error" role="alert">
+              <CloudAlert size={14} aria-hidden />
+              <span>These steps were changed somewhere else (another tab, an approved repair or the assistant) after this page loaded them, so the last change here was not saved. Load the saved steps to go on; undo then brings back what is on screen now.</span>
+              <Button size="sm" busy={reload.isPending} onClick={() => reload.mutate()}>
+                Load saved steps
+              </Button>
+            </div>
+          )}
+          {assisting && !conflict && !syncError && (
             <div className="ed-locked" role="status">
               <Sparkles size={14} aria-hidden />
               <span>The assistant is editing the steps. They are read-only until it finishes.</span>
             </div>
           )}
-          {locked && syncError && (
+          {assisting && !conflict && syncError && (
             <div className="ed-locked is-error" role="alert">
               <CloudAlert size={14} aria-hidden />
               <span>The assistant finished, but its steps could not be loaded ({syncError}). The steps stay read-only until they are. Trying again…</span>
@@ -873,7 +966,7 @@ function EditorInner({ tid }: { tid: string }) {
                 runningId={runningId}
                 pickFor={pickForId}
                 focusId={focusId}
-                canRun={!running && !blocked}
+                canRun={!running && !unavailable}
                 range={range}
                 sharedSteps={sharedQuery.data}
                 shared={shared}

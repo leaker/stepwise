@@ -170,6 +170,9 @@ export function RunPage() {
                   <Spinner /> Waiting for the first step…
                 </>
               )
+            ) : r.range && r.status === 'succeeded' && r.results.length === 0 ? (
+              // A partial run whose steps are disabled or in a branch arm that was not taken: the log says which.
+              'None of the requested steps was executed, so this run checked nothing. The log says why each step was skipped.'
             ) : pattern && view.results.length === 0 ? (
               'This pattern was not run.'
             ) : (

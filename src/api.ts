@@ -1,5 +1,6 @@
 // Typed client for the Worker API documented at the bottom of shared/types.ts.
 import type {
+  ApiErrorCode,
   AssistantSession,
   AssistantStatus,
   BatchRun,
@@ -17,10 +18,13 @@ import type {
 
 export class ApiError extends Error {
   status: number
-  constructor(status: number, message: string) {
+  /** The reason, for the conflicts the app handles itself (shared/types.ts). */
+  code?: ApiErrorCode
+  constructor(status: number, message: string, code?: ApiErrorCode) {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.code = code
   }
 }
 
@@ -50,7 +54,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       data && typeof data === 'object' && 'error' in data && typeof (data as { error: unknown }).error === 'string'
         ? (data as { error: string }).error
         : `Request failed (${res.status} ${res.statusText || method + ' ' + path})`
-    throw new ApiError(res.status, msg)
+    const code = data && typeof data === 'object' && 'code' in data ? (data as { code: unknown }).code : undefined
+    throw new ApiError(res.status, msg, code === 'assistant_busy' || code === 'steps_changed' ? code : undefined)
   }
   return data as T
 }
@@ -83,7 +88,8 @@ export const api = {
   createTestCase: (pid: string, b: { name?: string; description?: string } = {}) =>
     post<TestCase>(`/projects/${pid}/test-cases`, b),
   testCase: (tid: string) => get<TestCase>(`/test-cases/${tid}`),
-  updateTestCase: (tid: string, b: { name?: string; description?: string; device?: DeviceId; steps?: Step[]; data?: DataTable | null }) =>
+  /** `baseStepsRev` with `steps`: the stepsRev the steps were loaded with; the save is refused (409 steps_changed) when they were changed since. */
+  updateTestCase: (tid: string, b: { name?: string; description?: string; device?: DeviceId; steps?: Step[]; baseStepsRev?: string; data?: DataTable | null }) =>
     patch<TestCase>(`/test-cases/${tid}`, b),
   deleteTestCase: (tid: string) => del<{ ok: true }>(`/test-cases/${tid}`),
   duplicateTestCase: (tid: string) => post<TestCase>(`/test-cases/${tid}/duplicate`),
