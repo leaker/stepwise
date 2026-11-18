@@ -113,11 +113,35 @@ export function stepSentence(step: Step, shared?: (id: string) => Pick<SharedRef
     // Without a way to look the name up, say no more than is known.
     return !step.value ? 'Shared step (none chosen)' : shared ? 'Shared step (deleted)' : 'Shared step'
   }
-  return def.sentence
-    .replace('{target}', step.target ? step.target.name : '(no element)')
-    .replace('{value}', def.id === 'comment' || def.id === 'wait_seconds' || def.id === 'wait_visible' || def.id === 'press_key' || def.id === 'swipe' ? (step.value ?? '') : JSON.stringify(step.value ?? ''))
-    .replace('{variable}', step.variable ?? '(no variable)')
-    .trim()
+  const bare = def.id === 'comment' || def.id === 'wait_seconds' || def.id === 'wait_visible' || def.id === 'press_key' || def.id === 'swipe'
+  const parts: Record<string, string> = {
+    target: step.target ? step.target.name : '(no element)',
+    value: bare ? (step.value ?? '') : JSON.stringify(step.value ?? ''),
+    variable: step.variable ?? '(no variable)',
+  }
+  // One pass with a function: a value such as "pa$$word" or "a$&b" is put in as it is (a replacement string
+  // would read $$ and $& as patterns), and an element named "{value}" is not substituted a second time.
+  return def.sentence.replace(/\{(target|value|variable)\}/g, (_, key: string) => parts[key]).trim()
+}
+
+/** Limits of what a test case stores. The API refuses more (worker/validate.ts), so the editor does not let it be entered. */
+export const MAX_STEPS = 500
+/** Longest value or variable name of a step, in characters. */
+export const MAX_STEP_TEXT = 5000
+export const MAX_ELEMENT_NAME = 300
+export const MAX_LOCATOR_LENGTH = 2000
+
+/**
+ * Commands whose value must not be empty, with what the editor says when it is. An empty text is "contained"
+ * in every text, so such an assertion would pass whatever the page shows. (An empty text to type, or to
+ * compare a whole text with, is legitimate: that is how a field is checked to be empty.)
+ */
+export const EMPTY_VALUE_PROBLEM: Partial<Record<CommandId, string>> = {
+  select: 'Enter the option to select.',
+  assert_text_contains: 'Enter the text to look for. An empty text is found in any text, so this step would always pass.',
+  assert_url_equals: 'Enter the URL to expect.',
+  assert_url_contains: 'Enter the text to look for. An empty text is found in any URL, so this step would always pass.',
+  assert_title_contains: 'Enter the text to look for. An empty text is found in any title, so this step would always pass.',
 }
 
 /** Longest fixed wait and longest "wait until visible" a step may ask for, in seconds. */

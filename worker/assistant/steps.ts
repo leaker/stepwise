@@ -1,6 +1,6 @@
 // Turning the model's tool input into a Step, with every rule the editor and the engine enforce checked
 // up front so a mistake comes back as a message the model can act on. Pure: no database, no browser.
-import { COMMAND_BY_ID, isBuiltInVariable, KEYS, SWIPE_DIRECTIONS } from '../../shared/commands'
+import { COMMAND_BY_ID, EMPTY_VALUE_PROBLEM, isBuiltInVariable, KEYS, MAX_STEP_TEXT, SWIPE_DIRECTIONS } from '../../shared/commands'
 import type { CommandId, ElementRef, Step, Ui, UiElement } from '../../shared/types'
 
 export class ToolInputError extends Error {}
@@ -16,7 +16,7 @@ export function asInput(value: unknown): Input {
   return value as Input
 }
 
-export function optionalString(input: Input, key: string, max = 5000): string | undefined {
+export function optionalString(input: Input, key: string, max = MAX_STEP_TEXT): string | undefined {
   const v = input[key]
   if (v === undefined || v === null) return undefined
   if (typeof v !== 'string') return fail(`${key} must be a string.`)
@@ -65,7 +65,7 @@ export function targetFrom(uis: Ui[], uiId: string | undefined, elementId: strin
 }
 
 /** Commands whose value may not be empty (an empty text to type or to compare with is legitimate). */
-const NEEDS_TEXT = new Set<CommandId>(['navigate', 'press_key', 'swipe', 'select', 'wait_seconds', 'assert_text_contains', 'assert_url_equals', 'assert_url_contains', 'assert_title_equals', 'assert_title_contains'])
+const NEEDS_TEXT = new Set<CommandId>(['navigate', 'press_key', 'swipe', 'wait_seconds', 'assert_title_equals', ...(Object.keys(EMPTY_VALUE_PROBLEM) as CommandId[])])
 /** Values the editor fills in for a new step. */
 export const DEFAULT_VALUE: Partial<Record<CommandId, string>> = { wait_visible: '10', screenshot: '' }
 

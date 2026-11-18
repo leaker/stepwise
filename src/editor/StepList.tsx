@@ -22,7 +22,7 @@ import {
 } from 'lucide-react'
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { CATEGORIES, COMMAND_BY_ID, COMMANDS, KEYS, sharedLabel, stepSentence, SWIPE_DIRECTIONS, validateSteps, type Category, type CommandDef } from '../../shared/commands'
+import { CATEGORIES, COMMAND_BY_ID, COMMANDS, KEYS, MAX_STEP_TEXT, sharedLabel, stepSentence, SWIPE_DIRECTIONS, validateSteps, type Category, type CommandDef } from '../../shared/commands'
 import type { SharedLookup, SharedSource } from '../../shared/expand'
 import type { CommandId, Step, StepResult, TestCase } from '../../shared/types'
 import { Button, Dialog, Menu, onTablistKeyDown, Spinner, StatusIcon, type Anchor, type MenuItem } from '../components/ui'
@@ -454,6 +454,7 @@ function StepRow(p: RowProps) {
                   aria-label={def?.variable ?? 'Variable'}
                   placeholder="VARIABLE"
                   spellCheck={false}
+                  maxLength={120}
                   value={step.variable ?? ''}
                   onChange={(e) => p.onChange({ variable: e.target.value.replace(/[^A-Za-z0-9_]/g, '') }, `${step.id}:variable`)}
                 />
@@ -497,6 +498,8 @@ function StepRow(p: RowProps) {
                 placeholder={def?.value}
                 inputMode={isNumeric(step.command) ? 'decimal' : undefined}
                 spellCheck={false}
+                // What the server stores at most: a longer text would make every save of the test case fail.
+                maxLength={MAX_STEP_TEXT}
                 value={step.value ?? ''}
                 title={step.value && step.value.length > 24 ? step.value : undefined}
                 onChange={(e) => p.onChange({ value: e.target.value }, `${step.id}:value`)}

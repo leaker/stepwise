@@ -124,3 +124,13 @@ export function reportedSteps(runSteps: Step[], range: { from: number; to: numbe
   const flat = range ? flatRange(runSteps, range) : { from: 1, to: runSteps.length }
   return runSteps.filter((s, i) => !s.disabled && !s.call && i + 1 >= flat.from && i + 1 <= flat.to)
 }
+
+/**
+ * The step a run is working on: the first reported step without a result after the last one that has one.
+ * Steps in a branch arm the run did not take never get a result, so "the first step without a result" would
+ * stay on such a step for the rest of the run. `done`: has this step a result (in the pattern being shown)?
+ */
+export function nextToRun(runSteps: Step[], range: { from: number; to: number } | null, done: (stepId: string) => boolean): Step | undefined {
+  const reported = reportedSteps(runSteps, range)
+  return reported[reported.findLastIndex((s) => done(s.id)) + 1]
+}

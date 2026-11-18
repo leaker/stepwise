@@ -6,7 +6,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { sharedLabel, stepSentence } from '../../shared/commands'
 import { logOfPattern, patternSummary } from '../../shared/data'
 import { deviceOf } from '../../shared/devices'
-import { flatRange, positionLabel, positionsOf, reportedSteps, topLevelCount } from '../../shared/expand'
+import { flatRange, nextToRun, positionLabel, positionsOf, topLevelCount } from '../../shared/expand'
 import { locatorToString, type Box, type HealProposal, type Run, type RunPattern, type StepResult, type Ui } from '../../shared/types'
 import { api, qk, shotUrl } from '../api'
 import { Button, DeviceChip, Dialog, ErrorState, IconButton, Loading, onTablistKeyDown, Shell, Spinner, StatusIcon, TableWrap, Tabs, toast } from '../components/ui'
@@ -305,7 +305,7 @@ function LogTab({ run, live, onOpenShot }: { run: Run; live: boolean; onOpenShot
   // The steps are listed as the run executed them: a shared step call is a heading, with its steps under it.
   const positions = useMemo(() => positionsOf(run.steps), [run.steps])
   const { from, to } = run.range ? flatRange(run.steps, run.range) : { from: 1, to: run.steps.length }
-  const runningId = live && run.status === 'running' ? reportedSteps(run.steps, run.range).find((s) => !byStep.has(s.id))?.id : undefined
+  const runningId = live && run.status === 'running' ? nextToRun(run.steps, run.range, (id) => byStep.has(id))?.id : undefined
 
   return (
     <div className="log">

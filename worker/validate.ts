@@ -1,5 +1,5 @@
 // Request body validation shared by the API routes.
-import { COMMAND_BY_ID, isBuiltInVariable } from '../shared/commands'
+import { COMMAND_BY_ID, isBuiltInVariable, MAX_ELEMENT_NAME, MAX_LOCATOR_LENGTH, MAX_STEP_TEXT, MAX_STEPS } from '../shared/commands'
 import { describeDataProblem, validateDataTable } from '../shared/data'
 import { positionLabel, type StepPosition } from '../shared/expand'
 import { parseHttpUrl, resolveUrl } from '../shared/url'
@@ -106,7 +106,7 @@ function text(v: unknown, max: number, what: string): string {
 
 function parseLocator(v: unknown, what: string): Locator {
   if (!isObject(v) || (v.key !== 'id' && v.key !== 'css' && v.key !== 'xpath') || typeof v.value !== 'string' || v.value === '') throw new HttpError(400, `${what} is invalid`)
-  return { key: v.key, value: text(v.value, 2000, what) }
+  return { key: v.key, value: text(v.value, MAX_LOCATOR_LENGTH, what) }
 }
 
 function parseLocators(v: unknown, what: string): Locator[] {
@@ -152,7 +152,7 @@ function parseTarget(v: unknown, at: string): ElementRef {
   return {
     uiId: text(v.uiId, 64, `${at}: target.uiId`),
     elementId: text(v.elementId, 64, `${at}: target.elementId`),
-    name: text(v.name, 300, `${at}: target.name`),
+    name: text(v.name, MAX_ELEMENT_NAME, `${at}: target.name`),
     locator: parseLocator(v.locator, `${at}: target.locator`),
     candidates: parseLocators(v.candidates, `${at}: target.candidates`),
     fingerprint: parseFingerprint(v.fingerprint, `${at}: target.fingerprint`),
@@ -164,7 +164,7 @@ const STEP_ID = /^[A-Za-z0-9_-]{1,64}$/
 
 export function parseSteps(value: unknown): Step[] {
   if (!Array.isArray(value)) throw new HttpError(400, 'steps must be an array')
-  if (value.length > 500) throw new HttpError(400, 'A test case can have at most 500 steps')
+  if (value.length > MAX_STEPS) throw new HttpError(400, `A test case can have at most ${MAX_STEPS} steps`)
   const seen = new Set<string>()
   return value.map((raw, i) => {
     const at = `Step ${i + 1}`
@@ -183,7 +183,7 @@ export function parseSteps(value: unknown): Step[] {
       const v = raw[key]
       if (v === undefined || v === null) continue
       if (typeof v !== 'string') throw new HttpError(400, `${at}: ${key} must be a string`)
-      if (v.length > 5000) throw new HttpError(400, `${at}: ${key} is too long`)
+      if (v.length > MAX_STEP_TEXT) throw new HttpError(400, `${at}: ${key} is too long (${MAX_STEP_TEXT} characters at most)`)
       step[key] = v
     }
     for (const key of ['disabled', 'continueOnFailure'] as const) {
@@ -211,7 +211,7 @@ export function parseElements(value: unknown): UiElement[] {
     if (locators.length === 0) throw new HttpError(400, `${at}: locators must be a non-empty list of locators`)
     return {
       id: text(el.id, 64, `${at}: id`),
-      name: text(el.name, 300, `${at}: name`),
+      name: text(el.name, MAX_ELEMENT_NAME, `${at}: name`),
       type: parseElementType(el.type, `${at}: type`),
       box: parseBox(el.box, `${at}: box`),
       locators,

@@ -1,6 +1,6 @@
 // The assistant's tools, run against the same database rows and engine code paths the HTTP API uses.
 // A tool never throws for something the model can fix: it returns an error result with what to do instead.
-import { COMMAND_BY_ID, stepSentence, validateSteps } from '../../shared/commands'
+import { COMMAND_BY_ID, MAX_STEPS, stepSentence, validateSteps } from '../../shared/commands'
 import { hasPatterns, rowValues, runVariables } from '../../shared/data'
 import { deviceOf } from '../../shared/devices'
 import { expandSteps, flatRange, positionLabel, positionsOf, type SharedLookup } from '../../shared/expand'
@@ -73,7 +73,7 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
    * nothing the assistant works on. The editor notices the change through updated_at.
    */
   const saveSteps = async (t: Loaded, steps: Step[]): Promise<void> => {
-    if (steps.length > 500) throw new ToolInputError('A test case can have at most 500 steps.')
+    if (steps.length > MAX_STEPS) throw new ToolInputError(`A test case can have at most ${MAX_STEPS} steps.`)
     // Always later than what was read, so the next call's check tells this write from an older one.
     const stamp = new Date(Math.max(Date.now(), Date.parse(t.row.updated_at) + 1)).toISOString()
     const saved = await env.DB.prepare(

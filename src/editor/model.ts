@@ -1,4 +1,4 @@
-import { COMMAND_BY_ID, COMMANDS, MAX_WAIT_SECONDS, SWIPE_DIRECTIONS, validateSteps, type CommandDef } from '../../shared/commands'
+import { COMMAND_BY_ID, COMMANDS, EMPTY_VALUE_PROBLEM, MAX_ELEMENT_NAME, MAX_LOCATOR_LENGTH, MAX_STEP_TEXT, MAX_WAIT_SECONDS, SWIPE_DIRECTIONS, validateSteps, type CommandDef } from '../../shared/commands'
 import { callProblems, type SharedLookup, type SharedSource } from '../../shared/expand'
 import type { CommandId, ElementRef, Locator, Step, TestCase, Ui, UiElement } from '../../shared/types'
 import { uid } from '../lib/format'
@@ -94,6 +94,10 @@ export function changeCommand(step: Step, command: CommandId): Step {
   if (!def.variable) delete next.variable
   if (next.value === undefined && def.value && DEFAULT_VALUE[command] !== undefined) next.value = DEFAULT_VALUE[command]
   if (!def.assertion) delete next.continueOnFailure
+  // A command that does not act on an element keeps none: a hidden one would be saved with the step and would
+  // limit the row to element commands afterwards. (A row with an element is only offered element commands,
+  // so this never drops one the user can see.)
+  if (!def.target) delete next.target
   return next
 }
 
@@ -120,6 +124,23 @@ function parameterError(s: Step): string | null {
     if (!Number.isFinite(n) || n < 0) return `“${value}” is not a number of seconds.`
     if (n > MAX_WAIT_SECONDS) return `A step can wait ${MAX_WAIT_SECONDS} seconds at most.`
   }
+  // An assertion that looks for an empty text passes on any page: it has to say what it looks for.
+  if (!value.trim() && EMPTY_VALUE_PROBLEM[s.command]) return EMPTY_VALUE_PROBLEM[s.command]!
+  return null
+}
+
+/**
+ * Something the server refuses to store, or null. One such step makes every save of the test case fail, so
+ * it is reported on its row even while the step is disabled.
+ */
+export function limitError(s: Step): string | null {
+  const long = (what: string, max: number) => `${what} is too long to be saved: ${max} characters at most. Shorten it.`
+  if ((s.value ?? '').length > MAX_STEP_TEXT) return long(`The ${(COMMAND_BY_ID[s.command]?.value ?? 'value').toLowerCase()} (${s.value!.length} characters)`, MAX_STEP_TEXT)
+  if ((s.variable ?? '').length > MAX_STEP_TEXT) return long('The variable name', MAX_STEP_TEXT)
+  if (s.target) {
+    if (s.target.name.length > MAX_ELEMENT_NAME) return long('The name of the UI element', MAX_ELEMENT_NAME)
+    if ([s.target.locator, ...s.target.candidates].some((l) => l.value.length > MAX_LOCATOR_LENGTH)) return long('A locator of the UI element', MAX_LOCATOR_LENGTH)
+  }
   return null
 }
 
@@ -135,6 +156,8 @@ export function stepErrors(all: Step[], shared?: SharedContext, upTo?: number): 
     for (const p of callProblems(steps, shared.lookup ?? (() => undefined), shared.projectId, shared.nested)) map.set(p.stepId, `${p.message}.`)
   }
   for (const s of steps) {
+    const limit = limitError(s)
+    if (limit) map.set(s.id, limit)
     if (s.disabled || map.has(s.id)) continue
     if (COMMAND_BY_ID[s.command]?.target && !s.target) map.set(s.id, 'No UI element chosen. Click the placeholder, then pick an element on the captured screen.')
     else {
