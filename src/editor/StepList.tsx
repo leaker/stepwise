@@ -175,6 +175,8 @@ export function StepList(p: StepListProps) {
           dropBefore={dropIndex === i}
           dropAfter={dropIndex === p.steps.length && i === p.steps.length - 1}
           cmdOpen={cmdMenu?.id === step.id}
+          // Opened from the row's menu button, not as a context menu at the pointer.
+          menuOpen={menu?.id === step.id && 'el' in menu.anchor}
           onSelect={() => p.onSelect(step.id)}
           onChange={(patch, coalesce) => p.onChange(step.id, patch, coalesce)}
           onChip={() => p.onChip(step.id)}
@@ -213,6 +215,7 @@ interface RowProps {
   dropBefore: boolean
   dropAfter: boolean
   cmdOpen: boolean
+  menuOpen: boolean
   onSelect: () => void
   onChange: (patch: Partial<Step>, coalesce?: string) => void
   onChip: () => void
@@ -270,7 +273,7 @@ function StepRow(p: RowProps) {
         <GripVertical size={14} />
       </span>
       <span className="step-n num">{p.index + 1}</span>
-      <div className="step-main" style={p.depth ? { paddingLeft: 8 + p.depth * 18 } : undefined}>
+      <div className="step-main" style={p.depth ? { paddingInlineStart: 8 + p.depth * 18 } : undefined}>
         <div className="step-line">
           <button
             type="button"
@@ -376,7 +379,7 @@ function StepRow(p: RowProps) {
         ) : status ? (
           <StatusIcon status={status} size={16} />
         ) : p.error ? (
-          <CircleAlert size={16} className="st st-review" aria-label="Has an error" />
+          <CircleAlert size={16} className="st st-review" role="img" aria-label="Has an error" />
         ) : null}
       </span>
       <button
@@ -384,6 +387,7 @@ function StepRow(p: RowProps) {
         className="step-more"
         aria-label={`Actions for step ${p.index + 1}`}
         aria-haspopup="menu"
+        aria-expanded={p.menuOpen}
         onClick={(e) => {
           e.stopPropagation()
           p.onMenu({ el: e.currentTarget })

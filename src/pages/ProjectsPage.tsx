@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Project } from '../../shared/types'
 import { api, qk } from '../api'
-import { Button, Confirm, Dialog, Empty, ErrorState, Field, Loading, MenuButton, Shell } from '../components/ui'
+import { Button, Confirm, Dialog, Empty, ErrorState, Field, Loading, MenuButton, Shell, TableWrap } from '../components/ui'
 
 function CreateProjectDialog({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient()
@@ -89,8 +89,8 @@ export function ProjectsPage() {
           Create a project, capture a screen of your site, and build the first test by picking elements from it.
         </Empty>
       ) : (
-        <div className="table-wrap">
-          <table className="table">
+        <TableWrap label="Projects">
+          <table className="table table-list">
             <thead>
               <tr>
                 <th>Project</th>
@@ -102,7 +102,7 @@ export function ProjectsPage() {
             <tbody>
               {projects.data.map((p) => (
                 <tr key={p.id}>
-                  <td className="col-main">
+                  <th scope="row" className="col-main">
                     <div className="cell-name">
                       <Link to={`/p/${p.id}`} title={p.name}>
                         {p.name}
@@ -113,9 +113,13 @@ export function ProjectsPage() {
                         {p.description}
                       </div>
                     )}
+                  </th>
+                  <td className="col-fit num" data-label="Test cases">
+                    {p.testCaseCount ?? 0}
                   </td>
-                  <td className="col-fit num">{p.testCaseCount ?? 0}</td>
-                  <td className="col-fit num">{p.batchRunCount ?? 0}</td>
+                  <td className="col-fit num" data-label="Batch runs">
+                    {p.batchRunCount ?? 0}
+                  </td>
                   <td className="col-fit">
                     <MenuButton
                       className="icon-btn"
@@ -129,7 +133,7 @@ export function ProjectsPage() {
               ))}
             </tbody>
           </table>
-        </div>
+        </TableWrap>
       )}
 
       {creating && <CreateProjectDialog onClose={() => setCreating(false)} />}

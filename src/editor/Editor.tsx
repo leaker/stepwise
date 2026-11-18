@@ -7,7 +7,7 @@ import { DEVICE_IDS, DEVICES, deviceOf } from '../../shared/devices'
 import type { AssistantSession, CommandId, DeviceId, Step, StepResult, Ui, UiElement } from '../../shared/types'
 import { api, qk } from '../api'
 import { Button, Confirm, DeviceIcon, ErrorState, IconButton, Loading, MenuButton, Spinner, StatusIcon, toast, toastError } from '../components/ui'
-import { cx, isTerminal, STATUS_LABEL, uid } from '../lib/format'
+import { cx, isTerminal, plural, STATUS_LABEL, uid } from '../lib/format'
 import { AssistantPanel } from './AssistantPanel'
 import { changeCommand, makeTarget, newStep, sameStep, stepErrors } from './model'
 import { CommandPalette, StepList } from './StepList'
@@ -116,6 +116,10 @@ function EditorInner({ tid }: { tid: string }) {
     },
     [apply],
   )
+  // Undo and Redo change the list without moving focus, so a screen reader is told what happened. A repeat
+  // of the same message gets a trailing no-break space: a live region only speaks when its text changes.
+  const [histMsg, setHistMsg] = useState('')
+  const announceHistory = useCallback((text: string) => setHistMsg((prev) => (prev === text ? `${text}\u00a0` : text)), [])
   const undo = useCallback(() => {
     if (lockedRef.current) return
     const h = hist.current
@@ -124,7 +128,8 @@ function EditorInner({ tid }: { tid: string }) {
     h.redo.push(stepsRef.current)
     h.key = null
     apply(prev)
-  }, [apply])
+    announceHistory(`Undone. ${plural(prev.length, 'step')}.`)
+  }, [apply, announceHistory])
   const redo = useCallback(() => {
     if (lockedRef.current) return
     const h = hist.current
@@ -133,7 +138,8 @@ function EditorInner({ tid }: { tid: string }) {
     h.undo.push(stepsRef.current)
     h.key = null
     apply(next)
-  }, [apply])
+    announceHistory(`Redone. ${plural(next.length, 'step')}.`)
+  }, [apply, announceHistory])
 
   useEffect(() => {
     const s = save.current
@@ -534,10 +540,13 @@ function EditorInner({ tid }: { tid: string }) {
         return
       }
       if (editable || t.closest?.('.inspector')) return
+      // An element outline on the screenshot has its own arrow keys (they move between the outlines). Delete
+      // still removes the selected step while one has focus, as it does right after clicking an element.
+      const onOutline = !!t.closest?.('.el-box')
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId) {
         e.preventDefault()
         removeStep(selectedId)
-      } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      } else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !onOutline) {
         const cur = stepsRef.current
         if (!cur.length) return
         e.preventDefault()
@@ -627,7 +636,7 @@ function EditorInner({ tid }: { tid: string }) {
         </MenuButton>
         <button
           type="button"
-          className={cx('ed-device ed-asst-toggle', assistantOpen && 'is-active')}
+          className="ed-device ed-asst-toggle"
           aria-pressed={assistantOpen}
           title={assistantOpen ? 'Close the assistant' : 'Build steps by describing the test'}
           onClick={() => toggleAssistant(!assistantOpen)}
@@ -844,6 +853,10 @@ function EditorInner({ tid }: { tid: string }) {
           })()}
         </Confirm>
       )}
+
+      <span className="sr-only" role="status">
+        {histMsg}
+      </span>
 
       {palette && (
         <CommandPalette

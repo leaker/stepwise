@@ -3,7 +3,7 @@ import { ChevronRight, Square } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import type { RunStatus } from '../../shared/types'
 import { api, qk } from '../api'
-import { Button, DeviceChip, Empty, ErrorState, Loading, Shell, StatusIcon } from '../components/ui'
+import { Button, DeviceChip, Empty, ErrorState, Loading, Shell, StatusIcon, TableWrap } from '../components/ui'
 import { clock, dateTime, isTerminal, STATUS_LABEL } from '../lib/format'
 import { useTick } from '../lib/hooks'
 
@@ -88,8 +88,8 @@ export function BatchRunPage() {
       {runs.length === 0 ? (
         <Empty title="No test cases in this batch run">The project had no test cases when this run started.</Empty>
       ) : (
-        <div className="table-wrap">
-          <table className="table">
+        <TableWrap label="Test cases in this batch run">
+          <table className="table table-list">
             <thead>
               <tr>
                 <th className="col-fit">Status</th>
@@ -111,19 +111,23 @@ export function BatchRunPage() {
                     </span>
                   </td>
                   <td className="col-fit num">{r.order}</td>
-                  <td className="col-main">
+                  <th scope="row" className="col-main">
                     <div className="cell-name">
                       <Link to={`/r/${r.id}`} onClick={(e) => e.stopPropagation()} title={r.testCaseName}>
                         {r.testCaseName}
                       </Link>
                       <span className="hash">#{r.testCaseNumber}</span>
                     </div>
-                  </td>
-                  <td className="col-fit">
+                  </th>
+                  <td className="col-fit" data-label="Device">
                     <DeviceChip device={r.environment.device} />
                   </td>
-                  <td className="col-fit num">{clock(r.startedAt, r.finishedAt)}</td>
-                  <td className="col-fit num">{dateTime(r.startedAt)}</td>
+                  <td className="col-fit num" data-label="Duration">
+                    {clock(r.startedAt, r.finishedAt)}
+                  </td>
+                  <td className="col-fit num" data-label="Started">
+                    {dateTime(r.startedAt)}
+                  </td>
                   <td className="col-fit">
                     <ChevronRight size={16} className="muted" aria-hidden />
                   </td>
@@ -131,7 +135,7 @@ export function BatchRunPage() {
               ))}
             </tbody>
           </table>
-        </div>
+        </TableWrap>
       )}
     </Shell>
   )

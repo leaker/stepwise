@@ -1,8 +1,8 @@
 // The assistant's chat panel: the transcript of the test case's sessions and the box to ask for more.
-import { Camera, CircleAlert, ListChecks, Pencil, Play, Plus, SendHorizontal, Sparkles, Square, Trash2, X } from 'lucide-react'
+import { Camera, CircleAlert, Info, ListChecks, Pencil, Play, Plus, SendHorizontal, Sparkles, Square, Trash2, X } from 'lucide-react'
 import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { AssistantEvent, AssistantSession, AssistantStatus, AssistantToolName } from '../../shared/types'
-import { Button, IconButton, Spinner } from '../components/ui'
+import { Button, IconButton, Popover, Spinner } from '../components/ui'
 import { cx } from '../lib/format'
 import { isComposing } from '../lib/hooks'
 
@@ -222,13 +222,27 @@ function Usage({ session }: { session: AssistantSession }) {
   const u = session.usage!
   const input = u.inputTokens + u.cacheReadTokens + u.cacheWriteTokens
   const others = u.otherModels ?? []
+  // The breakdown is a toggletip: a visible button opens it, so touch, keyboard and screen readers get it too.
+  const [tip, setTip] = useState<HTMLElement | null>(null)
   return (
-    <div
-      className="asst-usage num"
-      title={`${u.model}${others.length ? ` (and ${others.join(', ')}, which answered a request ${u.model} declined)` : ''}: ${u.inputTokens} input tokens, ${u.cacheWriteTokens} written to the prompt cache, ${u.cacheReadTokens} read from it, ${u.outputTokens} output tokens. The cost is an estimate from list prices${u.costIncomplete ? '; a model without a known price was counted at the price of ' + u.model : ''}.`}
-    >
-      {u.turns} {u.turns === 1 ? 'turn' : 'turns'} · {compact(input)} in{u.cacheReadTokens > 0 ? ` (${Math.round((u.cacheReadTokens / input) * 100)}% cached)` : ''} · {compact(u.outputTokens)} out · {u.costIncomplete ? 'at least' : 'about'} ${u.costUsd < 0.01 ? u.costUsd.toFixed(3) : u.costUsd.toFixed(2)}
-      {others.length > 0 && ` · partly answered by ${others.join(', ')}`}
+    <div className="asst-usage num">
+      <span>
+        {u.turns} {u.turns === 1 ? 'turn' : 'turns'} · {compact(input)} in{u.cacheReadTokens > 0 ? ` (${Math.round((u.cacheReadTokens / input) * 100)}% cached)` : ''} · {compact(u.outputTokens)} out · {u.costIncomplete ? 'at least' : 'about'} ${u.costUsd < 0.01 ? u.costUsd.toFixed(3) : u.costUsd.toFixed(2)}
+        {others.length > 0 && ` · partly answered by ${others.join(', ')}`}
+      </span>
+      <IconButton label="How this usage is counted" aria-expanded={!!tip} onClick={(e) => setTip(tip ? null : e.currentTarget)}>
+        <Info size={13} />
+      </IconButton>
+      {tip && (
+        <Popover anchor={{ el: tip }} align="end" onClose={() => setTip(null)}>
+          <p className="tip-pop" role="tooltip">
+            {u.model}
+            {others.length > 0 && ` (and ${others.join(', ')}, which answered a request ${u.model} declined)`}: {u.inputTokens} input tokens, {u.cacheWriteTokens} written to the prompt cache,{' '}
+            {u.cacheReadTokens} read from it, {u.outputTokens} output tokens. The cost is an estimate from list prices
+            {u.costIncomplete ? `; a model without a known price was counted at the price of ${u.model}` : ''}.
+          </p>
+        </Popover>
+      )}
     </div>
   )
 }

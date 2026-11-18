@@ -4,7 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { stepSentence } from '../../shared/commands'
 import type { TestCase } from '../../shared/types'
 import { api, qk } from '../api'
-import { DeviceChip, Empty, ErrorState, InlineEdit, Loading, Shell, StatusIcon } from '../components/ui'
+import { DeviceChip, Empty, ErrorState, InlineEdit, Loading, Shell, StatusIcon, TableWrap } from '../components/ui'
 import { dateTime, duration, isTerminal, plural, STATUS_LABEL } from '../lib/format'
 
 export function TestCasePage() {
@@ -64,9 +64,7 @@ export function TestCasePage() {
                 {t.steps.map((s, i) => (
                   <li key={s.id} className={s.disabled ? 'is-disabled' : undefined}>
                     <span className="outline-n num">{i + 1}</span>
-                    <span className="truncate" title={stepSentence(s)}>
-                      {stepSentence(s)}
-                    </span>
+                    <span>{stepSentence(s)}</span>
                   </li>
                 ))}
               </ol>
@@ -87,8 +85,8 @@ export function TestCasePage() {
           ) : runs.data.length === 0 ? (
             <Empty title="Not run yet">Run this test case from the editor to see its results here.</Empty>
           ) : (
-            <div className="table-wrap">
-              <table className="table">
+            <TableWrap label="Recent runs">
+              <table className="table table-list">
                 <thead>
                   <tr>
                     <th>Status</th>
@@ -107,8 +105,12 @@ export function TestCasePage() {
                         </Link>
                         {r.range && <span className="chip chip-quiet">Steps {r.range.from === r.range.to ? r.range.from : `${r.range.from}–${r.range.to}`}</span>}
                       </td>
-                      <td className="col-fit num">{dateTime(r.startedAt ?? r.createdAt)}</td>
-                      <td className="col-fit num">{duration(r.startedAt, r.finishedAt)}</td>
+                      <td className="col-fit num" data-label="Started">
+                        {dateTime(r.startedAt ?? r.createdAt)}
+                      </td>
+                      <td className="col-fit num" data-label="Duration">
+                        {duration(r.startedAt, r.finishedAt)}
+                      </td>
                       <td className="col-fit">
                         <ChevronRight size={16} className="muted" aria-hidden />
                       </td>
@@ -116,7 +118,7 @@ export function TestCasePage() {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </TableWrap>
           )}
         </section>
       </div>

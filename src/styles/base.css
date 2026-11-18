@@ -9,9 +9,12 @@
   --surface-3: #e2e5ec;
   --ink: #161b26;
   --ink-2: #485164;
-  --ink-3: #737c8e;
+  /* Muted text and placeholders: 4.5:1 or more on the surface, the page background and tinted rows. */
+  --ink-3: #626b7e;
   --line: #d9dde6;
   --line-strong: #bfc6d3;
+  /* The outline of a text field: 3:1 against the surface it sits on (dividers and cards keep --line). */
+  --control-line: #7d8595;
 
   --accent: #2350e0;
   --accent-hover: #1b41c0;
@@ -31,7 +34,8 @@
   --fail-soft: #fcebea;
   --review: #c96a08;
   --review-soft: #fdf0df;
-  --muted: #8790a0;
+  /* Status icons that are the only indicator: 3:1 on white, hovered rows and the selected step. */
+  --muted: #7a8394;
 
   --shadow-pop: 0 1px 2px rgb(22 27 38 / 0.08), 0 8px 24px rgb(22 27 38 / 0.14);
   --shadow-dialog: 0 2px 6px rgb(22 27 38 / 0.1), 0 24px 64px rgb(22 27 38 / 0.26);
@@ -42,7 +46,14 @@
   --r-dialog: 10px;
 
   --focus: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
+  /* The smallest size of a control: 24px for a mouse (WCAG 2.5.8), 44px for a finger. */
+  --target-size: 24px;
   color-scheme: light;
+}
+@media (pointer: coarse) {
+  :root {
+    --target-size: 44px;
+  }
 }
 
 @media (prefers-color-scheme: dark) {
@@ -56,6 +67,7 @@
     --ink-3: #7d8698;
     --line: #2b3242;
     --line-strong: #3b4458;
+    --control-line: #707a8e;
 
     --accent: #7f9bff;
     --accent-hover: #9bb1ff;
@@ -102,6 +114,8 @@ body {
   font: 400 0.875rem/1.45 var(--font-sans);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  /* A long word or URL wraps instead of widening the page. */
+  overflow-wrap: break-word;
 }
 
 h1,
@@ -124,6 +138,16 @@ h3 {
   font-size: 0.875rem;
   font-weight: 600;
 }
+/* No orphaned last word in a heading or paragraph; ignored where unsupported. */
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+}
+p,
+li {
+  text-wrap: pretty;
+}
 
 a {
   color: var(--accent);
@@ -143,8 +167,24 @@ textarea {
 button {
   cursor: pointer;
 }
-button:disabled {
+button:disabled,
+button[aria-disabled='true'] {
   cursor: not-allowed;
+}
+/* Every control is at least --target-size in both directions. A fixed height below it gives way (min wins
+   over height), so the same rule makes controls finger-sized on touch screens. Element outlines on a
+   screenshot are exempt: they have the size of what they outline. */
+:where(button, select, textarea, input:not([type='checkbox'], [type='radio']), [role='button']:not(.el-box), a.btn, .last-run, label:has(input[type='checkbox'], input[type='radio'])) {
+  min-block-size: var(--target-size);
+  min-inline-size: var(--target-size);
+}
+/* A checkbox takes its target size from the label around it. */
+.check-hit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  vertical-align: middle;
 }
 
 :focus-visible {
@@ -212,8 +252,13 @@ code,
   white-space: nowrap;
   flex-shrink: 0;
 }
-.btn:hover:not(:disabled) {
-  background: var(--surface-2);
+@media (hover: hover) {
+  .btn:hover:not(:disabled) {
+    background: var(--surface-2);
+  }
+}
+.btn:active:not(:disabled) {
+  background: var(--surface-3);
 }
 .btn:disabled {
   opacity: 0.55;
@@ -228,9 +273,15 @@ code,
   background: var(--accent);
   color: var(--accent-ink);
 }
-.btn-primary:hover:not(:disabled) {
-  border-color: var(--accent-hover);
-  background: var(--accent-hover);
+@media (hover: hover) {
+  .btn-primary:hover:not(:disabled) {
+    border-color: var(--accent-hover);
+    background: var(--accent-hover);
+  }
+}
+.btn-primary:active:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 80%, #000);
+  background: color-mix(in srgb, var(--accent) 80%, #000);
 }
 .btn-ghost {
   border-color: transparent;
@@ -241,8 +292,24 @@ code,
   background: var(--fail);
   color: #fff;
 }
-.btn-danger:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--fail) 86%, #000);
+@media (hover: hover) {
+  .btn-danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--fail) 86%, #000);
+  }
+}
+.btn-danger:active:not(:disabled) {
+  background: color-mix(in srgb, var(--fail) 72%, #000);
+}
+/* Pressing also moves: the button gives a little, where motion is welcome. */
+@media (prefers-reduced-motion: no-preference) {
+  .btn,
+  .icon-btn {
+    transition: scale 150ms ease-out;
+  }
+  .btn:active:not(:disabled),
+  .icon-btn:active:not(:disabled, [aria-disabled='true']) {
+    scale: 0.97;
+  }
 }
 
 .icon-btn {
@@ -257,16 +324,37 @@ code,
   color: var(--ink-2);
   flex-shrink: 0;
 }
-.icon-btn:hover:not(:disabled) {
-  background: var(--surface-2);
+@media (hover: hover) {
+  .icon-btn:hover:not(:disabled, [aria-disabled='true']) {
+    background: var(--surface-2);
+    color: var(--ink);
+  }
+}
+.icon-btn:active:not(:disabled, [aria-disabled='true']) {
+  background: var(--surface-3);
   color: var(--ink);
 }
-.icon-btn:disabled {
+/* Unavailable, but still focusable: focus does not jump away when Undo runs out (see IconButton). */
+.icon-btn:disabled,
+.icon-btn[aria-disabled='true'] {
   opacity: 0.4;
 }
-.icon-btn.is-active {
+/* The pressed state of a toggle is styled from the attribute assistive technology reads. The tint alone is
+   too faint to tell apart (about 1.2:1), so an accent line marks it too. */
+.icon-btn[aria-pressed='true'] {
   background: var(--accent-soft);
   color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.icon-btn[aria-pressed='true']:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--accent), var(--focus);
+}
+@media (forced-colors: active) {
+  .icon-btn[aria-pressed='true'] {
+    outline: 1px solid Highlight;
+    outline-offset: -1px;
+    color: Highlight;
+  }
 }
 
 /* ---------- Inputs ---------- */
@@ -274,7 +362,7 @@ code,
   width: 100%;
   height: 32px;
   padding: 0 9px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--control-line);
   border-radius: var(--r-control);
   background: var(--surface);
   min-width: 0;
@@ -288,10 +376,19 @@ textarea.input {
 .input::placeholder {
   color: var(--ink-3);
 }
+/* The focus ring of a field: its border turns accent and a second accent line makes it 2px, with the soft
+   halo around that. */
 .input:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft);
+}
+/* Invalid once the user has interacted with it, or when script says so (aria-invalid mirrors :user-invalid). */
+.input:is(:user-invalid, [aria-invalid='true']) {
+  border-color: var(--fail);
+}
+.input:is(:user-invalid, [aria-invalid='true']):focus {
+  box-shadow: 0 0 0 1px var(--fail), 0 0 0 3px var(--fail-soft);
 }
 .field {
   display: grid;
@@ -347,7 +444,7 @@ textarea.input {
   display: flex;
   align-items: center;
   gap: 4px;
-  height: 48px;
+  min-height: 48px;
   padding: 0 20px;
   background: var(--surface);
   border-bottom: 1px solid var(--line);
@@ -389,7 +486,7 @@ textarea.input {
 .crumb::before {
   content: '/';
   content: '/' / '';
-  margin: 0 9px;
+  margin-inline: 9px;
   color: var(--line-strong);
 }
 .crumb {
@@ -416,17 +513,21 @@ textarea.input {
   max-width: 1120px;
   margin: 0 auto;
   padding: 28px 20px 64px;
+  /* Page sections lay themselves out by the width of the page column, not of the window. */
+  container: page / inline-size;
 }
 .page-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 20px;
 }
+/* Below 16rem the title takes a row of its own and the actions wrap under it. */
 .page-head-main {
   min-width: 0;
-  flex: 1;
+  flex: 1 1 16rem;
 }
 .page-head h1 {
   overflow-wrap: anywhere;
@@ -438,6 +539,7 @@ textarea.input {
 }
 .page-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
   flex-shrink: 0;
@@ -475,9 +577,15 @@ textarea.input {
 .tabs {
   display: flex;
   gap: 22px;
-  border-bottom: 1px solid var(--line);
+  /* The divider is drawn inside the box, over a pixel of padding: the selected tab's line lies on it without
+     overflowing the strip, which would make it scroll vertically by a pixel. */
+  padding-bottom: 1px;
+  box-shadow: inset 0 -1px 0 var(--line);
   margin-bottom: 18px;
   overflow-x: auto;
+  /* A swipe along the tabs comes to rest on a tab. */
+  scroll-snap-type: x mandatory;
+  overscroll-behavior-x: contain;
 }
 .tab {
   position: relative;
@@ -490,9 +598,21 @@ textarea.input {
   color: var(--ink-2);
   font-weight: 500;
   white-space: nowrap;
+  scroll-snap-align: start;
 }
-.tab:hover {
+.tab:hover,
+.tab:active {
   color: var(--ink);
+}
+/* The tab strip clips what is drawn outside a tab (it scrolls), so the focus ring is drawn inside it. */
+.tab:focus-visible {
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+@media (forced-colors: active) {
+  .tab:focus-visible {
+    outline-offset: -2px;
+  }
 }
 .tab.is-active {
   color: var(--ink);
@@ -504,6 +624,16 @@ textarea.input {
   inset: auto 0 -1px;
   border-bottom: 2px solid var(--accent);
 }
+/* Forced colours drop the shadow; a real border takes its place. */
+@media (forced-colors: active) {
+  .tabs {
+    padding-bottom: 0;
+    border-bottom: 1px solid;
+  }
+  .tab.is-active::after {
+    bottom: 0;
+  }
+}
 .tab-count {
   padding: 0 6px;
   border-radius: 9px;
@@ -514,31 +644,38 @@ textarea.input {
 }
 
 /* ---------- Tables ---------- */
+/* The scroll container of a table (a focusable, named region: see TableWrap) and its query container. */
 .table-wrap {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--r-card);
   overflow-x: auto;
+  container-type: inline-size;
 }
 .table {
   width: 100%;
   border-collapse: collapse;
 }
-.table th {
+.table thead th {
   padding: 8px 12px;
-  text-align: left;
+  text-align: start;
   font-size: 0.78125rem;
   font-weight: 500;
   color: var(--ink-3);
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
 }
-.table td {
+/* A row header (the cell that names the row) looks like the other cells of its row. */
+.table td,
+.table tbody th {
   padding: 9px 12px;
   border-bottom: 1px solid var(--line);
   vertical-align: middle;
+  text-align: start;
+  font-weight: 400;
 }
-.table tr:last-child td {
+.table tr:last-child td,
+.table tbody tr:last-child th {
   border-bottom: 0;
 }
 .table tbody tr:hover {
@@ -548,12 +685,86 @@ textarea.input {
   width: 1%;
   white-space: nowrap;
 }
+/* The name column takes the room that is left and truncates. A cell of an auto-layout table grows to its
+   text unless something caps it; max-width: 0 is that cap in every engine. (table-layout: fixed would need a
+   fixed width for every other column, whose content, such as dates and device names, varies.) */
 .table .col-main {
   max-width: 0;
   width: 60%;
 }
 .table .row-link {
   cursor: pointer;
+}
+/* In a narrow container a list table stacks: each row is a block with its name on top and the other cells,
+   labelled, wrapping under it. The header row goes; only "select all" stays. */
+@container (width < 600px) {
+  .table.table-list,
+  .table.table-list thead,
+  .table.table-list tbody {
+    display: block;
+  }
+  .table.table-list tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 14px;
+    position: relative;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  /* The row's menu (or its chevron) keeps the top corner; the other cells wrap beside and under the name. */
+  .table.table-list tbody tr {
+    padding-inline-end: calc(var(--target-size) + 20px);
+  }
+  .table.table-list tbody tr > td:last-child:not([data-label]) {
+    position: absolute;
+    inset-block-start: 8px;
+    inset-inline-end: 8px;
+  }
+  .table.table-list tbody tr:last-child {
+    border-bottom: 0;
+  }
+  .table.table-list thead tr:not(:has(.col-check)),
+  .table.table-list thead th:not(.col-check) {
+    display: none;
+  }
+  .table.table-list tr > :is(th, td) {
+    display: block;
+    width: auto;
+    max-width: none;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+  }
+  .table.table-list tr > td:not(.col-fit),
+  .table.table-list tr > .col-main {
+    flex: 1 1 60%;
+  }
+  /* The name gets the row to itself (next to the checkbox, where there is one) and wraps: stacked, there is
+     room for all of it, so nothing is left readable only through a hover title. */
+  .table.table-list tbody tr > .col-main {
+    flex-basis: calc(100% - var(--target-size) - 14px);
+  }
+  .table.table-list .cell-name a,
+  .table.table-list .cell-desc {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .table.table-list tr > td[data-label] {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .table.table-list td[data-label]::before {
+    content: attr(data-label) ':';
+    color: var(--ink-3);
+    font-size: 0.78125rem;
+  }
+  .table.table-list thead .check-hit::after {
+    content: 'Select all';
+    color: var(--ink-2);
+    font-weight: 400;
+  }
 }
 .cell-name {
   display: flex;
@@ -624,6 +835,10 @@ textarea.input {
 .dialog::backdrop {
   background: rgb(22 27 38 / 0.45);
 }
+/* The dimming fades in together with the dialog instead of appearing a frame ahead of it. */
+.dialog[open]::backdrop {
+  animation: fade 0.14s ease-out;
+}
 @media (prefers-color-scheme: dark) {
   .dialog::backdrop {
     background: rgb(0 0 0 / 0.6);
@@ -662,9 +877,12 @@ dialog::backdrop {
 .dialog-body {
   padding: 4px 20px 20px;
   overflow: auto;
+  /* What is inside lays itself out by the dialog's width (its width is always set: see Dialog). */
+  container: dialog / inline-size;
 }
 .dialog-foot {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   padding: 12px 20px;
@@ -676,6 +894,13 @@ dialog::backdrop {
 }
 
 /* ---------- Popover / menu ---------- */
+@keyframes pop-grow {
+  from {
+    scale: 0.9;
+  }
+}
+/* A popover opens from the corner that touches its trigger (transform-origin is set in script, with the
+   position). Reduced motion: a fade only. */
 .popover {
   position: fixed;
   z-index: 200;
@@ -683,13 +908,20 @@ dialog::backdrop {
   border: 1px solid var(--line);
   border-radius: var(--r-card);
   box-shadow: var(--shadow-pop);
+  animation: fade 150ms ease-out both;
+  @media (prefers-reduced-motion: no-preference) {
+    animation: pop-grow 300ms linear(0, 0.45 15%, 1.08 35%, 0.97 55%, 1.01 75%, 1) both, fade 150ms ease-out both;
+  }
 }
 .menu {
   display: grid;
   padding: 4px;
   min-width: 190px;
   max-height: min(70vh, 520px);
+  max-height: min(70dvh, 520px);
   overflow-y: auto;
+  /* Scrolling to the end of the menu must not scroll the page away from under it. */
+  overscroll-behavior: contain;
 }
 .menu-item {
   display: flex;
@@ -699,13 +931,21 @@ dialog::backdrop {
   border: 0;
   border-radius: 3px;
   background: none;
-  text-align: left;
+  text-align: start;
   white-space: nowrap;
 }
-.menu-item:hover:not(:disabled),
+@media (hover: hover) {
+  .menu-item:hover:not(:disabled) {
+    background: var(--surface-2);
+  }
+}
+.menu-item:active:not(:disabled) {
+  background: var(--surface-3);
+}
+/* Keyboard focus is an accent ring inside the item (the menu clips what is outside it), not the hover tint. */
 .menu-item:focus-visible {
   background: var(--surface-2);
-  box-shadow: none;
+  box-shadow: inset 0 0 0 2px var(--accent);
 }
 .menu-item:disabled {
   color: var(--ink-3);
@@ -728,7 +968,7 @@ dialog::backdrop {
 .menu-hint {
   color: var(--ink-3);
   font-size: 0.75rem;
-  margin-left: 16px;
+  margin-inline-start: 16px;
 }
 .menu-sep {
   height: 1px;
@@ -751,7 +991,7 @@ dialog::backdrop {
   border: 0;
   border-radius: var(--r-control);
   background: none;
-  text-align: left;
+  text-align: start;
   font: inherit;
   letter-spacing: inherit;
   color: inherit;
@@ -759,7 +999,8 @@ dialog::backdrop {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
-.inline-edit:hover {
+.inline-edit:hover,
+.inline-edit:active {
   background: var(--surface-3);
 }
 .inline-edit.is-empty {
@@ -777,12 +1018,13 @@ dialog::backdrop {
 /* ---------- Toasts ---------- */
 .toasts {
   position: fixed;
-  right: 16px;
+  inset-inline-end: 16px;
   bottom: 16px;
   z-index: 300;
   display: grid;
   gap: 8px;
-  width: min(380px, calc(100vw - 32px));
+  /* A percentage of the viewport without its scrollbar, which 100vw would include. */
+  width: min(380px, calc(100% - 32px));
 }
 .toast {
   display: flex;
@@ -816,15 +1058,38 @@ dialog::backdrop {
   overflow-wrap: anywhere;
 }
 .toast button {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
   border: 0;
   background: none;
   color: var(--rail-ink-2);
   padding: 2px;
   border-radius: 3px;
 }
+.toast button:hover,
+.toast button:active {
+  color: var(--rail-ink);
+}
+.toast button:active {
+  background: var(--rail-2);
+}
+.toast button svg {
+  margin: 0;
+}
 
 .menu-pop {
   max-width: min(560px, calc(100vw - 16px));
+  max-width: min(560px, calc(100dvw - 16px));
+}
+/* The text a toggletip shows (role="tooltip" inside a Popover). */
+.tip-pop {
+  max-width: min(320px, calc(100vw - 16px));
+  max-width: min(320px, calc(100dvw - 16px));
+  padding: 10px 12px;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+  line-height: 1.45;
 }
 .menu-label {
   min-width: 0;

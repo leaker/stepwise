@@ -53,11 +53,18 @@ export function Button({ variant = 'default', size = 'md', icon, busy, className
   )
 }
 
+/**
+ * An icon-only button. `active` makes it a toggle (aria-pressed, which the pressed look is styled from).
+ * `disabled` is rendered as aria-disabled and its clicks are ignored: the button stays focusable, so focus
+ * is not thrown to the page when, say, Undo runs out while the keyboard is on it.
+ */
 export function IconButton({
   label,
   children,
   className,
   active,
+  disabled,
+  onClick,
   ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & { label: string; active?: boolean }) {
   return (
@@ -67,7 +74,12 @@ export function IconButton({
       aria-label={label}
       title={rest.title ?? label}
       aria-pressed={active}
-      className={cx('icon-btn', active && 'is-active', className)}
+      aria-disabled={disabled || undefined}
+      onClick={(e) => {
+        if (disabled) return e.preventDefault()
+        onClick?.(e)
+      }}
+      className={cx('icon-btn', className)}
     >
       {children}
     </button>
@@ -205,6 +217,18 @@ export function Empty({ title, children, action }: { title: string; children?: R
       <h3>{title}</h3>
       {children && <p>{children}</p>}
       {action}
+    </div>
+  )
+}
+
+/**
+ * The scroll container of a table: when the table is wider than the page it scrolls here, so the container is
+ * focusable (arrow keys scroll it) and a named region.
+ */
+export function TableWrap({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="table-wrap" role="region" aria-label={label} tabIndex={0}>
+      {children}
     </div>
   )
 }
@@ -424,7 +448,9 @@ export function Popover({
   matchWidth?: boolean
 }) {
   const ref = useRef<HTMLDivElement>(null)
-  const [pos, setPos] = useState<CSSProperties>({ left: -9999, top: -9999, visibility: 'hidden' })
+  // Measured off screen first. Not hidden with `visibility`: a menu focuses its first item in a layout effect
+  // that runs before this component's own, and a hidden element cannot take focus.
+  const [pos, setPos] = useState<CSSProperties>({ left: -9999, top: -9999 })
   const closeRef = useRef(onClose)
   closeRef.current = onClose
 
@@ -438,20 +464,28 @@ export function Popover({
     let left: number
     let top: number
     let minWidth: number | undefined
+    // The corner that touches the trigger: the opening animation grows out of it.
+    let above = false
     if ('el' in anchor) {
       const r = anchor.el.getBoundingClientRect()
       left = align === 'end' ? r.right - w : r.left
       top = r.bottom + 4
-      if (top + h > vh - 8 && r.top - h - 4 >= 8) top = r.top - h - 4
+      if (top + h > vh - 8 && r.top - h - 4 >= 8) {
+        top = r.top - h - 4
+        above = true
+      }
       if (matchWidth) minWidth = r.width
     } else {
       left = anchor.x
       top = anchor.y
-      if (top + h > vh - 8) top = Math.max(8, anchor.y - h)
+      if (top + h > vh - 8) {
+        top = Math.max(8, anchor.y - h)
+        above = true
+      }
     }
     left = Math.max(8, Math.min(left, vw - w - 8))
     top = Math.max(8, Math.min(top, vh - h - 8))
-    setPos({ left, top, minWidth })
+    setPos({ left, top, minWidth, transformOrigin: `${above ? 'bottom' : 'top'} ${'el' in anchor && align === 'end' ? 'right' : 'left'}` })
   }, [anchor, align, matchWidth])
 
   useEffect(() => {
@@ -501,7 +535,7 @@ export function Menu({ anchor, items, onClose, align }: { anchor: Anchor; items:
   // A layout effect: focus is back on the trigger before a dialog opened by the chosen item records where to return it.
   useLayoutEffect(() => {
     const prev = document.activeElement as HTMLElement | null
-    ref.current?.querySelector<HTMLElement>('[role^="menuitem"]:not([disabled])')?.focus()
+    ref.current?.querySelector<HTMLElement>('[role^="menuitem"]:not([disabled])')?.focus({ preventScroll: true })
     return () => {
       if (prev && document.contains(prev)) prev.focus()
     }

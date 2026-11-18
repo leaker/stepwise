@@ -8,7 +8,6 @@ import {
   EyeOff,
   Globe,
   ImageOff,
-  Maximize2,
   MonitorSmartphone,
   MousePointerClick,
   Pencil,
@@ -75,6 +74,26 @@ export function UiPanel(p: UiPanelProps) {
   const [deleting, setDeleting] = useState<Ui | null>(null)
   const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // Keyboard access to the element outlines: one of them is in the tab order, arrow keys move between them.
+  const [kbEl, setKbEl] = useState<string | null>(null)
+  // Escape hides the name tips until the pointer or focus reaches another element.
+  const [tipsOff, setTipsOff] = useState(false)
+  const tipBox = useRef<Element | null>(null)
+  const showTipsFor = (target: EventTarget) => {
+    const box = (target as Element).closest?.('.el-box') ?? null
+    if (box === tipBox.current) return
+    tipBox.current = box
+    setTipsOff(false)
+  }
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || isComposing(e)) return
+      // Only while a tip is showing; other Escape handlers (pick mode, the inspector) run as before.
+      if (scrollRef.current?.querySelector('.el-box:hover, .el-box:focus-within')) setTipsOff(true)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
 
   const setUis = (fn: (old: Ui[]) => Ui[]) => qc.setQueryData<Ui[]>(qk.uis(p.tid), (old) => fn(old ?? []))
   const patchUi = useMutation({
@@ -103,6 +122,24 @@ export function UiPanel(p: UiPanelProps) {
   // Draw big boxes first so small elements stay clickable on top of their containers.
   const ordered = useMemo(() => (ui ? ui.elements.toSorted((a, b) => b.box.w * b.box.h - a.box.w * a.box.h) : []), [ui])
   const ghost = targetHere && ui && !ui.elements.some((e) => e.id === targetHere.elementId) ? targetHere : null
+  // Arrow keys follow reading order: rows from the top (elements whose middles are within 24px of height share
+  // a row), each from left to right.
+  const reading = useMemo(() => {
+    const row = (e: UiElement) => Math.round((e.box.y + e.box.h / 2) / 24)
+    return ui ? ui.elements.toSorted((a, b) => row(a) - row(b) || a.box.x - b.box.x) : []
+  }, [ui])
+  const tabStop = (kbEl && reading.some((e) => e.id === kbEl) ? kbEl : null) ?? (targetHere && reading.some((e) => e.id === targetHere.elementId) ? targetHere.elementId : reading[0]?.id) ?? null
+  const onCanvasKeyDown = (e: React.KeyboardEvent<HTMLElement>) => {
+    const box = (e.target as HTMLElement).closest<HTMLElement>('.el-box')
+    if (!box || e.target !== box) return
+    const i = reading.findIndex((el) => el.id === box.dataset.el)
+    const to = e.key === 'ArrowDown' || e.key === 'ArrowRight' ? i + 1 : e.key === 'ArrowUp' || e.key === 'ArrowLeft' ? i - 1 : e.key === 'Home' ? 0 : e.key === 'End' ? reading.length - 1 : -1
+    if (i < 0 || !['ArrowDown', 'ArrowRight', 'ArrowUp', 'ArrowLeft', 'Home', 'End'].includes(e.key) || to < 0 || to >= reading.length) return
+    e.preventDefault()
+    const next = e.currentTarget.querySelector<HTMLElement>(`.el-box[data-el="${CSS.escape(reading[to].id)}"]`)
+    next?.focus()
+    next?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }
 
   useLayoutEffect(() => {
     if (!targetHere || !scrollRef.current) return
@@ -145,37 +182,41 @@ export function UiPanel(p: UiPanelProps) {
           </button>
         )}
         {ui && (
+          // Truncated here; the screen list (the picker next to it) shows the address in full.
           <span className="uip-url truncate" title={`${ui.title}\n${ui.url}`}>
             {ui.url}
           </span>
         )}
         {ui && <DeviceChip device={ui.device} />}
         <span className="uip-gap" />
-        {ui && (
-          <>
-            <IconButton label={overlays ? 'Hide element outlines' : 'Show element outlines'} active={overlays} onClick={() => setOverlays(!overlays)}>
-              {overlays ? <Eye size={16} /> : <EyeOff size={16} />}
-            </IconButton>
-            {!phone && (
-              <IconButton label={fit ? 'Show at 100%' : 'Fit to panel width'} active={!fit} onClick={() => setFit(!fit)}>
-                {fit ? <Maximize2 size={15} /> : <Scan size={16} />}
-              </IconButton>
-            )}
-          </>
-        )}
         {p.uis.length > 0 && (
-          <div className="split-btn">
-            <Button
-              icon={<Camera size={15} />}
-              disabled={!!p.capturing || !!p.locked}
-              onClick={() => (p.captureAfter ? p.onCaptureAfter() : setUrlDialog(true))}
-              title={p.locked ?? (p.captureAfter ? `Replay steps 1–${p.captureAfter.n} in a fresh cloud browser, then capture` : 'Capture a URL')}
-            >
-              Capture
-            </Button>
-            <button type="button" className="btn split-caret" aria-label="Capture options" aria-haspopup="menu" title={p.locked ?? undefined} disabled={!!p.capturing || !!p.locked} onClick={(e) => setCapAnchor(capAnchor ? null : e.currentTarget)}>
-              <ChevronDown size={14} />
-            </button>
+          <div className="uip-tools" role="group" aria-label="Screen view and capture">
+            {ui && (
+              <>
+                {/* Toggles keep one name; aria-pressed says whether they are on. */}
+                <IconButton label="Element outlines" active={overlays} onClick={() => setOverlays(!overlays)}>
+                  {overlays ? <Eye size={16} /> : <EyeOff size={16} />}
+                </IconButton>
+                {!phone && (
+                  <IconButton label="Fit to panel width" active={fit} onClick={() => setFit(!fit)}>
+                    <Scan size={16} />
+                  </IconButton>
+                )}
+              </>
+            )}
+            <div className="split-btn">
+              <Button
+                icon={<Camera size={15} />}
+                disabled={!!p.capturing || !!p.locked}
+                onClick={() => (p.captureAfter ? p.onCaptureAfter() : setUrlDialog(true))}
+                title={p.locked ?? (p.captureAfter ? `Replay steps 1–${p.captureAfter.n} in a fresh cloud browser, then capture` : 'Capture a URL')}
+              >
+                Capture
+              </Button>
+              <button type="button" className="btn split-caret" aria-label="Capture options" aria-haspopup="menu" aria-expanded={!!capAnchor} title={p.locked ?? undefined} disabled={!!p.capturing || !!p.locked} onClick={(e) => setCapAnchor(capAnchor ? null : e.currentTarget)}>
+                <ChevronDown size={14} />
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -229,8 +270,13 @@ export function UiPanel(p: UiPanelProps) {
           <LaunchForm key={p.baseUrl} baseUrl={p.baseUrl} busy={!!p.capturing} locked={p.locked} onLaunch={p.onLaunch} hasSteps={p.steps.length > 0} />
         ) : (
           <div className="uip-scroll" ref={scrollRef}>
-            <div className={cx('uip-stage', phone && 'is-phone', p.pickFor && 'is-picking', !overlays && 'no-overlays')} style={phone || !fit ? { width: ui.width } : { width: '100%' }}>
-              <div className="uip-canvas" style={{ aspectRatio: `${ui.width} / ${ui.height}` }}>
+            <div
+              className={cx('uip-stage', phone && 'is-phone', p.pickFor && 'is-picking', !overlays && 'no-overlays', tipsOff && 'tips-dismissed')}
+              style={phone || !fit ? { width: ui.width } : { width: '100%' }}
+              onPointerOver={(e) => showTipsFor(e.target)}
+              onFocus={(e) => showTipsFor(e.target)}
+            >
+              <div className="uip-canvas" style={{ aspectRatio: `${ui.width} / ${ui.height}` }} onKeyDown={onCanvasKeyDown}>
                 <img key={ui.screenshotKey} src={shotUrl(ui.screenshotKey)} width={ui.width} height={ui.height} decoding="async" alt={`Screenshot of ${ui.title || ui.url}`} draggable={false} />
                 {ordered.map((el) => (
                   <ElementBox
@@ -241,6 +287,8 @@ export function UiPanel(p: UiPanelProps) {
                     visible={overlays}
                     isTarget={targetHere?.elementId === el.id}
                     isInspected={p.inspect?.uiId === ui.id && p.inspect.elementId === el.id}
+                    tabStop={tabStop === el.id}
+                    onFocus={() => setKbEl(el.id)}
                     onPick={() => p.onPickElement(ui, el)}
                     onInspect={() => p.onInspect({ uiId: ui.id, elementId: el.id })}
                   />
@@ -335,9 +383,7 @@ export function UiPanel(p: UiPanelProps) {
                         <span className="ui-item-name truncate" title={u.name}>
                           <span className="muted num">{i + 1}.</span> {u.name}
                         </span>
-                        <span className="ui-item-url truncate" title={u.url}>
-                          {u.url}
-                        </span>
+                        <span className="ui-item-url">{u.url}</span>
                         <span className="ui-item-url">
                           {u.elements.length} elements · {deviceOf(u.device).label}
                         </span>
@@ -393,6 +439,8 @@ function ElementBox({
   visible,
   isTarget,
   isInspected,
+  tabStop,
+  onFocus,
   onPick,
   onInspect,
 }: {
@@ -401,6 +449,9 @@ function ElementBox({
   visible: boolean
   isTarget: boolean
   isInspected: boolean
+  /** The one outline in the tab order (roving tabindex); the arrow keys reach the others. */
+  tabStop: boolean
+  onFocus: () => void
   onPick: () => void
   onInspect: () => void
 }) {
@@ -410,20 +461,28 @@ function ElementBox({
   return (
     <div
       role="button"
-      tabIndex={-1}
+      tabIndex={tabStop ? 0 : -1}
       aria-label={el.name}
       data-el={el.id}
       className={cx('el-box', isTarget && 'is-target', isInspected && 'is-inspected')}
       style={boxStyle(el.box, ui)}
+      onFocus={onFocus}
       onClick={(e) => {
         if ((e.target as HTMLElement).closest('.el-tip-edit')) return
         if (e.shiftKey) onInspect()
         else onPick()
       }}
+      // What a click does, for the keyboard: Enter or Space picks, Shift+Enter opens the inspector.
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget || (e.key !== 'Enter' && e.key !== ' ')) return
+        e.preventDefault()
+        if (e.shiftKey && e.key === 'Enter') onInspect()
+        else onPick()
+      }}
     >
       <span className={cx('el-tip', below && 'is-below', right && 'is-right')}>
         <span className="el-tip-name">{el.name}</span>
-        <button type="button" className="el-tip-edit" aria-label={`Edit ${el.name}`} title="Edit name and locator (Shift+click)" onClick={onInspect}>
+        <button type="button" className="el-tip-edit" aria-label={`Edit ${el.name}`} title="Edit name and locator (Shift+click, or Shift+Enter on the element)" onClick={onInspect}>
           <Pencil size={12} />
         </button>
       </span>
@@ -636,7 +695,7 @@ function ElementInspector({
         </label>
         <div className="field">
           <span className="field-label">Locator</span>
-          <button type="button" className="locator-btn" aria-haspopup="menu" disabled={locators.length === 0} onClick={(e) => setLocAnchor(e.currentTarget)} title={current ? locatorToString(current) : undefined}>
+          <button type="button" className="locator-btn" aria-haspopup="menu" aria-expanded={!!locAnchor} disabled={locators.length === 0} onClick={(e) => setLocAnchor(e.currentTarget)} title={current ? locatorToString(current) : undefined}>
             <span className="mono truncate">{current ? locatorToString(current) : 'No locator'}</span>
             <ChevronDown size={14} />
           </button>

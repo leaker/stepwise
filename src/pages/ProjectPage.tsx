@@ -1,11 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronRight, Copy, CopyPlus, MoreHorizontal, Play, Plus, Trash2, X } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { isBuiltInVariable } from '../../shared/commands'
 import type { BatchRun, Project, TestCase } from '../../shared/types'
 import { api, qk } from '../api'
-import { Button, Confirm, DeviceChip, Empty, ErrorState, Field, IconButton, Loading, MenuButton, Shell, StatusIcon, Tabs, toast } from '../components/ui'
+import { Button, Confirm, DeviceChip, Empty, ErrorState, Field, IconButton, Loading, MenuButton, Shell, StatusIcon, TableWrap, Tabs, toast } from '../components/ui'
 import { clock, dateTime, isTerminal, plural, STATUS_LABEL } from '../lib/format'
 
 type TabId = 'cases' | 'batches' | 'settings'
@@ -127,21 +127,24 @@ function TestCasesTab({ pid, cases }: { pid: string; cases: TestCase[] }) {
           New test case
         </Button>
       </div>
-      <div className="table-wrap">
-        <table className="table">
+      <TableWrap label="Test cases">
+        <table className="table table-list">
           <thead>
             <tr>
-              <th className="col-fit">
-                <input
-                  type="checkbox"
-                  className="check"
-                  aria-label="Select all test cases"
-                  checked={allChecked}
-                  ref={(el) => {
-                    if (el) el.indeterminate = picked.length > 0 && !allChecked
-                  }}
-                  onChange={() => setSelected(allChecked ? new Set() : new Set(cases.map((c) => c.id)))}
-                />
+              <th className="col-fit col-check">
+                {/* The label is the click target: a 15px box alone is too small to hit. */}
+                <label className="check-hit">
+                  <input
+                    type="checkbox"
+                    className="check"
+                    aria-label="Select all test cases"
+                    checked={allChecked}
+                    ref={(el) => {
+                      if (el) el.indeterminate = picked.length > 0 && !allChecked
+                    }}
+                    onChange={() => setSelected(allChecked ? new Set() : new Set(cases.map((c) => c.id)))}
+                  />
+                </label>
               </th>
               <th>Name</th>
               <th className="col-fit">Device</th>
@@ -154,9 +157,11 @@ function TestCasesTab({ pid, cases }: { pid: string; cases: TestCase[] }) {
             {cases.map((c) => (
               <tr key={c.id}>
                 <td className="col-fit">
-                  <input type="checkbox" className="check" aria-label={`Select ${c.name}`} checked={selected.has(c.id)} onChange={() => toggle(c.id)} />
+                  <label className="check-hit">
+                    <input type="checkbox" className="check" aria-label={`Select ${c.name}`} checked={selected.has(c.id)} onChange={() => toggle(c.id)} />
+                  </label>
                 </td>
-                <td className="col-main">
+                <th scope="row" className="col-main">
                   <div className="cell-name">
                     <Link to={`/t/${c.id}`} title={c.name}>
                       {c.name}
@@ -168,12 +173,14 @@ function TestCasesTab({ pid, cases }: { pid: string; cases: TestCase[] }) {
                       {c.description}
                     </div>
                   )}
-                </td>
-                <td className="col-fit">
+                </th>
+                <td className="col-fit" data-label="Device">
                   <DeviceChip device={c.device} />
                 </td>
-                <td className="col-fit num">{c.steps.length}</td>
-                <td className="col-fit">
+                <td className="col-fit num" data-label="Steps">
+                  {c.steps.length}
+                </td>
+                <td className="col-fit" data-label="Last run">
                   {c.lastRun ? (
                     <Link to={`/r/${c.lastRun.id}`} className="last-run" title={`${STATUS_LABEL[c.lastRun.status]} · ${dateTime(c.lastRun.finishedAt)}`}>
                       <StatusIcon status={c.lastRun.status} />
@@ -200,7 +207,7 @@ function TestCasesTab({ pid, cases }: { pid: string; cases: TestCase[] }) {
             ))}
           </tbody>
         </table>
-      </div>
+      </TableWrap>
       {deleting && (
         <Confirm title="Delete test case?" confirmLabel="Delete test case" busy={remove.isPending} onConfirm={() => remove.mutate(deleting.id)} onClose={() => setDeleting(null)}>
           “{deleting.name}” (#{deleting.number}) and its captured screens will be deleted. Results of past runs are kept.
@@ -241,8 +248,8 @@ function BatchRunsTab({ batches }: { batches: BatchRun[] }) {
     )
   }
   return (
-    <div className="table-wrap">
-      <table className="table">
+    <TableWrap label="Batch runs">
+      <table className="table table-list">
         <thead>
           <tr>
             <th className="col-fit">Status</th>
@@ -271,8 +278,12 @@ function BatchRunsTab({ batches }: { batches: BatchRun[] }) {
                 <CountPills counts={b.counts} />
                 {b.trigger === 'api' && <span className="chip chip-quiet">API</span>}
               </td>
-              <td className="col-fit num">{clock(b.startedAt, b.finishedAt)}</td>
-              <td className="col-fit num">{dateTime(b.startedAt ?? b.createdAt)}</td>
+              <td className="col-fit num" data-label="Duration">
+                {clock(b.startedAt, b.finishedAt)}
+              </td>
+              <td className="col-fit num" data-label="Started">
+                {dateTime(b.startedAt ?? b.createdAt)}
+              </td>
               <td className="col-fit">
                 <ChevronRight size={16} className="muted" aria-hidden />
               </td>
@@ -280,7 +291,7 @@ function BatchRunsTab({ batches }: { batches: BatchRun[] }) {
           ))}
         </tbody>
       </table>
-    </div>
+    </TableWrap>
   )
 }
 
@@ -315,6 +326,17 @@ function SettingsTab({ project }: { project: Project }) {
           ? 'BASE_URL is built in. Set it with the Base URL field.'
           : `${builtIn} is built in (every run sets it), so it cannot be a project variable. Use another name.`
         : null
+  // The rows the message is about: they are marked invalid and point at it.
+  const badKeys = new Set(
+    rows.filter((r) => (badRow ? r.key === badRow.key : duplicate ? r.name.trim() === duplicate : builtIn ? r.name.trim() === builtIn : false)).map((r) => r.key),
+  )
+  const varErrorId = `${useId()}-var-error`
+  // Announced a moment after typing stops, through one polite live region, instead of on every keystroke.
+  const [announced, setAnnounced] = useState('')
+  useEffect(() => {
+    const t = window.setTimeout(() => setAnnounced(varError ?? ''), 500)
+    return () => window.clearTimeout(t)
+  }, [varError])
   const variables = Object.fromEntries(rows.filter((r) => r.name.trim()).map((r) => [r.name.trim(), r.value]))
   const dirty =
     name.trim() !== project.name ||
@@ -371,6 +393,11 @@ function SettingsTab({ project }: { project: Project }) {
                 placeholder="NAME"
                 value={r.name}
                 onChange={(e) => setRows(rows.map((x) => (x.key === r.key ? { ...x, name: e.target.value } : x)))}
+                spellCheck={false}
+                autoCapitalize="none"
+                autoCorrect="off"
+                aria-invalid={badKeys.has(r.key)}
+                aria-describedby={badKeys.has(r.key) ? varErrorId : undefined}
               />
               <input
                 className="input"
@@ -390,10 +417,13 @@ function SettingsTab({ project }: { project: Project }) {
             </Button>
           </div>
           {varError && (
-            <p className="form-error" role="alert">
+            <p className="form-error" id={varErrorId}>
               {varError}
             </p>
           )}
+          <span className="sr-only" role="status">
+            {announced}
+          </span>
         </div>
         <div className="panel-foot">
           <Button type="submit" variant="primary" busy={save.isPending} disabled={!dirty || !name.trim() || !!varError}>

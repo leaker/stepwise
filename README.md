@@ -318,7 +318,7 @@ Other scripts: `pnpm typecheck` (app, worker and shared), `pnpm test` (Vitest), 
 Optional settings go in `.dev.vars` (see `.dev.vars.example`):
 
 - `ACCESS_CODE` - when set, every `/api` route except `/api/session` needs the code: the UI asks for
-  it once and keeps an HttpOnly cookie; scripts send `Authorization: Bearer <code>`.
+  it once and keeps an HttpOnly cookie (`__Host-sw_access` over https); scripts send `Authorization: Bearer <code>`.
 - `ANTHROPIC_API_KEY` - enables the [AI assistant](#ai-assistant). Without it the rest of the app is
   unaffected.
 - `ASSISTANT_MODEL` - the model the assistant asks: `claude-haiku-5-5` (default), `claude-sonnet-5-5` or
@@ -408,10 +408,95 @@ widely available, or where the older behaviour stays as the fallback. What chang
 - **JavaScript** (`js`). `toSorted()` / `findLast()` instead of copy-then-mutate, and `Error` `cause` in the
   seed script.
 
+A second pass went through seventeen more guides, one by one:
+
+- **`performance`** - applied. The editor, the result page and the batch page are loaded on demand
+  (`React.lazy`), so the project list and the access form no longer download them; a tab left open across a
+  deployment reloads once when a lazily loaded file is gone; the hashed files under `/assets` are served as
+  `immutable` (they pass through the Worker, which answers a hashed file that does not exist with a 404
+  instead of the app shell, so the shell is never cached under a script's address). Deferred: self-hosting the two IBM Plex families. It needs the font files (or a package that
+  ships them) added to the repository, which is the owner's call; until then they come from Google Fonts.
+- **`security`** - applied. Every response carries `X-Frame-Options: DENY`, `nosniff`, a `Referrer-Policy`, a
+  `Permissions-Policy`, `Cross-Origin-Opener-Policy` and `Cross-Origin-Resource-Policy` (`public/_headers` for
+  the static app shell, `worker/security.ts` for `/api` and `/demo`). The app has an enforced
+  Content-Security-Policy with `frame-ancestors 'none'`, `object-src 'none'`, `base-uri 'none'` and Trusted
+  Types; the sample site, whose pages contain inline scripts, gets the three framing and plugin directives
+  only. The access cookie is `__Host-sw_access` over https. `/api` refuses requests another site makes the
+  browser send (`Sec-Fetch-Site`), before the access code is checked. `Strict-Transport-Security` starts at
+  `max-age=300`: raise it to a year once it has been live without trouble. Not done: `script-src` is `'self'`
+  rather than hashes with `'strict-dynamic'` (the shell is static and its only script is the hashed bundle),
+  and there is no violation report endpoint, because nothing collects reports.
+- **`browser-ui-theming`** - applied. Placeholder and muted text reach 4.5:1 in the light theme, text fields
+  have an outline of 3:1 against their surface in both themes (`--control-line`), and the assistant's message
+  box grows with its text (`field-sizing`), or can be dragged taller where that is not supported.
+- **`css-layout`** - applied. Clipping uses `overflow: clip`; nested scroll areas contain their overscroll;
+  lists that grow reserve their scrollbar gutter; widths that meant "the viewport" no longer use `100vw`;
+  direction-related margins, paddings, borders and alignments are logical properties (offsets that script
+  sets from physical coordinates, such as the inspector's side, stay physical); chip rows use
+  `flex-wrap: balance` where it exists.
+- **`responsive-design`** - applied. Heights limited by the viewport use `dvh`; the page sections and the
+  self-healing dialog switch layout by the width of their container (`@container`), not of the window. Fluid
+  type is not used, so the `clamp()` rules do not apply.
+- **`form-factor-adaptation`** - applied. Controls are at least 24 by 24 pixels, and 44 on touch screens
+  (`pointer: coarse`), checkboxes through the label around them (the panel divider and the element outlines
+  on a screenshot excepted; the sample site's choices and menu button follow the same sizes); bars, chips and headers have minimum
+  heights instead of fixed ones; the page header, title row and dialog footer wrap; a 320px page no longer
+  scrolls sideways (variable rows, long words); headings use `text-wrap: balance`, paragraphs `pretty`.
+- **`responsive-table`** - applied. A table's scroll container is a focusable, named region; the cell that
+  names a row is a row header; in a narrow container a list table stacks into labelled blocks instead of
+  squeezing its name column to nothing. Not done: sticky headers, which would turn every list into its own
+  vertical scroll area inside the page. Deferred: the same region wrapper around the sample site's table,
+  because a focusable wrapper is detected as a clickable element when that page is captured.
+- **`single-line-overflow`** - applied. The tab strip draws its focus ring inside the tab instead of having
+  it clipped; step sentences on the test case page and in the screenshot viewer wrap, and the screen list
+  shows a captured address in full, so no text is readable only through a hover `title`; a validation
+  message no longer cuts the value in script. Kept: the name column truncates through `max-width: 0` rather
+  than `table-layout: fixed`, which would need a fixed width for every date and device column.
+- **`icons`** - applied. The one informative icon without a role has `role="img"`, and the grey of the
+  "aborted / skipped / queued" icons is 3:1 on hovered and selected rows too. Icons are inline SVG in
+  `currentColor`; the guide's CSS icon system is not needed.
+- **`navbar`** - applied to the sample site (the app has breadcrumbs, not a navigation bar). The current
+  page is marked with `aria-current` and underlined; on a phone the navigation is a native popover where the
+  Popover API exists (Escape and a tap outside close it), and the class toggle it replaces, now with Escape
+  and outside-press handling, remains the fallback. Deferred: collapsing by measuring whether the links fit
+  instead of at a fixed width. The layout of a test target would then be decided by script after load, and
+  a capture taken right then could see either state.
+- **`toolbar`** - applied. Toggle buttons keep one name and report their state through `aria-pressed`, which
+  their pressed look (now with a 3:1 outline, also in forced colours) is styled from; unavailable icon
+  buttons are `aria-disabled` and stay focusable, so focus is not lost when Undo runs out; menu buttons
+  report `aria-expanded`; Undo and Redo are announced; hover styles of these buttons apply only where
+  hovering exists. The view buttons and Capture are a named group; they are not a `role="toolbar"` with one
+  tab stop, which the guide requires only of something declared a toolbar.
+- **`natural-interactions`** - applied. Buttons, chips, menu items and links have a pressed state; a menu's
+  keyboard focus is a ring, no longer the hover tint (and a menu now takes focus when it opens); the focus
+  ring of a text field is a 2px accent line; popovers grow out of the corner that touches their trigger;
+  the tab strip snaps; what appeared only on hover (a step's menu and grip, an element's name tip) also
+  appears on keyboard focus and on touch screens; element outlines on a screenshot are reachable by
+  keyboard (one tab stop, arrow keys, Enter to pick, Shift+Enter to inspect); a step in the run log opens
+  its screenshot from the keyboard.
+- **`interest-triggered-tooltips`** - applied. The assistant's token breakdown is a toggletip behind a
+  visible button instead of a `title` on plain text; Escape hides the element name tips without moving the
+  pointer. `interestfor` and `popover="hint"` are not used: neither is in every browser yet.
+- **`animate-to-from-top-layer`** - applied. The dimming behind a dialog fades in with it, and the
+  screenshot viewer fades in. Dialogs still close without an animation; the guide describes how to animate
+  an exit but does not ask for one.
+- **`accessible-error-announcement`** - applied. The access code field turns red and `aria-invalid` at the
+  same moment (`:user-invalid`), and a rejected code puts focus back on the field, which reads the error; a
+  project variable with a bad name is marked and points at its message, announced once typing pauses; the
+  sample site's two forms mark the field at fault and move focus to it.
+- **`scroll-target-on-load`** - not applicable. Nothing in the app is positioned once on load; the places
+  that scroll to something (the selected step, the step's element, the end of the conversation) do so again
+  on every change, which needs script. `scroll-initial-target` is also Chromium-only.
+- **`navigation-drawer`** - not applicable. Neither the app nor the sample site has a drawer; the assistant
+  panel is a non-modal tool panel, and the sample site's phone navigation opens under its header (see
+  `navbar`).
+
 Left as they are, on purpose: menus and popovers are positioned in script, because CSS anchor positioning is
-not in Firefox yet and the Popover API is not yet Baseline widely available; the light and dark themes use
-`prefers-color-scheme` with `color-scheme` (the guides' own fallback for `light-dark()`); controls keep fixed
-pixel heights; and `title` attributes remain as hover hints on controls that already have an accessible name.
+not in Firefox yet and the Popover API is not yet Baseline widely available (the sample site's phone
+navigation uses it as an enhancement over a script fallback); the light and dark themes use
+`prefers-color-scheme` with `color-scheme` (the guides' own fallback for `light-dark()`); controls keep their
+compact pixel heights for a mouse (the 44px minimum applies to touch screens); and `title` attributes remain
+as hover hints on controls that already have an accessible name.
 
 ## Limits and non-goals
 

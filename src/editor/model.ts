@@ -97,7 +97,7 @@ function parameterError(s: Step): string | null {
     // "Wait until visible" falls back to 10 s when left empty; a fixed wait needs a number.
     if (!value.trim()) return s.command === 'wait_seconds' ? 'Enter the number of seconds to wait.' : null
     const n = Number(value)
-    if (!Number.isFinite(n) || n < 0) return `“${value.length > 24 ? value.slice(0, 24) + '…' : value}” is not a number of seconds.`
+    if (!Number.isFinite(n) || n < 0) return `“${value}” is not a number of seconds.`
   }
   return null
 }

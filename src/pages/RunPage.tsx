@@ -1,13 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, ChevronLeft, ChevronRight, ImageOff, Pencil, Square, X } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useParams } from 'react-router-dom'
 import { stepSentence } from '../../shared/commands'
 import { deviceOf } from '../../shared/devices'
 import { locatorToString, type Box, type HealProposal, type Run, type StepResult, type Ui } from '../../shared/types'
 import { api, qk, shotUrl } from '../api'
-import { Button, DeviceChip, Dialog, ErrorState, IconButton, Loading, Shell, Spinner, StatusIcon, Tabs } from '../components/ui'
+import { Button, DeviceChip, Dialog, ErrorState, IconButton, Loading, Shell, Spinner, StatusIcon, TableWrap, Tabs } from '../components/ui'
 import { cx, dateTime, duration, isTerminal, ms, STATUS_LABEL } from '../lib/format'
 import { useModalDialog, useTick } from '../lib/hooks'
 
@@ -144,7 +144,16 @@ export function RunPage() {
           </div>
         ))}
 
-      {tab === 'log' && <LogTab run={r} live={live} />}
+      {tab === 'log' && (
+        <LogTab
+          run={r}
+          live={live}
+          onOpenShot={(stepId) => {
+            const i = shots.findIndex((x) => x.stepId === stepId)
+            if (i >= 0) setLightbox(i)
+          }}
+        />
+      )}
       {tab === 'info' && <InfoTab run={r} />}
       </Tabs>
 
@@ -164,9 +173,26 @@ function healLabel(h: HealProposal): string {
 const PREVIEW_W = 360
 const PREVIEW_H = 240
 
-function LogTab({ run, live }: { run: Run; live: boolean }) {
+function LogTab({ run, live, onOpenShot }: { run: Run; live: boolean; onOpenShot: (stepId: string) => void }) {
   const [wrap, setWrap] = useState(true)
   const [hover, setHover] = useState<{ key: string; top: number; left: number } | null>(null)
+  // The screenshot preview of a step: under its row (above it near the bottom of the window), inside the
+  // Steps pane, because the Console pane next to it is what the step list is read against.
+  const preview = (row: HTMLElement, key: string) => {
+    const rect = row.getBoundingClientRect()
+    const below = rect.bottom + 6
+    setHover({ key, top: below + PREVIEW_H > window.innerHeight - 8 ? Math.max(8, rect.top - 6 - PREVIEW_H) : below, left: Math.max(8, rect.right - PREVIEW_W) })
+  }
+  // Escape puts the preview away without moving the pointer or focus.
+  const shown = hover !== null
+  useEffect(() => {
+    if (!shown) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setHover(null)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [shown])
   const byStep = useMemo(() => new Map(run.results.map((x) => [x.stepId, x])), [run.results])
   const from = run.range?.from ?? 1
   const to = run.range?.to ?? run.steps.length
@@ -184,19 +210,26 @@ function LogTab({ run, live }: { run: Run; live: boolean }) {
               <li
                 key={s.id}
                 className={cx('log-step', res && `is-${res.status}`, out && 'is-out')}
-                onMouseEnter={(e) => {
-                  if (!res?.screenshotKey) return
-                  // Stay inside the Steps pane, under the row (above it near the bottom of the window): the
-                  // Console pane next to it is what the step list is read against.
-                  const rect = e.currentTarget.getBoundingClientRect()
-                  const below = rect.bottom + 6
-                  setHover({ key: res.screenshotKey, top: below + PREVIEW_H > window.innerHeight - 8 ? Math.max(8, rect.top - 6 - PREVIEW_H) : below, left: Math.max(8, rect.right - PREVIEW_W) })
-                }}
+                onMouseEnter={(e) => res?.screenshotKey && preview(e.currentTarget, res.screenshotKey)}
                 onMouseLeave={() => setHover(null)}
               >
                 <span className="log-n num">{i + 1}</span>
-                <span className="log-sentence" title={res?.sentence ?? stepSentence(s)}>
-                  {res?.sentence ?? stepSentence(s)}
+                <span className="log-sentence">
+                  {res?.screenshotKey ? (
+                    // A real control: the keyboard and touch get the screenshot too (focus previews it, activating opens it).
+                    <button
+                      type="button"
+                      className="log-open"
+                      aria-label={`${res.sentence}. Open the screenshot of step ${i + 1}`}
+                      onClick={() => onOpenShot(s.id)}
+                      onFocus={(e) => e.currentTarget.matches(':focus-visible') && preview(e.currentTarget.closest('li')!, res.screenshotKey!)}
+                      onBlur={() => setHover(null)}
+                    >
+                      {res.sentence}
+                    </button>
+                  ) : (
+                    (res?.sentence ?? stepSentence(s))
+                  )}
                   {res?.error && <span className="log-error">{res.error}</span>}
                 </span>
                 <span className="log-meta num">{res ? ms(res.durationMs) : ''}</span>
@@ -246,7 +279,7 @@ function InfoTab({ run }: { run: Run }) {
     ['Run id', <code key="id">{run.id}</code>],
   ]
   return (
-    <div className="table-wrap">
+    <TableWrap label="Run information">
       <table className="table info-table">
         <tbody>
           {rows.map(([k, v]) => (
@@ -257,7 +290,7 @@ function InfoTab({ run }: { run: Run }) {
           ))}
         </tbody>
       </table>
-    </div>
+    </TableWrap>
   )
 }
 
@@ -279,9 +312,7 @@ function Lightbox({ shots, index, onIndex, onClose }: { shots: StepResult[]; ind
     >
       <header className="lightbox-bar">
         <span className="shot-n num">{s.number}</span>
-        <span className="truncate lightbox-title" title={s.sentence}>
-          {s.sentence}
-        </span>
+        <span className="lightbox-title">{s.sentence}</span>
         {s.status !== 'passed' && <StatusIcon status={s.status} size={16} />}
         <span className="lightbox-count num">
           {index + 1} / {shots.length}
