@@ -1,7 +1,7 @@
 // In-browser stand-in for the Worker API. Loaded only when VITE_MOCK is set (see main.tsx);
 // it exists so the UI can be exercised before, or without, the real backend.
 import { COMMAND_BY_ID, sharedLabel, stepSentence, validateSteps } from '../../shared/commands'
-import { aggregateStatus, describeDataProblem, hasPatterns, patternLogHeading, rowValues, SUMMARY_LOG_HEADING, validateDataTable } from '../../shared/data'
+import { aggregateStatus, describeDataProblem, hasPatterns, patternLogHeading, rowValues, settledPatterns, SUMMARY_LOG_HEADING, validateDataTable } from '../../shared/data'
 import { DEVICES } from '../../shared/devices'
 import { expandSteps, flatRange, NESTED_SHARED_MESSAGE, positionLabel, positionsOf, reportedSteps, type SharedLookup } from '../../shared/expand'
 import type {
@@ -795,7 +795,10 @@ async function handle(method: string, path: string, body: Record<string, unknown
     }
     case 'POST batch-runs/:/abort': {
       const batch = need(batches.find((x) => x.id === b), 'Batch run')
-      for (const r of runs) if (r.batchRunId === b && (r.status === 'queued' || r.status === 'running')) Object.assign(r, { status: 'aborted', finishedAt: now() })
+      for (const r of runs) {
+        if (r.batchRunId !== b || (r.status !== 'queued' && r.status !== 'running')) continue
+        Object.assign(r, { status: 'aborted', finishedAt: now(), patterns: settledPatterns('aborted', r.patterns ?? null) })
+      }
       recount(batch)
       return batch
     }

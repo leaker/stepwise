@@ -1,5 +1,6 @@
 // D1 access helpers: row <-> shared type mapping and the queries used by more than one route.
 import { DEVICES, deviceOf } from '../shared/devices'
+import { settledPatterns } from '../shared/data'
 import type { BatchRun, DataTable, Project, Run, RunPattern, RunStatus, Step, StepResult, TestCase, Ui, UiElement } from '../shared/types'
 import { HttpError } from './env'
 
@@ -183,7 +184,7 @@ export function toRunSummary(r: RunRow): Omit<Run, 'steps' | 'log'> {
     results: parseJson<StepResult[]>(r.results, []),
     environment: toEnvironment(r.environment),
     range: parseJson<Run['range']>(r.range, null),
-    patterns: parseJson<RunPattern[] | null>(r.patterns, null),
+    patterns: settledPatterns(r.status as RunStatus, parseJson<RunPattern[] | null>(r.patterns, null)),
     createdAt: r.created_at,
     startedAt: r.started_at,
     finishedAt: r.finished_at,

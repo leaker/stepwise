@@ -109,6 +109,20 @@ describe('shared steps and test cases side by side', () => {
     expect((await stored(s2.id)).steps).toEqual([])
   })
 
+  it('refuses step ids that could collide with the ids a run gives the steps of a shared step', async () => {
+    const s = await newShared('Sign in')
+    await call('PATCH', `/test-cases/${s.id}`, { steps: [comment('x')] })
+    const t = await newCase('Checkout')
+    // A run names the shared step's step `c.x`.
+    const res = await call('PATCH', `/test-cases/${t.id}`, { steps: [callStep('c', s.id), comment('c.x')] })
+    expect([res.status, res.error]).toEqual([400, 'Step 2: id must be 1-64 letters, digits, - or _'])
+    expect((await call('PATCH', `/test-cases/${t.id}`, { steps: [comment('a'.repeat(65))] })).status).toBe(400)
+    const ok = await call<TestCase>('PATCH', `/test-cases/${t.id}`, { steps: [callStep('c', s.id), comment('c_x'), comment('3f2b8c1e-0d4a-4b7e-9a51-1c2d3e4f5a6b')] })
+    expect(ok.status).toBe(200)
+    const run = (await call<Run>('POST', `/test-cases/${t.id}/runs`)).body
+    expect(new Set(run.steps.map((x) => x.id)).size).toBe(run.steps.length)
+  })
+
   it('does not store `call` or `origin` a client sends with a step', async () => {
     const t = await newCase('Checkout', [{ ...comment('a'), call: { id: 'x', number: 1, name: 'Forged' }, origin: { callId: 'c', stepId: 's', shared: { id: 'x', number: 1, name: 'Forged' } } }])
     expect(t.steps).toEqual([comment('a')])

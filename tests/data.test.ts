@@ -3,10 +3,12 @@
 import { describe, expect, it } from 'vitest'
 import {
   aggregateStatus,
+  dataBytes,
   describeDataProblem,
   hasPatterns,
   logOfPattern,
   MAX_CELL_LENGTH,
+  MAX_DATA_BYTES,
   MAX_DATA_COLUMNS,
   MAX_DATA_ROWS,
   parseDelimited,
@@ -15,12 +17,13 @@ import {
   patternSummary,
   rowValues,
   runVariables,
+  settledPatterns,
   splitLog,
   SUMMARY_LOG_HEADING,
   tableFromRows,
   validateDataTable,
 } from '../shared/data'
-import type { DataTable } from '../shared/types'
+import type { DataTable, RunPattern } from '../shared/types'
 
 describe('parseDelimited', () => {
   it('reads plain CSV with LF, CRLF and CR line ends', () => {
@@ -101,11 +104,24 @@ describe('validateDataTable', () => {
 
   it('enforces 20 columns, 50 rows and 2000 characters in a cell', () => {
     const columns = Array.from({ length: MAX_DATA_COLUMNS }, (_, i) => `C${i}`)
-    const rows = Array.from({ length: MAX_DATA_ROWS }, () => columns.map(() => 'x'.repeat(MAX_CELL_LENGTH)))
+    const rows = Array.from({ length: MAX_DATA_ROWS }, () => columns.map(() => 'x'.repeat(200)))
     expect(validateDataTable({ columns, rows })).toEqual([])
+    expect(validateDataTable({ columns: ['A'], rows: [['x'.repeat(MAX_CELL_LENGTH)]] })).toEqual([])
     expect(messages({ columns: [...columns, 'ONE_MORE'], rows: [] })).toEqual(['A data table can have at most 20 columns'])
     expect(messages({ columns: ['A'], rows: Array.from({ length: 51 }, () => ['']) })).toEqual(['A data table can have at most 50 rows'])
     expect(messages({ columns: ['A', 'B'], rows: [['', ''], ['', 'x'.repeat(2001)]] })).toEqual(['row 2, column B: A cell can have at most 2000 characters'])
+  })
+
+  it('bounds the table as a whole, in bytes as it is stored', () => {
+    const columns = Array.from({ length: MAX_DATA_COLUMNS }, (_, i) => `C${i}`)
+    const full = (cell: string): DataTable => ({ columns, rows: Array.from({ length: MAX_DATA_ROWS }, () => columns.map(() => cell)) })
+    // Every cell at its limit is about 2 MB, which one D1 row cannot hold.
+    expect(messages(full('x'.repeat(MAX_CELL_LENGTH)))).toEqual(['The table is too large: 1957 KB of at most 256 KB in total. Shorten cells or remove rows.'])
+    // Characters outside ASCII take more room than their count says.
+    expect(validateDataTable(full('x'.repeat(240)))).toEqual([])
+    expect(messages(full('\u3042'.repeat(240)))).toEqual(['The table is too large: 707 KB of at most 256 KB in total. Shorten cells or remove rows.'])
+    expect(dataBytes({ columns: ['A'], rows: [['\u3042']] })).toBe('{"columns":["A"],"rows":[[""]]}'.length + 3)
+    expect(MAX_DATA_BYTES).toBe(256 * 1024)
   })
 
   it('reports a row that does not have one cell per column, and rows without columns', () => {
@@ -136,6 +152,16 @@ describe('patterns', () => {
     expect(aggregateStatus(['unresolved', 'failed', 'succeeded'])).toBe('failed')
     expect(aggregateStatus(['failed', 'aborted', 'aborted'])).toBe('aborted')
     expect(aggregateStatus(['succeeded', 'running', 'queued'])).toBe('running')
+  })
+
+  it('reports the patterns of a run that ended from outside with the verdict of the run', () => {
+    const p = (index: number, status: RunPattern['status']): RunPattern => ({ index, values: {}, status, startedAt: null, finishedAt: null })
+    const of = (status: RunPattern['status'], list: RunPattern[]) => settledPatterns(status, list)?.map((x) => x.status)
+    expect(of('aborted', [p(1, 'succeeded'), p(2, 'running'), p(3, 'queued')])).toEqual(['succeeded', 'aborted', 'aborted'])
+    expect(of('failed', [p(1, 'unresolved'), p(2, 'running'), p(3, 'queued')])).toEqual(['unresolved', 'failed', 'failed'])
+    // A run that is still going is reported as it is.
+    expect(of('running', [p(1, 'succeeded'), p(2, 'running'), p(3, 'queued')])).toEqual(['succeeded', 'running', 'queued'])
+    expect(settledPatterns('aborted', null)).toBeNull()
   })
 
   it('summarises a run in one line', () => {

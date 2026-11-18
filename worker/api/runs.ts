@@ -215,17 +215,22 @@ runs.post('/runs/:rid/heals/:stepId', async (c) => {
   heal.state = action === 'approve' ? 'approved' : 'rejected'
   // An approved repair is saved once, for the test case (or shared step). The other patterns that found the
   // same replacement for the same element are therefore approved with it; a rejection is about this pattern only.
-  let alsoApproved = 0
-  if (action === 'approve' && patterns && target) {
+  const approvedNow = [heal]
+  // A different repair of the same element that was approved earlier in this run: this approval overwrites it.
+  let replaced: StepResult | undefined
+  if (action === 'approve' && target) {
     const sameElement = new Set((JSON.parse(run.steps ?? '[]') as Step[]).filter((s) => s.target?.uiId === target.uiId && s.target.elementId === target.elementId).map((s) => s.id))
     for (const other of results) {
       const h = other.heal
-      if (other === result || !h || h.state !== 'unresolved' || !sameElement.has(other.stepId)) continue
-      if (h.newLocator.key !== heal.newLocator.key || h.newLocator.value !== heal.newLocator.value) continue
+      if (other === result || !h || !sameElement.has(other.stepId)) continue
+      const same = h.newLocator.key === heal.newLocator.key && h.newLocator.value === heal.newLocator.value
+      if (h.state === 'approved' && !same) replaced ??= other
+      if (h.state !== 'unresolved' || !same || !patterns) continue
       h.state = 'approved'
-      alsoApproved++
+      approvedNow.push(h)
     }
   }
+  const alsoApproved = approvedNow.length - 1
 
   // Only a run that was waiting for review changes its verdict. One that failed (a failed step, a crash,
   // the time limit) or was aborted keeps it: approving a repair does not make an unfinished test pass.
@@ -240,12 +245,13 @@ runs.post('/runs/:rid/heals/:stepId', async (c) => {
   // still the ones this decision was based on, so two reviewers cannot overwrite each other's decision.
   const unchanged = 'EXISTS (SELECT 1 FROM runs WHERE id = ? AND results = ?)'
   const statements: D1PreparedStatement[] = []
+  let notSaved = ''
   if (action === 'approve' && target) {
     // Apply the repair to the live test case (or shared step): every step that uses this element gets the
     // new locator. Boxes stay as captured: they are positions on the stored screenshot, which is not retaken.
     const testCase = await c.env.DB.prepare('SELECT * FROM test_cases WHERE id = ?').bind(ownerId).first<TestCaseRow>()
+    let changed = false
     if (testCase) {
-      let changed = false
       const steps = (JSON.parse(testCase.steps) as Step[]).map((s) => {
         if (s.target?.uiId !== target.uiId || s.target.elementId !== target.elementId) return s
         changed = true
@@ -257,6 +263,12 @@ runs.post('/runs/:rid/heals/:stepId', async (c) => {
         )
       }
     }
+    // The step was moved (to a shared step, say), deleted or pointed elsewhere since the run: the reviewer is
+    // told that no step got the locator, instead of reading "approved" as "fixed".
+    if (!changed) {
+      for (const h of approvedNow) h.notSaved = true
+      notSaved = `No step of the ${step?.origin ? 'shared step' : 'test case'} uses this element any more, so the new locator was not saved to a step.`
+    }
     const ui = await c.env.DB.prepare('SELECT elements FROM uis WHERE id = ?').bind(target.uiId).first<{ elements: string }>()
     if (ui) {
       const elements = (JSON.parse(ui.elements) as UiElement[]).map((el) =>
@@ -265,7 +277,9 @@ runs.post('/runs/:rid/heals/:stepId', async (c) => {
       statements.push(c.env.DB.prepare(`UPDATE uis SET elements = ? WHERE id = ? AND ${unchanged}`).bind(JSON.stringify(elements), target.uiId, id, run.results))
     }
   }
-  const line = `Repair of step ${positionLabel(result!)}${pattern ? ` in pattern ${pattern}` : ''} (${heal.elementName}) ${heal.state} by reviewer${alsoApproved ? `, and with it the same repair in ${alsoApproved} other ${alsoApproved === 1 ? 'pattern' : 'patterns'}` : ''}.`
+  const line = `Repair of step ${positionLabel(result!)}${pattern ? ` in pattern ${pattern}` : ''} (${heal.elementName}) ${heal.state} by reviewer${alsoApproved ? `, and with it the same repair in ${alsoApproved} other ${alsoApproved === 1 ? 'pattern' : 'patterns'}` : ''}.${
+    replaced ? ` It replaces the different repair of the same element approved for step ${positionLabel(replaced)}${replaced.pattern ? ` in pattern ${replaced.pattern}` : ''}.` : ''
+  }${notSaved ? ` ${notSaved}` : ''}`
   statements.push(
     c.env.DB.prepare("UPDATE runs SET results = ?, status = ?, patterns = ?, log = log || CASE WHEN log = '' THEN '' ELSE char(10) END || ? WHERE id = ? AND results = ? AND status = ?").bind(
       JSON.stringify(results),

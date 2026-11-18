@@ -227,6 +227,8 @@ export interface HealProposal {
   after: { screenshotKey: string; box: Box; width: number; height: number }
   /** Set when a later step failed after this heal, i.e. the heal is probably wrong. */
   warning?: string
+  /** Approved, but no step uses the element any more (the step was moved or deleted since the run), so no step got the new locator. */
+  notSaved?: true
 }
 
 /** One row of a data-driven run. */
@@ -234,7 +236,7 @@ export interface RunPattern {
   /** 1-based row of the data table. */
   index: number
   values: Record<string, string>
-  /** `queued` or `running` on a run that has finished: the pattern was not run (the run timed out or crashed). */
+  /** On a run that ended from outside (aborted, timed out, crashed) the API reports the run's verdict for a pattern that never finished; `startedAt` is null when it was not started. */
   status: RunStatus
   startedAt: string | null
   finishedAt: string | null

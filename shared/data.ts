@@ -7,6 +7,11 @@ import type { DataTable, RunPattern, RunStatus } from './types'
 export const MAX_DATA_COLUMNS = 20
 export const MAX_DATA_ROWS = 50
 export const MAX_CELL_LENGTH = 2000
+/**
+ * Largest table as JSON, in UTF-8 bytes. The table is stored in one D1 value next to the steps and copied
+ * into every run with the results and the log, and D1 holds 2 MB per row; the request body limit is 1 MB.
+ */
+export const MAX_DATA_BYTES = 256 * 1024
 /** Same rule as project variables (worker/validate.ts). */
 export const MAX_COLUMN_NAME_LENGTH = 60
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -106,12 +111,17 @@ export interface DataProblem {
   message: string
 }
 
+/** Size of the table the way it is stored. */
+export const dataBytes = (table: DataTable): number => new TextEncoder().encode(JSON.stringify(table)).length
+
 /** Everything that is wrong with a data table; empty when it can be saved. */
 export function validateDataTable(table: DataTable): DataProblem[] {
   const problems: DataProblem[] = []
   if (table.columns.length > MAX_DATA_COLUMNS) problems.push({ message: `A data table can have at most ${MAX_DATA_COLUMNS} columns` })
   if (table.rows.length > MAX_DATA_ROWS) problems.push({ message: `A data table can have at most ${MAX_DATA_ROWS} rows` })
   if (table.columns.length === 0 && table.rows.length > 0) problems.push({ message: 'Add a column before adding rows' })
+  const bytes = dataBytes(table)
+  if (bytes > MAX_DATA_BYTES) problems.push({ message: `The table is too large: ${Math.ceil(bytes / 1024)} KB of at most ${MAX_DATA_BYTES / 1024} KB in total. Shorten cells or remove rows.` })
   const seen = new Set<string>()
   table.columns.forEach((name, column) => {
     let message: string | null = null
@@ -167,6 +177,16 @@ export function aggregateStatus(statuses: RunStatus[]): RunStatus {
   if (statuses.includes('unresolved')) return 'unresolved'
   if (statuses.some((s) => s === 'queued' || s === 'running')) return 'running'
   return 'succeeded'
+}
+
+/**
+ * The patterns of a run as they are reported. A run can end without its consumer finishing it (aborted
+ * while queued, the time limit, a crash): the patterns that were still waiting or running then were not
+ * run to their end, and take the run's verdict instead of staying `queued` / `running` for ever.
+ */
+export function settledPatterns(status: RunStatus, patterns: RunPattern[] | null): RunPattern[] | null {
+  if (!patterns || status === 'queued' || status === 'running') return patterns
+  return patterns.map((p) => (p.status === 'queued' || p.status === 'running' ? { ...p, status: status === 'aborted' ? 'aborted' : 'failed' } : p))
 }
 
 /** `2 of 3 patterns passed`, for a list that shows a data-driven run as one line. */

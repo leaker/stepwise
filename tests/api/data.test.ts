@@ -83,6 +83,8 @@ describe('saving a data table', () => {
       [{ columns: ['A'], rows: [['ok'], ['x'.repeat(2001)]] }, 'Data: row 2, column A: A cell can have at most 2000 characters'],
       [{ columns: ['A'], rows: Array.from({ length: 51 }, () => ['']) }, 'Data: A data table can have at most 50 rows'],
       [{ columns: Array.from({ length: 21 }, (_, i) => `C${i}`), rows: [] }, 'Data: A data table can have at most 20 columns'],
+      // Within every per-cell limit, but more than one D1 row can hold next to the steps and a run's results.
+      [{ columns: ['A', 'B'], rows: Array.from({ length: 50 }, () => ['\u3042'.repeat(2000), '\u3042'.repeat(2000)]) }, 'Data: The table is too large: 587 KB of at most 256 KB in total. Shorten cells or remove rows.'],
     ]
     for (const [data, message] of cases) {
       const res = await call('PATCH', `/test-cases/${t.id}`, { data })
@@ -125,6 +127,29 @@ describe('runs of a data-driven test case', () => {
       expect(res.status).toBe(400)
       expect(res.error).toMatch(/^row must be/)
     }
+  })
+
+  it('no pattern stays queued or running once the run has ended without being executed', async () => {
+    const t = await newCase('Sign in', [comment('a')], TABLE)
+    const run = (await call<Run>('POST', `/test-cases/${t.id}/runs`)).body
+    const aborted = (await call<Run>('POST', `/runs/${run.id}/abort`)).body
+    expect([aborted.status, aborted.patterns?.map((p) => p.status)]).toEqual(['aborted', ['aborted', 'aborted', 'aborted']])
+    expect(aborted.patterns?.every((p) => p.startedAt === null)).toBe(true)
+
+    // The consumer died during the second row and the run was failed from outside (the time limit).
+    const second = (await call<Run>('POST', `/test-cases/${t.id}/runs`)).body
+    const patterns = second.patterns!.map((p, i) => ({ ...p, status: ['succeeded', 'running', 'queued'][i] }))
+    await db.prepare("UPDATE runs SET status = 'failed', patterns = ? WHERE id = ?").bind(JSON.stringify(patterns), second.id).run()
+    expect((await call<Run>('GET', `/runs/${second.id}`)).body.patterns?.map((p) => p.status)).toEqual(['succeeded', 'failed', 'failed'])
+    expect((await call<Run[]>('GET', `/test-cases/${t.id}/runs`)).body.map((r) => r.patterns?.map((p) => p.status))).toEqual([
+      ['succeeded', 'failed', 'failed'],
+      ['aborted', 'aborted', 'aborted'],
+    ])
+
+    // A batch that is aborted before it starts.
+    const batch = (await call<BatchRun>('POST', `/projects/${PID}/batch-runs`, {})).body
+    const stopped = (await call<BatchRun>('POST', `/batch-runs/${batch.id}/abort`)).body
+    expect(stopped.runs?.[0].patterns?.map((p) => p.status)).toEqual(['aborted', 'aborted', 'aborted'])
   })
 
   it('a test case without rows, and a run from before the feature, have no patterns', async () => {
@@ -228,6 +253,27 @@ describe('reviewing repairs of a data-driven run', () => {
     expect(res.body.results.map((r) => r.heal?.state)).toEqual(['approved', 'unresolved', 'approved'])
     expect(res.body.patterns?.map((p) => p.status)).toEqual(['succeeded', 'unresolved', 'succeeded'])
     expect(res.body.status).toBe('unresolved')
+  })
+
+  it('says so when a later approval replaces a different repair of the same element', async () => {
+    const { run, testCase } = await finishedRun([healed(1), healed(2, 'main button'), healed(3)], ['unresolved', 'unresolved', 'unresolved'], 'unresolved')
+    const first = await review(run, { action: 'approve', pattern: 1 })
+    expect(first.body.log).not.toContain('replaces')
+    const second = await review(run, { action: 'approve', pattern: 2 })
+    expect(second.body.status).toBe('succeeded')
+    expect(second.body.log).toContain('Repair of step 1 in pattern 2 ("Sign in" button) approved by reviewer. It replaces the different repair of the same element approved for step 1 in pattern 1.')
+    expect((await stored(testCase.id)).steps[0].target?.locator).toEqual({ key: 'css', value: 'main button' })
+  })
+
+  it('tells the reviewer when the step is no longer there to take the locator', async () => {
+    const { run, testCase } = await finishedRun([healed(1), healed(2), healed(3)], ['unresolved', 'unresolved', 'unresolved'], 'unresolved')
+    // The step was replaced since the run (moved to a shared step, say).
+    await call('PATCH', `/test-cases/${testCase.id}`, { steps: [comment('other')] })
+    const res = await review(run, { action: 'approve', pattern: 1 })
+    expect(res.status).toBe(200)
+    expect(res.body.results.map((r) => [r.heal?.state, r.heal?.notSaved])).toEqual([['approved', true], ['approved', true], ['approved', true]])
+    expect(res.body.log).toContain('No step of the test case uses this element any more, so the new locator was not saved to a step.')
+    expect((await stored(testCase.id)).steps).toEqual([comment('other')])
   })
 
   it('rejecting fails that pattern only, and with it the run', async () => {

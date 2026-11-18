@@ -159,6 +159,8 @@ function parseTarget(v: unknown, at: string): ElementRef {
 }
 
 /** Structural validation only; IF nesting problems are allowed while editing and reported at run time. */
+const STEP_ID = /^[A-Za-z0-9_-]{1,64}$/
+
 export function parseSteps(value: unknown): Step[] {
   if (!Array.isArray(value)) throw new HttpError(400, 'steps must be an array')
   if (value.length > 500) throw new HttpError(400, 'A test case can have at most 500 steps')
@@ -169,6 +171,8 @@ export function parseSteps(value: unknown): Step[] {
     if (typeof raw.command !== 'string' || !Object.hasOwn(COMMAND_BY_ID, raw.command)) throw new HttpError(400, `${at}: unknown command "${String(raw.command)}"`)
     if (raw.id !== undefined && raw.id !== null && typeof raw.id !== 'string') throw new HttpError(400, `${at}: id must be a string`)
     const id = typeof raw.id === 'string' && raw.id !== '' ? raw.id : newId()
+    // No dot: a run names the steps of a shared step `<call id>.<step id>`, which must not collide with a step's own id.
+    if (!STEP_ID.test(id)) throw new HttpError(400, `${at}: id must be 1-64 letters, digits, - or _`)
     if (seen.has(id)) throw new HttpError(400, `${at}: duplicate step id "${id}"`)
     seen.add(id)
     const step: Step = { id, command: raw.command as Step['command'] }
