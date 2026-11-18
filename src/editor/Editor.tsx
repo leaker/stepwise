@@ -1170,7 +1170,13 @@ function EditorInner({ tid }: { tid: string }) {
       </span>
 
       {leaving && blocker.state === 'blocked' && (
-        <Confirm title="Leave without saving?" confirmLabel="Leave anyway" onConfirm={() => blocker.proceed()} onClose={() => blocker.reset()}>
+        <Confirm title="Leave without saving?" confirmLabel="Leave anyway" onConfirm={() => blocker.proceed()}
+          onClose={() => {
+            // At once: the router takes a moment to report the navigation as called off.
+            setLeaving(false)
+            blocker.reset()
+          }}
+        >
           {conflict
             ? 'The last change to the steps was not saved, because the steps were changed somewhere else in the meantime. If you leave now, that change is lost. To keep working with it, stay and load the saved steps: undo then brings back what is on screen now.'
             : 'The latest changes to the steps could not be saved (the reason was shown when saving failed). If you leave now, they are lost. Stay to fix the problem and try again with “Not saved, retry”.'}
