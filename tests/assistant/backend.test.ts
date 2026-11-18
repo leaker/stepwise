@@ -108,6 +108,7 @@ const ELEMENTS = [element('e1', '"Email" input area', 'input'), element('e2', '"
 const FORM_ELEMENTS: UiElement[] = [
   { ...element('f1', '"Contact" pull-down menu', 'select'), options: ['Choose one', 'By email', 'By telephone'] },
   { ...element('f2', '"Total" text', 'text'), fingerprint: { ...element('f2', '', 'text').fingerprint, tag: 'p', text: '$120.00' } },
+  { ...element('f9', '"3 nights" text', 'text'), fingerprint: { ...element('f9', '', 'text').fingerprint, tag: 'p', text: '3 nights' } },
 ]
 const text = (outcome: { content: unknown }): string => (typeof outcome.content === 'string' ? outcome.content : JSON.stringify(outcome.content))
 
@@ -702,6 +703,24 @@ describe('a value checked against what the capture showed', () => {
     expect((await stepsOf(testCaseId)).at(-1)?.value).toBe('By telephone')
     // A value built from a variable cannot be checked here and is let through.
     expect((await tools.call('add_step', { command: 'select', ui_id: 'ui1', element_id: 'f1', value: '${HOW}' }, far)).isError).toBeUndefined()
+  })
+
+  it('is named by the expected text in the step, also after the expectation changes; a name the user gave is kept', async () => {
+    const { tools, testCaseId } = await formTools()
+    const named = async () => (await stepsOf(testCaseId)).map((s) => `${s.target?.name} / ${s.value}`)
+    // The Navigate step is put in front of the first step, and step numbers of the same reply move with it.
+    await tools.call('add_step', { command: 'assert_text_contains', ui_id: 'ui1', element_id: 'f2', value: '$630' }, far)
+    expect((await named())[1]).toBe('"Total" text / $630')
+
+    await tools.call('add_step', { command: 'assert_text_equals', ui_id: 'ui1', element_id: 'f9', value: '3 nights' }, far)
+    expect((await named())[2]).toBe('"3 nights" text / 3 nights')
+    const changed = await tools.call('update_step', { step: 2, value: '4 nights' }, far)
+    expect(text(changed)).toContain('4 nights')
+    expect((await named())[2]).toBe('"4 nights" text / 4 nights')
+    await tools.call('update_step', { step: 2, value: '5 nights' }, far)
+    expect((await named())[2]).toBe('"5 nights" text / 5 nights')
+    await tools.call('update_step', { step: 2, value: '3 nights' }, far)
+    expect((await named())[2]).toBe('"3 nights" text / 3 nights')
   })
 
   it('expects the captured text when an assertion comes without a value, and points out an expectation the capture did not show', async () => {

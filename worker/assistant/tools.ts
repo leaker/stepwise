@@ -195,6 +195,27 @@ export function assistantTools(
       notes.push(`In the capture this element's text was ${JSON.stringify(shown)}, which does not contain what the step expects. Unless a later step changes it, the assertion will fail.`)
     }
   }
+  /**
+   * A text element is named after the text it had in the capture. When an assertion expects another text
+   * (the page changes before the step runs), that name would contradict the step: `Assert "3 nights" text
+   * contains "4 nights"`. The step then names the element by what it expects. A name the user gave is kept.
+   */
+  const nameByExpectation = (step: Step, previous?: string): void => {
+    const target = step.target
+    const quoted = target && /^"(.*)" text$/.exec(target.name)?.[1]
+    if (!target || quoted === undefined || quoted === null) return
+    if (step.command !== 'assert_text_equals' && step.command !== 'assert_text_contains') return
+    const value = step.value?.replace(/\s+/g, ' ').trim()
+    if (!value || value.includes('${')) return
+    const short = (text: string) => (text.length > 60 ? text.slice(0, 59).trimEnd() + '…' : text)
+    const shown = target.fingerprint.text.replace(/\s+/g, ' ').trim()
+    // Only a name that was made from a text: the captured one, or an expectation this function wrote earlier.
+    const fromCapture = quoted !== '' && (shown === quoted || (quoted.endsWith('…') && shown.startsWith(quoted.slice(0, -1))))
+    const fromExpectation = previous !== undefined && short(previous.replace(/\s+/g, ' ').trim()) === quoted
+    if (!fromCapture && !fromExpectation) return
+    const agrees = step.command === 'assert_text_equals' ? shown === value : shown.toLowerCase().includes(value.toLowerCase())
+    step.target = { ...target, name: agrees && fromCapture ? target.name : `"${short(agrees ? shown : value)}" text` }
+  }
   const listed = (t: Loaded) =>
     t.steps.map((s, i) => ({
       step: i + 1,
@@ -352,6 +373,7 @@ export function assistantTools(
     const unused = [!def.value && given.value ? 'value' : '', !def.variable && given.variable ? 'variable' : ''].filter(Boolean)
     if (unused.length) notes.push(`${command} takes no ${unused.join(' and no ')}: what you passed there was ignored.`)
     againstCapture(step, element, notes)
+    nameByExpectation(step)
     checkStep(step, urlProblem(t))
 
     let at = afterStep ?? t.steps.length
@@ -448,6 +470,7 @@ export function assistantTools(
       else delete step.disabled
     } else if (input.disabled !== undefined && input.disabled !== null) throw new ToolInputError('disabled must be true or false.')
     if (value !== undefined || element !== undefined || command !== current.command) againstCapture(step, element, notes)
+    nameByExpectation(step, current.value)
     checkStep(step, urlProblem(t))
 
     const next = [...t.steps]
