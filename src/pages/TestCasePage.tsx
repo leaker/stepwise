@@ -35,9 +35,9 @@ export function TestCasePage() {
     },
   })
 
-  if (tc.isPending) return <Shell><Loading /></Shell>
-  if (tc.isError) return <Shell><ErrorState error={tc.error} onRetry={() => tc.refetch()} /></Shell>
+  if (tc.isError && !tc.data) return <Shell><ErrorState error={tc.error} onRetry={() => tc.refetch()} /></Shell>
   const t = tc.data
+  if (!t) return <Shell><Loading /></Shell>
   const enabled = t.steps.filter((s) => !s.disabled)
   const isShared = t.kind === 'shared'
   const what = isShared ? 'shared step' : 'test case'
@@ -121,15 +121,18 @@ export function TestCasePage() {
 
         <section>
           <h2 className="section-title">Recent runs</h2>
-          {runs.isPending ? (
-            <Loading />
-          ) : runs.isError ? (
-            <ErrorState error={runs.error} onRetry={() => runs.refetch()} />
+          {!runs.data ? (
+            // A list that is on screen stays when a refresh of it fails (it is polled while a run is going).
+            runs.isError ? (
+              <ErrorState error={runs.error} onRetry={() => runs.refetch()} />
+            ) : (
+              <Loading />
+            )
           ) : runs.data.length === 0 ? (
             <Empty title="Not run yet">
               {isShared
                 ? 'A shared step runs as part of the test cases that call it. To try it by itself, run it from the editor.'
-                : 'Run this test case from the editor to see its results here.'}
+                : 'Run this test case from the editor, or in a batch run from the project page, to see its results here.'}
             </Empty>
           ) : (
             <TableWrap label="Recent runs">
@@ -150,6 +153,11 @@ export function TestCasePage() {
                           <StatusIcon status={r.status} />
                           {STATUS_LABEL[r.status]}
                         </Link>
+                        {r.batchRunId && (
+                          <Link to={`/b/${r.batchRunId}`} className="chip chip-quiet" title="This run was part of a batch run. Open the batch run." onClick={(e) => e.stopPropagation()}>
+                            Batch run
+                          </Link>
+                        )}
                         {r.range && <span className="chip chip-quiet">Steps {r.range.from === r.range.to ? r.range.from : `${r.range.from}–${r.range.to}`}</span>}
                         {r.patterns && (
                           <span className="chip chip-quiet">{r.patterns.length === 1 ? `Data row ${r.patterns[0].index}` : isTerminal(r.status) ? patternSummary(r.patterns) : `${r.patterns.length} patterns`}</span>

@@ -182,7 +182,8 @@ runs.get('/test-cases/:tid/runs', async (c) => {
   const tid = c.req.param('tid')
   await getTestCaseRow(c.env.DB, tid)
   await sweepStaleRuns(c.env.DB)
-  const { results } = await c.env.DB.prepare(`SELECT ${RUN_SUMMARY_COLUMNS} FROM runs WHERE test_case_id = ? AND batch_run_id IS NULL ORDER BY created_at DESC, rowid DESC LIMIT 50`)
+  // Single runs and the runs inside batch runs: the newest of them is the test case's "last run" everywhere else.
+  const { results } = await c.env.DB.prepare(`SELECT ${RUN_SUMMARY_COLUMNS} FROM runs WHERE test_case_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 50`)
     .bind(tid)
     .all<RunRow>()
   return c.json(results.map(toRunSummary))

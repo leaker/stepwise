@@ -9,7 +9,7 @@ import { deviceOf } from '../../shared/devices'
 import { flatRange, nextToRun, positionLabel, positionsOf, topLevelCount } from '../../shared/expand'
 import { locatorToString, type Box, type HealProposal, type Run, type RunPattern, type StepResult, type Ui } from '../../shared/types'
 import { api, qk, shotUrl } from '../api'
-import { Button, DeviceChip, Dialog, ErrorState, IconButton, Loading, onTablistKeyDown, Shell, Spinner, StatusIcon, TableWrap, Tabs, toast } from '../components/ui'
+import { Button, DeviceChip, Dialog, ErrorState, IconButton, Loading, onTablistKeyDown, Shell, Spinner, StaleNotice, StatusIcon, TableWrap, Tabs, toast } from '../components/ui'
 import { cx, dateTime, duration, isTerminal, ms, plural, STATUS_LABEL } from '../lib/format'
 import { useModalDialog, useTick } from '../lib/hooks'
 
@@ -33,9 +33,11 @@ export function RunPage() {
   useTick(live)
   const [params, setParams] = useSearchParams()
 
-  if (run.isPending) return <Shell><Loading /></Shell>
-  if (run.isError) return <Shell><ErrorState error={run.error} onRetry={() => run.refetch()} /></Shell>
+  // A live report is asked for every second. One answer that does not come must not replace the report (its
+  // screenshots, an open review) with an error: that is only shown when there is no report to show.
+  if (run.isError && !run.data) return <Shell><ErrorState error={run.error} onRetry={() => run.refetch()} /></Shell>
   const r = run.data
+  if (!r) return <Shell><Loading /></Shell>
   // A data-driven run is read one pattern (data row) at a time: the one in the address, else the first that
   // failed, else the first that waits for a review, else the one that is running, else the first.
   const patterns = r.patterns
@@ -60,7 +62,8 @@ export function RunPage() {
   const crumbs = [
     { label: project.data?.name ?? 'Project', to: `/p/${r.projectId}` },
     ...(r.batchRunId ? [{ label: 'Batch run', to: `/b/${r.batchRunId}` }] : []),
-    { label: r.testCaseName, to: `/t/${r.testCaseId}` },
+    // A run inside a batch report outlives its test case: there is nothing to link to then.
+    r.testCaseDeleted ? { label: r.testCaseName } : { label: r.testCaseName, to: `/t/${r.testCaseId}` },
     { label: 'Result' },
   ]
 
@@ -74,8 +77,10 @@ export function RunPage() {
               <span className={`result-word status-${r.status}`}>{STATUS_LABEL[r.status]}</span>
             </h1>
             <p className="page-sub">
-              <Link to={`/t/${r.testCaseId}`}>{r.testCaseName}</Link> <span className="hash">{r.kind === 'shared' ? `S${r.testCaseNumber}` : `#${r.testCaseNumber}`}</span>
+              {r.testCaseDeleted ? r.testCaseName : <Link to={`/t/${r.testCaseId}`}>{r.testCaseName}</Link>}{' '}
+              <span className="hash">{r.kind === 'shared' ? `S${r.testCaseNumber}` : `#${r.testCaseNumber}`}</span>
               {r.kind === 'shared' && <span className="muted"> · shared step run by itself</span>}
+              {r.testCaseDeleted && <span className="muted"> · this {what} has been deleted</span>}
             </p>
             <div className="chips">
               <span className="chip num">{duration(r.startedAt, r.finishedAt)}</span>
@@ -96,12 +101,16 @@ export function RunPage() {
               Abort
             </Button>
           )}
-          <Link to={`/t/${r.testCaseId}/edit`} className="btn">
-            <Pencil size={15} />
-            <span className="btn-label">Edit {what}</span>
-          </Link>
+          {!r.testCaseDeleted && (
+            <Link to={`/t/${r.testCaseId}/edit`} className="btn">
+              <Pencil size={15} />
+              <span className="btn-label">Edit {what}</span>
+            </Link>
+          )}
         </div>
       </div>
+
+      {run.isError && <StaleNotice live={live} />}
 
       {patterns && pattern && (
         <PatternBar
@@ -534,6 +543,8 @@ function HealDialog({ run, result, live, onClose }: { run: Run; result: StepResu
     },
   })
   const open = heal.state === 'unresolved'
+  // Rejecting fails the run for good, right next to Approve: it is asked for twice.
+  const [rejecting, setRejecting] = useState(false)
   // A different repair of the same element that was approved earlier in this run (in another pattern, or
   // on another step that uses the element): approving this one replaces it.
   const target = run.steps.find((s) => s.id === result.stepId)?.target
@@ -556,6 +567,19 @@ function HealDialog({ run, result, live, onClose }: { run: Run; result: StepResu
               Close
             </Button>
           </>
+        ) : open && rejecting ? (
+          <>
+            <span className="heal-foot-note" role="alert">
+              <strong>Reject this repair?</strong> {result.pattern && (run.patterns?.length ?? 0) > 1 ? `Pattern ${result.pattern}, and with it the run, is` : 'The run is'} marked as failed, and the old locator
+              stays. The decision is final: it cannot be changed afterwards, and a new run is needed to get another proposal.
+            </span>
+            <Button disabled={decide.isPending} onClick={() => setRejecting(false)} data-autofocus>
+              Back
+            </Button>
+            <Button variant="danger" busy={decide.isPending} onClick={() => decide.mutate('reject')}>
+              Reject the repair
+            </Button>
+          </>
         ) : open ? (
           <>
             <span className="heal-foot-note">
@@ -571,8 +595,8 @@ function HealDialog({ run, result, live, onClose }: { run: Run; result: StepResu
                 </strong>
               )}
             </span>
-            <Button variant="danger" busy={decide.isPending && decide.variables === 'reject'} disabled={decide.isPending} onClick={() => decide.mutate('reject')}>
-              Reject
+            <Button variant="danger" disabled={decide.isPending} onClick={() => setRejecting(true)}>
+              Reject…
             </Button>
             <Button variant="primary" busy={decide.isPending && decide.variables === 'approve'} disabled={decide.isPending} onClick={() => decide.mutate('approve')} data-autofocus>
               {heal.warning ? 'Approve anyway' : 'Approve'}

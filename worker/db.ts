@@ -71,6 +71,8 @@ export interface RunRow {
   /** Negative when the run is of a shared step, as in test_cases.number. */
   test_case_number: number
   test_case_name: string
+  /** Only when read by getRunRow: 0 once the test case was deleted. */
+  case_exists?: number
   batch_run_id: string | null
   run_order: number
   status: string
@@ -194,7 +196,7 @@ export function toRunSummary(r: RunRow): Omit<Run, 'steps' | 'log'> {
 }
 
 export function toRun(r: RunRow): Run {
-  return { ...toRunSummary(r), steps: parseJson<Step[]>(r.steps, []), log: r.log ?? '' }
+  return { ...toRunSummary(r), ...(r.case_exists === 0 ? { testCaseDeleted: true } : {}), steps: parseJson<Step[]>(r.steps, []), log: r.log ?? '' }
 }
 
 export function toBatchRun(r: BatchRunRow, statuses: string[]): BatchRun {
@@ -237,7 +239,7 @@ export async function getTestCaseRow(db: D1Database, id: string): Promise<TestCa
 }
 
 export async function getRunRow(db: D1Database, id: string): Promise<RunRow> {
-  const row = await db.prepare('SELECT * FROM runs WHERE id = ?').bind(id).first<RunRow>()
+  const row = await db.prepare('SELECT r.*, EXISTS (SELECT 1 FROM test_cases t WHERE t.id = r.test_case_id) AS case_exists FROM runs r WHERE r.id = ?').bind(id).first<RunRow>()
   if (!row) throw new HttpError(404, 'Run not found')
   return row
 }

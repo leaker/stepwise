@@ -6,6 +6,7 @@ import {
   CircleDashed,
   CircleMinus,
   CircleX,
+  CloudOff,
   Loader2,
   Monitor,
   Smartphone,
@@ -208,6 +209,16 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
           Try again
         </Button>
       )}
+    </div>
+  )
+}
+
+/** Over content that is on screen while refreshing it fails: the content stays, and this says it may be behind. */
+export function StaleNotice({ live }: { live: boolean }) {
+  return (
+    <div className="banner banner-quiet" role="status">
+      <CloudOff size={16} aria-hidden />
+      <span>{live ? 'The connection to the server was lost, so this page may be behind. Trying again…' : 'The latest state could not be loaded, so this page may be behind.'}</span>
     </div>
   )
 }

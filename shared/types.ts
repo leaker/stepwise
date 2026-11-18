@@ -273,6 +273,8 @@ export interface Run {
   kind: TestCaseKind
   testCaseNumber: number
   testCaseName: string
+  /** The test case (or shared step) was deleted after the run; a run inside a batch report outlives it. */
+  testCaseDeleted?: boolean
   batchRunId: string | null
   /** Position inside the batch run (1-based); 0 for single runs. */
   order: number

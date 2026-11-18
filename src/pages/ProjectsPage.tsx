@@ -3,6 +3,7 @@ import { MoreHorizontal, Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Project } from '../../shared/types'
+import { baseUrlProblem } from '../../shared/url'
 import { api, qk } from '../api'
 import { Button, Confirm, Dialog, Empty, ErrorState, Field, Loading, MenuButton, Shell, TableWrap } from '../components/ui'
 
@@ -19,15 +20,16 @@ function CreateProjectDialog({ onClose }: { onClose: () => void }) {
       navigate(`/p/${p.id}`)
     },
   })
+  const urlError = baseUrlProblem(baseUrl)
   return (
     <Dialog
       title="New project"
       onClose={onClose}
-      onSubmit={() => name.trim() && create.mutate()}
+      onSubmit={() => name.trim() && !urlError && create.mutate()}
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button type="submit" variant="primary" busy={create.isPending} disabled={!name.trim()}>
+          <Button type="submit" variant="primary" busy={create.isPending} disabled={!name.trim() || !!urlError}>
             Create project
           </Button>
         </>
@@ -40,8 +42,14 @@ function CreateProjectDialog({ onClose }: { onClose: () => void }) {
         <textarea className="input" rows={2} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What this project tests" />
       </Field>
       <Field label="Base URL" hint={<>Available in steps as <code>{'${BASE_URL}'}</code>. Relative Navigate URLs resolve against it.</>}>
-        <input className="input" type="url" inputMode="url" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://staging.example.com" />
+        {/* Not type="url": "localhost:3000/app" passes the browser's check (it reads "localhost:" as a scheme). */}
+        <input className="input" inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck={false} maxLength={2000} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://staging.example.com" aria-invalid={!!urlError} />
       </Field>
+      {urlError && (
+        <p className="form-error" role="alert">
+          {urlError}
+        </p>
+      )}
     </Dialog>
   )
 }
@@ -73,10 +81,12 @@ export function ProjectsPage() {
         </div>
       </div>
 
-      {projects.isPending ? (
-        <Loading />
-      ) : projects.isError ? (
-        <ErrorState error={projects.error} onRetry={() => projects.refetch()} />
+      {!projects.data ? (
+        projects.isError ? (
+          <ErrorState error={projects.error} onRetry={() => projects.refetch()} />
+        ) : (
+          <Loading />
+        )
       ) : projects.data.length === 0 ? (
         <Empty
           title="No projects yet"

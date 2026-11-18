@@ -4,6 +4,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { isBuiltInVariable, validateSteps } from '../../shared/commands'
 import type { BatchRun, Project, TestCase } from '../../shared/types'
+import { baseUrlProblem } from '../../shared/url'
 import { api, qk } from '../api'
 import { Button, Confirm, DeviceChip, Dialog, Empty, ErrorState, Field, IconButton, Loading, MenuButton, Shell, StatusIcon, TableWrap, Tabs, toast } from '../components/ui'
 import { clock, dateTime, isTerminal, plural, STATUS_LABEL } from '../lib/format'
@@ -15,7 +16,12 @@ export function ProjectPage() {
   const [params, setParams] = useSearchParams()
   const tab = (['cases', 'shared', 'batches', 'settings'] as const).find((t) => t === params.get('tab')) ?? 'cases'
   const project = useQuery({ queryKey: qk.project(pid), queryFn: () => api.project(pid) })
-  const cases = useQuery({ queryKey: qk.testCases(pid), queryFn: () => api.testCases(pid) })
+  const cases = useQuery({
+    queryKey: qk.testCases(pid),
+    queryFn: () => api.testCases(pid),
+    // The "Last run" column of a test case that is queued or running is followed until it has a result.
+    refetchInterval: (q) => (q.state.data?.some((c) => c.lastRun && !isTerminal(c.lastRun.status)) ? 2000 : false),
+  })
   const shared = useQuery({ queryKey: qk.sharedSteps(pid), queryFn: () => api.sharedSteps(pid) })
   const batches = useQuery({
     queryKey: qk.batchRuns(pid),
@@ -24,8 +30,10 @@ export function ProjectPage() {
   })
 
   if (project.isPending) return <Shell><Loading /></Shell>
-  if (project.isError) return <Shell><ErrorState error={project.error} onRetry={() => project.refetch()} /></Shell>
+  // Only when there is nothing to show: a list that is on screen stays there when a refresh of it fails.
+  if (project.isError && !project.data) return <Shell><ErrorState error={project.error} onRetry={() => project.refetch()} /></Shell>
   const p = project.data
+  if (!p) return <Shell><Loading /></Shell>
 
   return (
     <Shell crumbs={[{ label: p.name }]}>
@@ -47,11 +55,11 @@ export function ProjectPage() {
         label="Project sections"
       >
       {tab === 'cases' &&
-        (cases.isPending ? <Loading /> : cases.isError ? <ErrorState error={cases.error} onRetry={() => cases.refetch()} /> : <TestCasesTab pid={pid} cases={cases.data} />)}
+        (cases.data ? <TestCasesTab pid={pid} cases={cases.data} /> : cases.isError ? <ErrorState error={cases.error} onRetry={() => cases.refetch()} /> : <Loading />)}
       {tab === 'shared' &&
-        (shared.isPending ? <Loading /> : shared.isError ? <ErrorState error={shared.error} onRetry={() => shared.refetch()} /> : <SharedStepsTab pid={pid} list={shared.data} />)}
+        (shared.data ? <SharedStepsTab pid={pid} list={shared.data} /> : shared.isError ? <ErrorState error={shared.error} onRetry={() => shared.refetch()} /> : <Loading />)}
       {tab === 'batches' &&
-        (batches.isPending ? <Loading /> : batches.isError ? <ErrorState error={batches.error} onRetry={() => batches.refetch()} /> : <BatchRunsTab batches={batches.data} />)}
+        (batches.data ? <BatchRunsTab batches={batches.data} /> : batches.isError ? <ErrorState error={batches.error} onRetry={() => batches.refetch()} /> : <Loading />)}
       {tab === 'settings' && <SettingsTab key={p.id} project={p} />}
       </Tabs>
     </Shell>
@@ -214,7 +222,8 @@ function TestCasesTab({ pid, cases }: { pid: string; cases: TestCase[] }) {
       </TableWrap>
       {deleting && (
         <Confirm title="Delete test case?" confirmLabel="Delete test case" busy={remove.isPending} onConfirm={() => remove.mutate(deleting.id)} onClose={() => setDeleting(null)}>
-          “{deleting.name}” (#{deleting.number}) and its captured screens will be deleted. Results of past runs are kept.
+          “{deleting.name}” (#{deleting.number}), its captured screens and the results of its single runs will be deleted. Its results inside batch runs are
+          kept.
         </Confirm>
       )}
     </>
@@ -539,6 +548,7 @@ function SettingsTab({ project }: { project: Project }) {
     return () => window.clearTimeout(t)
   }, [varError])
   const variables = Object.fromEntries(rows.filter((r) => r.name.trim()).map((r) => [r.name.trim(), r.value]))
+  const urlError = baseUrlProblem(baseUrl)
   const dirty =
     name.trim() !== project.name ||
     description !== project.description ||
@@ -546,15 +556,26 @@ function SettingsTab({ project }: { project: Project }) {
     JSON.stringify(variables) !== JSON.stringify(project.variables)
 
   const save = useMutation({
-    mutationFn: () => api.updateProject(project.id, { name: name.trim(), description, baseUrl: baseUrl.trim(), variables }),
-    onSuccess: (p) => {
+    mutationFn: async () => {
+      const sent = { name: name.trim(), description, baseUrl: baseUrl.trim(), variables }
+      return { sent, saved: await api.updateProject(project.id, sent) }
+    },
+    onSuccess: ({ sent, saved: p }) => {
+      // The server stores the values in its own spelling (a base URL without the slash at its end): the fields
+      // show what was stored, or the form would go on saying "Unsaved changes". A field edited meanwhile is left.
+      setName((v) => (v.trim() === sent.name ? p.name : v))
+      setBaseUrl((v) => (v.trim() === sent.baseUrl ? p.baseUrl : v))
       qc.setQueryData(qk.project(p.id), p)
       void qc.invalidateQueries({ queryKey: qk.projects })
       toast('Settings saved')
     },
   })
 
-  const curl = `curl -X POST "${location.origin}/api/projects/${project.id}/batch-runs" \\\n  -H "content-type: application/json" \\\n  -d '{"trigger":"api"}'`
+  // With an access code, a script sends it as a bearer token (the browser's session cookie is not readable).
+  // The snippet names an environment variable: the code itself is never put on the page.
+  const session = useQuery({ queryKey: qk.session, queryFn: api.session, staleTime: Infinity })
+  const withCode = session.data?.required === true
+  const curl = `curl -X POST "${location.origin}/api/projects/${project.id}/batch-runs" \\\n${withCode ? '  -H "Authorization: Bearer $STEPWISE_ACCESS_CODE" \\\n' : ''}  -H "content-type: application/json" \\\n  -d '{"trigger":"api"}'`
   useEffect(() => {
     if (!copied) return
     const t = window.setTimeout(() => setCopied(null), 1500)
@@ -567,7 +588,7 @@ function SettingsTab({ project }: { project: Project }) {
         className="panel"
         onSubmit={(e) => {
           e.preventDefault()
-          if (name.trim() && !varError) save.mutate()
+          if (name.trim() && !varError && !urlError) save.mutate()
         }}
       >
         <h2>Project</h2>
@@ -578,8 +599,13 @@ function SettingsTab({ project }: { project: Project }) {
           <textarea className="input" rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
         </Field>
         <Field label="Base URL" hint={<>Available in steps as <code>{'${BASE_URL}'}</code>. Relative Navigate URLs resolve against it.</>}>
-          <input className="input" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://staging.example.com" />
+          <input className="input" inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck={false} maxLength={2000} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://staging.example.com" aria-invalid={!!urlError} />
         </Field>
+        {urlError && (
+          <p className="form-error" role="alert">
+            {urlError}
+          </p>
+        )}
 
         <h2 className="panel-gap">Variables</h2>
         <p className="muted">
@@ -627,7 +653,7 @@ function SettingsTab({ project }: { project: Project }) {
           </span>
         </div>
         <div className="panel-foot">
-          <Button type="submit" variant="primary" busy={save.isPending} disabled={!dirty || !name.trim() || !!varError}>
+          <Button type="submit" variant="primary" busy={save.isPending} disabled={!dirty || !name.trim() || !!varError || !!urlError}>
             Save settings
           </Button>
           {dirty && <span className="muted">Unsaved changes</span>}
@@ -638,8 +664,17 @@ function SettingsTab({ project }: { project: Project }) {
         <h2>Run from CI</h2>
         <p className="muted">
           This request starts a batch run of every test case ({plural(project.testCaseCount ?? 0, 'test case')} now) and returns its id. Poll{' '}
-          <code>GET /api/batch-runs/&lt;id&gt;</code> until <code>status</code> is no longer <code>queued</code> or <code>running</code>. If the workspace has
-          an access code, send the session cookie with both requests.
+          <code>GET /api/batch-runs/&lt;id&gt;</code> until <code>status</code> is no longer <code>queued</code> or <code>running</code>.{' '}
+          {withCode ? (
+            <>
+              This workspace has an access code: both requests send it as <code>Authorization: Bearer</code>, here from the environment variable{' '}
+              <code>STEPWISE_ACCESS_CODE</code>, which you set to the code in your CI’s secrets.
+            </>
+          ) : (
+            <>
+              If the workspace gets an access code, both requests need the header <code>Authorization: Bearer &lt;code&gt;</code>.
+            </>
+          )}
         </p>
         <div className="snippet">
           <pre>{curl}</pre>

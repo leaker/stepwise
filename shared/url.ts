@@ -10,6 +10,10 @@ export function parseHttpUrl(text: string): URL | null {
   }
 }
 
+export const BASE_URL_PROBLEM = 'The base URL must be a full address that starts with http:// or https://'
+/** What is wrong with a project's base URL as typed, or null. Empty is fine: a project can do without one. */
+export const baseUrlProblem = (text: string): string | null => (text.trim() === '' || parseHttpUrl(text.trim()) ? null : BASE_URL_PROBLEM)
+
 /** Does the text start with a URL scheme (`https:`, `about:`, ...)? */
 export const hasScheme = (text: string): boolean => /^[a-z][a-z0-9+.-]*:/i.test(text)
 

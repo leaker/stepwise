@@ -264,6 +264,31 @@ describe('creating a run', () => {
   })
 })
 
+describe('the runs of a test case', () => {
+  it('lists the ones inside batch runs too, and a batch result says when its test case is gone', async () => {
+    const t = await newCase('Checkout', [comment('one')])
+    const single = (await call<Run>('POST', `/test-cases/${t.id}/runs`, {})).body
+    const batch = (await call<{ id: string; runs: Run[] }>('POST', `/projects/${PID}/batch-runs`, {})).body
+    const inBatch = (await call<{ runs: Run[] }>('GET', `/batch-runs/${batch.id}`)).body.runs[0]
+    const listed = (await call<Run[]>('GET', `/test-cases/${t.id}/runs`)).body
+    expect(listed.map((r) => [r.id, r.batchRunId]).sort()).toEqual([[single.id, null], [inBatch.id, batch.id]].sort())
+    expect((await call<Run>('GET', `/runs/${inBatch.id}`)).body.testCaseDeleted).toBeUndefined()
+    // Deleting the test case takes its single runs with it; the batch report keeps its line.
+    expect((await call('DELETE', `/test-cases/${t.id}`)).status).toBe(200)
+    expect((await call('GET', `/runs/${single.id}`)).status).toBe(404)
+    expect((await call<Run>('GET', `/runs/${inBatch.id}`)).body.testCaseDeleted).toBe(true)
+  })
+})
+
+describe('the base URL of a project', () => {
+  it('is stored without the slash at its end, and one without http(s) is refused in plain words', async () => {
+    const saved = await call<{ baseUrl: string }>('PATCH', `/projects/${PID}`, { baseUrl: 'https://staging.example.com/' })
+    expect(saved.body.baseUrl).toBe('https://staging.example.com')
+    const refused = await call('POST', '/projects', { name: 'Local', baseUrl: 'localhost:4791/demo' })
+    expect([refused.status, refused.error]).toEqual([400, 'The base URL must be a full address that starts with http:// or https://'])
+  })
+})
+
 describe('a batch whose worker was stopped', () => {
   it('fails the test case that was running with what happened, and leaves the others alone', async () => {
     const ids = ['r1', 'r2', 'r3']

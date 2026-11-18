@@ -4,7 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { patternSummary } from '../../shared/data'
 import type { RunStatus } from '../../shared/types'
 import { api, qk } from '../api'
-import { Button, DeviceChip, Empty, ErrorState, Loading, Shell, StatusIcon, TableWrap } from '../components/ui'
+import { Button, DeviceChip, Empty, ErrorState, Loading, Shell, StaleNotice, StatusIcon, TableWrap } from '../components/ui'
 import { clock, dateTime, isTerminal, STATUS_LABEL } from '../lib/format'
 import { useTick } from '../lib/hooks'
 
@@ -30,9 +30,10 @@ export function BatchRunPage() {
   const live = !!batch.data && !isTerminal(batch.data.status)
   useTick(live)
 
-  if (batch.isPending) return <Shell><Loading /></Shell>
-  if (batch.isError) return <Shell><ErrorState error={batch.error} onRetry={() => batch.refetch()} /></Shell>
+  // A failed refresh of a report that is on screen (it is polled while it runs) does not take the report away.
+  if (batch.isError && !batch.data) return <Shell><ErrorState error={batch.error} onRetry={() => batch.refetch()} /></Shell>
   const b = batch.data
+  if (!b) return <Shell><Loading /></Shell>
   const runs = b.runs ?? []
   const summary: { status: RunStatus; n: number }[] = [
     { status: 'succeeded', n: b.counts.succeeded },
@@ -69,6 +70,8 @@ export function BatchRunPage() {
           )}
         </div>
       </div>
+
+      {batch.isError && <StaleNotice live={live} />}
 
       <dl className="summary">
         <div className="summary-cell">

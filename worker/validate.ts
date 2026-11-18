@@ -2,7 +2,7 @@
 import { COMMAND_BY_ID, isBuiltInVariable, MAX_ELEMENT_NAME, MAX_LOCATOR_LENGTH, MAX_STEP_TEXT, MAX_STEPS } from '../shared/commands'
 import { describeDataProblem, validateDataTable } from '../shared/data'
 import { positionLabel, type StepPosition } from '../shared/expand'
-import { parseHttpUrl, resolveUrl } from '../shared/url'
+import { BASE_URL_PROBLEM, parseHttpUrl, resolveUrl } from '../shared/url'
 import type { Box, DataTable, ElementRef, ElementType, Fingerprint, Locator, Step, UiElement } from '../shared/types'
 import { HttpError, type Env } from './env'
 import { newId } from './db'
@@ -50,7 +50,7 @@ export function optionalText(value: unknown, field: string, max: number): string
 export function optionalBaseUrl(value: unknown): string | undefined {
   const text = optionalText(value, 'baseUrl', 2000)?.trim()
   if (text === undefined || text === '') return text
-  if (!parseHttpUrl(text)) throw new HttpError(400, 'baseUrl must be an http(s) URL')
+  if (!parseHttpUrl(text)) throw new HttpError(400, BASE_URL_PROBLEM)
   return text.replace(/\/+$/, '')
 }
 
