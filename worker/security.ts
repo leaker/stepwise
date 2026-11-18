@@ -11,11 +11,11 @@ import type { Env } from './env'
  */
 export const APP_CSP = [
   "default-src 'self'",
-  "script-src 'self' 'report-sample'",
+  "script-src 'self' 'report-sample' https://static.cloudflareinsights.com",
   "style-src 'self' https://fonts.googleapis.com",
   'font-src https://fonts.gstatic.com',
   "img-src 'self' data: blob:",
-  "connect-src 'self'",
+  "connect-src 'self' https://cloudflareinsights.com",
   "object-src 'none'",
   "base-uri 'none'",
   "frame-ancestors 'none'",

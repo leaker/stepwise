@@ -423,7 +423,7 @@ A second pass went through seventeen more guides, one by one:
   Types; the sample site, whose pages contain inline scripts, gets the three framing and plugin directives
   only. The access cookie is `__Host-sw_access` over https. `/api` refuses requests another site makes the
   browser send (`Sec-Fetch-Site`), before the access code is checked. `Strict-Transport-Security` starts at
-  `max-age=300`: raise it to a year once it has been live without trouble. Not done: `script-src` is `'self'`
+  `max-age=300`: raise it to a year once it has been live without trouble. Not done: `script-src` is `'self'` (plus the Cloudflare Web Analytics beacon the zone injects)
   rather than hashes with `'strict-dynamic'` (the shell is static and its only script is the hashed bundle),
   and there is no violation report endpoint, because nothing collects reports.
 - **`browser-ui-theming`** - applied. Placeholder and muted text reach 4.5:1 in the light theme, text fields
