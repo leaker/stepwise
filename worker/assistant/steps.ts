@@ -88,6 +88,7 @@ export function checkStep(step: Step, checkUrl: (value: string) => string | null
   if (step.command === 'swipe' && !dynamic && !SWIPE_DIRECTIONS.includes(value.trim().toLowerCase())) fail(`swipe takes one of: ${SWIPE_DIRECTIONS.join(', ')}.`)
   if ((step.command === 'wait_seconds' || step.command === 'wait_visible') && !dynamic && value.trim() !== '') {
     const n = Number(value)
+    // Well below what the engine allows (MAX_WAIT_SECONDS): a session has minutes, and a step that needs longer is a sign of a wrong approach.
     if (!Number.isFinite(n) || n < 0 || n > 120) fail(`${step.command} takes a number of seconds between 0 and 120, as a string such as "2".`)
   }
   if (step.command === 'navigate') {
@@ -108,24 +109,36 @@ export function checkStep(step: Step, checkUrl: (value: string) => string | null
 export class TurnNumbering {
   /** The lowest step number whose meaning changed in this reply. */
   private shiftedFrom = Infinity
+  /** What changed it: a step that was removed or inserted, or an add_step that was refused. */
+  private cause: 'moved' | 'add_step' = 'moved'
 
   /** A new model reply: its calls see the list as it is now. */
   reset(): void {
     this.shiftedFrom = Infinity
+    this.cause = 'moved'
   }
 
   /** Refuse a step number that an earlier call of this reply has moved. */
   check(n: number, key: string): void {
-    if (n >= this.shiftedFrom) {
+    if (n < this.shiftedFrom) return
+    if (this.cause === 'add_step') {
       fail(
-        `Not done: an earlier call in this reply removed or inserted a step, so the steps from number ${this.shiftedFrom} on have moved and ${key} ${n} may no longer be the step you meant. Nothing was changed by this call. Send it again with the number from the current list (get_steps shows it). To change several steps in one reply, work from the highest number down.`,
+        `Not done: an earlier add_step in this reply was refused, so the step that was to become number ${this.shiftedFrom} was not added and the numbers from there on are not the ones you counted on: ${key} ${n} is another step than you meant, or none. Nothing was changed by this call. Fix the refused add_step first, then send this call again with the number from the current list (get_steps shows it).`,
       )
     }
+    fail(
+      `Not done: an earlier call in this reply removed or inserted a step, so the steps from number ${this.shiftedFrom} on have moved and ${key} ${n} may no longer be the step you meant. Nothing was changed by this call. Send it again with the number from the current list (get_steps shows it). To change several steps in one reply, work from the highest number down.`,
+    )
   }
 
-  /** Step numbers from `from` on now mean other steps (a removal at `from`, or an insertion before it). */
-  shift(from: number): void {
-    this.shiftedFrom = Math.min(this.shiftedFrom, from)
+  /**
+   * Step numbers from `from` on now mean other steps: a removal at `from`, an insertion before it, or
+   * (`cause` add_step) an append that was refused, which would have been number `from`.
+   */
+  shift(from: number, cause: 'moved' | 'add_step' = 'moved'): void {
+    if (from >= this.shiftedFrom) return
+    this.shiftedFrom = from
+    this.cause = cause
   }
 }
 
@@ -187,14 +200,37 @@ export function variableUrlProblem(value: string, o: { baseUrl: string; appOrigi
  * needs to know which variable was there. Short values are left alone: they would match by accident.
  */
 export function maskVariables(text: string, variables: Record<string, string>): string {
-  const entries = Object.entries(variables)
-    .filter(([, v]) => v.length >= 4)
-    .sort((a, b) => b[1].length - a[1].length)
-  let out = text
-  for (const [name, value] of entries) {
-    for (const form of new Set([value, encodeURIComponent(value), JSON.stringify(value).slice(1, -1)])) out = out.split(form).join(`\${${name}}`)
+  // A value is only replaced where it stands by itself. Values are often ordinary words (test, admin, 1234):
+  // replaced inside longer words they would turn "Contest results" into "Con${USER} results", and a model
+  // that copies such a text into a step ties the step to a variable that has nothing to do with it.
+  const names = new Map<string, string>()
+  for (const [name, value] of Object.entries(variables)) {
+    if (value.length < 4) continue
+    for (const form of [value, encodeURIComponent(value), JSON.stringify(value).slice(1, -1)]) if (!names.has(form)) names.set(form, name)
   }
-  return out
+  if (names.size === 0) return text
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  // "By itself": no letter or digit right before or after. A percent-escape before it (%20) is a separator too.
+  const alone = (form: string) => `${/^[A-Za-z0-9]/.test(form) ? '(?<=^|[^A-Za-z0-9]|%[0-9A-Fa-f]{2})' : ''}${escape(form)}${/[A-Za-z0-9]$/.test(form) ? '(?![A-Za-z0-9])' : ''}`
+  // One pass, longest first: a value is never looked for inside a ${NAME} this function has just written.
+  const pattern = new RegExp(
+    [...names.keys()]
+      .sort((a, b) => b.length - a.length)
+      .map(alone)
+      .join('|'),
+    'g',
+  )
+  return text.replace(pattern, (found) => `\${${names.get(found) ?? ''}}`)
+}
+
+/**
+ * maskVariables for a URL the page ended on. The host is left as it is: it is not a secret (the model
+ * needs it to tell which site it is on), and a value that happens to be part of a host name must not turn
+ * the URL into one the model cannot use.
+ */
+export function maskUrl(url: string, variables: Record<string, string>): string {
+  const m = /^([a-z][a-z0-9+.-]*:\/\/[^/?#]*)(.*)$/is.exec(url)
+  return m ? m[1] + maskVariables(m[2], variables) : maskVariables(url, variables)
 }
 
 // ---- what a capture tells the model ----

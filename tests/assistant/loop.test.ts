@@ -266,6 +266,29 @@ describe('assistant loop', () => {
     expect(requests).toHaveLength(1)
   })
 
+  it('calls a model request that was cut short by the time limit what it is, and a slow model a slow model', async () => {
+    let clock = 0
+    const late = scripted([
+      () => {
+        clock += 11 * 60_000
+        return turn('tool_use', [{ tool: 'run_steps', input: {} }])
+      },
+      () => {
+        // One minute was left for this request, and it took it.
+        clock += 60_000
+        throw new Anthropic.APIConnectionTimeoutError()
+      },
+    ])
+    const out = memorySink()
+    const result = await run(late.model, memoryHost().host, out.sink, { now: () => clock })
+    expect(result).toMatchObject({ status: 'failed', error: expect.stringContaining('12 minute limit') })
+    expect((result as { error: string }).error).toContain('The steps built so far are kept.')
+
+    clock = 0
+    const slow = scripted([new Anthropic.APIConnectionTimeoutError()])
+    expect(await run(slow.model, memoryHost().host, memorySink().sink, { now: () => clock })).toMatchObject({ status: 'failed', error: expect.stringContaining('did not answer in time') })
+  })
+
   it('holds the time limit between the tool calls of one reply, and tells the tools when it is', async () => {
     let clock = 0
     const seen: { name: string; deadline: number }[] = []

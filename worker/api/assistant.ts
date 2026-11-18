@@ -37,15 +37,17 @@ assistant.post('/test-cases/:tid/assistant', async (c) => {
   const limits = dailyLimits(c.env)
   const dayAgo = new Date(Date.now() - DAY_MS).toISOString()
   // One statement: two requests at the same moment cannot both find the test case free, or both take the
-  // last session of the budget.
-  const inserted = await c.env.DB.prepare(
-    `INSERT INTO assistant_sessions (id, test_case_id, status, events, created_at) SELECT ?1, ?2, 'queued', ?3, ?4
-     WHERE NOT EXISTS (SELECT 1 FROM assistant_sessions WHERE test_case_id = ?2 AND status IN ('queued', 'running'))
-       AND (SELECT COUNT(*) FROM assistant_sessions WHERE created_at >= ?5) < ?6
-       AND (SELECT COALESCE(SUM(json_extract(usage, '$.costUsd')), 0) FROM assistant_sessions WHERE created_at >= ?5) < ?7`,
-  )
-    .bind(id, testCase.id, JSON.stringify(events), ts, dayAgo, limits.sessions, limits.budgetUsd)
-    .run()
+  // last session of the budget. The budget is counted in assistant_usage (see dailyUse); its row is written
+  // in the same batch, only when the session was.
+  const [inserted] = await c.env.DB.batch([
+    c.env.DB.prepare(
+      `INSERT INTO assistant_sessions (id, test_case_id, status, events, created_at) SELECT ?1, ?2, 'queued', ?3, ?4
+       WHERE NOT EXISTS (SELECT 1 FROM assistant_sessions WHERE test_case_id = ?2 AND status IN ('queued', 'running'))
+         AND (SELECT COUNT(*) FROM assistant_usage WHERE created_at >= ?5) < ?6
+         AND (SELECT COALESCE(SUM(cost_usd), 0) FROM assistant_usage WHERE created_at >= ?5) < ?7`,
+    ).bind(id, testCase.id, JSON.stringify(events), ts, dayAgo, limits.sessions, limits.budgetUsd),
+    c.env.DB.prepare('INSERT INTO assistant_usage (session_id, created_at, cost_usd) SELECT id, created_at, 0 FROM assistant_sessions WHERE id = ?').bind(id),
+  ])
   if (inserted.meta.changes === 0) {
     const busy = await c.env.DB.prepare("SELECT 1 AS x FROM assistant_sessions WHERE test_case_id = ? AND status IN ('queued', 'running') LIMIT 1").bind(testCase.id).first()
     if (busy) throw new HttpError(409, 'The assistant is still working on this test case. Wait for it to finish, or abort it.')
@@ -64,7 +66,8 @@ assistant.post('/test-cases/:tid/assistant', async (c) => {
       : undefined
     await c.env.RUN_QUEUE.send({ assistantSessionId: id, origin: new URL(c.req.url).origin, ...(override?.model || override?.effort ? { override } : {}) })
   } catch (e) {
-    await c.env.DB.prepare('DELETE FROM assistant_sessions WHERE id = ?').bind(id).run()
+    // Never started: it does not count against the budget either.
+    await c.env.DB.batch([c.env.DB.prepare('DELETE FROM assistant_sessions WHERE id = ?').bind(id), c.env.DB.prepare('DELETE FROM assistant_usage WHERE session_id = ?').bind(id)])
     throw e
   }
   return c.json(toSession(await getSessionRow(c.env.DB, id)), 201)

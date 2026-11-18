@@ -94,10 +94,14 @@ export function dailyLimits(env: { ASSISTANT_DAILY_SESSIONS?: string; ASSISTANT_
   return { sessions: limitOf(env.ASSISTANT_DAILY_SESSIONS, DEFAULT_DAILY_SESSIONS), budgetUsd: limitOf(env.ASSISTANT_DAILY_BUDGET_USD, DEFAULT_DAILY_BUDGET_USD) }
 }
 
-/** Sessions started and the estimated spend in the 24 hours before `nowMs`, over all test cases. */
+/**
+ * Sessions started and the estimated spend in the 24 hours before `nowMs`, over all test cases. Counted in
+ * assistant_usage, which has one row per session that is not deleted with the session: deleting a test
+ * case (and with it its sessions) does not give the budget back.
+ */
 export async function dailyUse(db: D1Database, nowMs = Date.now()): Promise<{ sessions: number; costUsd: number }> {
   const row = await db
-    .prepare("SELECT COUNT(*) AS sessions, COALESCE(SUM(json_extract(usage, '$.costUsd')), 0) AS cost FROM assistant_sessions WHERE created_at >= ?")
+    .prepare('SELECT COUNT(*) AS sessions, COALESCE(SUM(cost_usd), 0) AS cost FROM assistant_usage WHERE created_at >= ?')
     .bind(new Date(nowMs - DAY_MS).toISOString())
     .first<{ sessions: number; cost: number }>()
   return { sessions: row?.sessions ?? 0, costUsd: row?.cost ?? 0 }

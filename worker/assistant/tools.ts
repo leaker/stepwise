@@ -12,7 +12,7 @@ import { sharedLookupFor } from '../shared'
 import { assertNavigateTargetsAllowed, isHostAllowed, resolveUrl } from '../validate'
 import type { ToolContext, ToolHost, ToolOutcome, ToolResultContent } from './loop'
 import type { TaskContext } from './prompt'
-import { asInput, checkStep, commandOf, DEFAULT_VALUE, listElements, maskVariables, optionalInt, optionalString, requiredInt, SHARED_STEP_NOTE, stepIndex, targetFrom, ToolInputError, TurnNumbering, variableUrlProblem, type Input } from './steps'
+import { asInput, checkStep, commandOf, DEFAULT_VALUE, listElements, maskUrl, maskVariables, optionalInt, optionalString, requiredInt, SHARED_STEP_NOTE, stepIndex, targetFrom, ToolInputError, TurnNumbering, variableUrlProblem, type Input } from './steps'
 
 const json = (value: unknown): string => JSON.stringify(value)
 const clip = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
@@ -68,16 +68,18 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
    * Write the steps back, but only onto the list this call read (`t`), and only while the session is still
    * running: a call that was already under way when the user aborted must not change the test case after
    * the transcript said "Aborted", and nothing else may have written the steps in between. One statement,
-   * so there is no gap between the check and the write. The editor notices the change through updated_at.
+   * so there is no gap between the check and the write. It is the steps that are compared, not the row's
+   * time stamp: saving the data table, the name or the device during a session is allowed and changes
+   * nothing the assistant works on. The editor notices the change through updated_at.
    */
   const saveSteps = async (t: Loaded, steps: Step[]): Promise<void> => {
     if (steps.length > 500) throw new ToolInputError('A test case can have at most 500 steps.')
     // Always later than what was read, so the next call's check tells this write from an older one.
     const stamp = new Date(Math.max(Date.now(), Date.parse(t.row.updated_at) + 1)).toISOString()
     const saved = await env.DB.prepare(
-      "UPDATE test_cases SET steps = ?1, updated_at = ?2 WHERE id = ?3 AND updated_at = ?4 AND EXISTS (SELECT 1 FROM assistant_sessions WHERE id = ?5 AND status = 'running')",
+      "UPDATE test_cases SET steps = ?1, updated_at = ?2 WHERE id = ?3 AND steps = ?4 AND EXISTS (SELECT 1 FROM assistant_sessions WHERE id = ?5 AND status = 'running')",
     )
-      .bind(JSON.stringify(steps), stamp, testCaseId, t.row.updated_at, sessionId)
+      .bind(JSON.stringify(steps), stamp, testCaseId, t.row.steps, sessionId)
       .run()
     if (saved.meta.changes > 0) return
     if (!(await active())) throw new ToolInputError('Not done: the session was stopped, so the steps were left as they are.')
@@ -100,6 +102,11 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
   const stopReason = (context: ToolContext) => async (): Promise<boolean | string> => {
     if (!(await active())) return true
     return Date.now() >= context.deadline ? 'Stopped: the assistant session ran out of time' : false
+  }
+  /** Refuse a replay or a run over steps whose branch structure is broken, in words the model can act on. */
+  const branchProblem = (steps: Step[], span: { from: number; to: number } | null): void => {
+    const problem = validateSteps(steps, span)[0]
+    if (problem) throw new ToolInputError(`Step ${positionLabel(positionsOf(steps)[steps.findIndex((s) => s.id === problem.stepId)])}: ${problem.message}. Fix the branch structure, then try again.`)
   }
   const listed = (t: Loaded) =>
     t.steps.map((s, i) => ({
@@ -135,7 +142,9 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
       numbering.check(afterStep, 'after_step')
       replayTo = stepIndex(t.steps, afterStep, 'after_step') + 1
       steps = expanded(t, replayTo)
-      assertNavigateTargetsAllowed(steps.slice(0, flatRange(steps, { from: 1, to: replayTo }).to), t.baseUrl, t.variables, env, appOrigin, positionsOf(steps))
+      const reach = flatRange(steps, { from: 1, to: replayTo }).to
+      branchProblem(steps, { from: 1, to: reach })
+      assertNavigateTargetsAllowed(steps.slice(0, reach), t.baseUrl, t.variables, env, appOrigin, positionsOf(steps))
     } else if (afterStep === 0) {
       const text = (urlText ?? '').trim() || t.baseUrl
       if (!text) throw new ToolInputError('The project has no base URL, so pass url: the absolute http(s) URL of the page to capture.')
@@ -144,14 +153,15 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
       if (!isHostAllowed(url, env, appOrigin)) throw new ToolInputError(`${url.hostname} is not in this deployment's allowed hosts, so it cannot be opened. Tell the user if the test needs it.`)
     } else throw new ToolInputError('after_step must be 0 or a step number.')
 
+    const mask = (text: string) => maskVariables(text, t.variables)
     const res = await captureScreen(
       env,
       { testCase: t.row, steps, baseUrl: t.baseUrl, variables: t.variables, replayTo, url, appOrigin, preview: wantScreenshot, shouldAbort: stopReason(context) },
       await browser.get(),
     )
-    const { ui, replayError, preview } = res
+    const { ui, replayError, tolerated, preview } = res
+    const continued = (tolerated ?? []).map((f) => ({ step: t.steps.findIndex((s) => s.id === f.stepId) + 1, message: mask(clip(f.message, 300)) }))
     const failedAt = replayError ? t.steps.findIndex((s) => s.id === replayError.stepId) + 1 : 0
-    const mask = (text: string) => maskVariables(text, t.variables)
     // What Stepwise says (ids, what happened in the replay) and what the page says are kept apart: the model
     // is told in the system prompt, and again right here, that the second kind is never an instruction.
     const list = listElements(ui.elements)
@@ -159,10 +169,13 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
       ui_id: ui.id,
       name: ui.name,
       ...(replayError ? { replay_error: { step: failedAt, message: mask(clip(replayError.message, 400)) }, note: `The replay stopped at step ${failedAt}: the capture shows the page at that point, not after step ${afterStep}.` } : {}),
+      ...(continued.length
+        ? { failed_assertions: continued, failed_assertions_note: `These assertions failed during the replay but are set to continue on failure, so the replay went on: the capture does show the page after step ${afterStep}.` }
+        : {}),
       ...(preview?.cropped ? { screenshot_note: 'The screenshot shows only the top of a long page; the element list covers the whole page.' } : {}),
       page_note: PAGE_NOTE,
       ...(list.omitted ? { elements_note: `The page has ${list.omitted} more text elements than are listed; its links, buttons and fields are all there.` } : {}),
-      page: { url: mask(ui.url), title: ui.title },
+      page: { url: maskUrl(ui.url, t.variables), title: ui.title },
     }
     const content: ToolResultContent = [
       { type: 'text', text: json(body) },
@@ -177,7 +190,25 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
     }
   }
 
+  /**
+   * The model numbers the steps it appends in one reply itself ("the next one is 4, then 5") and refers to
+   * them in the same reply (capture_screen after_step 5). When an append is refused, every number from the
+   * one it would have got means another step than the model had in mind, or none.
+   */
   const addStep = async (input: Input): Promise<ToolOutcome> => {
+    const appending = input.after_step === undefined || input.after_step === null
+    try {
+      return await addStepNow(input)
+    } catch (e) {
+      if (appending && e instanceof ToolInputError) {
+        const count = await env.DB.prepare('SELECT steps FROM test_cases WHERE id = ?').bind(testCaseId).first<{ steps: string }>()
+        if (count) numbering.shift((JSON.parse(count.steps) as Step[]).length + 1, 'add_step')
+      }
+      throw e
+    }
+  }
+
+  const addStepNow = async (input: Input): Promise<ToolOutcome> => {
     const command = commandOf(input.command)
     const def = COMMAND_BY_ID[command]
     const uiId = optionalString(input, 'ui_id', 64)
@@ -277,10 +308,8 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
     const whole = from === 1 && to === t.steps.length
     const steps = expanded(t, to)
     const positions = positionsOf(steps)
-    if (whole) {
-      const problem = validateSteps(steps)[0]
-      if (problem) throw new ToolInputError(`Step ${positionLabel(positions[steps.findIndex((s) => s.id === problem.stepId)])}: ${problem.message}. Fix the branch structure, then run again.`)
-    }
+    // A partial run only has to be sound as far as it goes: a branch that is closed further down, or not yet, is fine.
+    branchProblem(steps, whole ? null : { from: 1, to: flatRange(steps, { from: 1, to }).to })
     assertNavigateTargetsAllowed(steps.slice(0, flatRange(steps, { from: 1, to }).to), t.baseUrl, t.variables, env, appOrigin, positions)
 
     const outcome = await trialRun(env, await browser.get(), {
@@ -298,8 +327,27 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
     const reported = outcome.results.map((r) => ({ step: r.number, ...(r.sub ? { in_shared_step: r.sub } : {}), sentence: r.sentence, status: r.status, ...(r.error ? { error: mask(clip(r.error, 500)) } : {}) }))
     const firstFailed = outcome.results.find((r) => r.status === 'failed')
     const range = from === to ? `step ${from}` : `steps ${from}-${to}`
-    const passed = outcome.status === 'succeeded'
     const stopped = outcome.status === 'aborted'
+    // "Succeeded" with no step executed proves nothing: the steps asked for are disabled or sit in a branch arm
+    // this run did not take. The model is told so, with the engine's reason for each step.
+    const nothingRan = outcome.status === 'succeeded' && outcome.results.length === 0
+    const passed = outcome.status === 'succeeded' && !nothingRan
+    if (nothingRan) {
+      const why = outcome.log
+        .split('\n')
+        .filter((line) => /^\[[\d.]+\] skipped: /.test(line))
+        .slice(0, 10)
+      return {
+        content: json({
+          status: 'nothing_ran',
+          note: `No step of ${range} was executed, so this run verified nothing. A step in a branch arm only runs when its "If" condition holds for this run (with the first data row); a disabled step never runs.`,
+          skipped: why,
+        }),
+        event: `Ran ${range}: no step was executed`,
+        detail: why[0] ?? 'Every step in the range is disabled or in a branch arm that was not taken',
+        failed: true,
+      }
+    }
     return {
       content: json({
         status: passed ? 'passed' : stopped ? 'stopped' : outcome.status,

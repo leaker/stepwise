@@ -125,7 +125,9 @@ export async function runAssistant(o: LoopOptions): Promise<LoopResult> {
     try {
       turn = await o.model.create(messages, { timeoutMs: Math.min(REQUEST_TIMEOUT_MS, left) })
     } catch (e) {
-      return fail(o.model.describeError(e))
+      // A request cut short because the session's time was up is the time limit, not a slow model:
+      // "try again" would send the same long task into the same limit.
+      return fail(now() >= deadline ? outOfTime : o.model.describeError(e))
     }
 
     usage.turns++
