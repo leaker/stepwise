@@ -96,7 +96,8 @@ function EditorInner({ tid }: { tid: string }) {
       s.inflight = api.updateTestCase(tid, { steps: snapshot, baseStepsRev: revRef.current }).then(
         (next) => {
           revRef.current = next.stepsRev
-          qc.setQueryData(qk.testCase(tid), next)
+          // An answer that was read before a later save (of the data table, say) arrived only brings the steps.
+          qc.setQueryData<TestCase>(qk.testCase(tid), (old) => (old && old.updatedAt > next.updatedAt ? { ...old, steps: next.steps, stepsRev: next.stepsRev } : next))
           // The test cases that call this shared step show its steps and check them: they must not go on using the old ones.
           if (next.kind === 'shared') void qc.invalidateQueries({ queryKey: qk.sharedSteps(next.projectId) })
           return true

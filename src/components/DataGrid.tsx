@@ -340,7 +340,8 @@ export function useDataDraft(testCase: TestCase) {
   const save = useMutation({
     mutationFn: () => api.updateTestCase(testCase.id, { data: draft.columns.length ? draft : null }),
     onSuccess: (next) => {
-      qc.setQueryData(qk.testCase(next.id), next)
+      // An answer that was read before a later save of the steps arrived only brings the table.
+      qc.setQueryData<TestCase>(qk.testCase(next.id), (old) => (old && old.updatedAt > next.updatedAt ? { ...old, data: next.data } : next))
       void qc.invalidateQueries({ queryKey: qk.testCases(next.projectId) })
       toast(next.data ? `Data saved: ${plural(next.data.rows.length, 'row')}` : 'Data removed')
     },

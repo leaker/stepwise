@@ -90,6 +90,50 @@ describe('saving steps from an editor', () => {
     expect((await call('PATCH', `/test-cases/${t.id}`, { steps: [comment('script')] })).status).toBe(200)
   })
 
+  it('writes only what the request names, so a save that crosses another one does not undo it', async () => {
+    const t = await newCase('Checkout', [comment('one')])
+    // Between a request reading the row and writing it, another request lands: here, right before the write.
+    const crossing = (before: () => void) => {
+      const real = db.prepare.bind(db)
+      let once = true
+      ;(db as { prepare: unknown }).prepare = (sql: string) => {
+        if (once && /^UPDATE test_cases SET/.test(sql)) {
+          once = false
+          before()
+        }
+        return real(sql)
+      }
+      return () => ((db as { prepare: unknown }).prepare = real)
+    }
+    const table = JSON.stringify({ columns: ['A'], rows: [['1']] })
+    // A save of the steps, crossed by a save of the data table, a rename and a change of device.
+    let restore = crossing(() => void db.prepare("UPDATE test_cases SET data = ?, name = 'Renamed', description = 'New', device = 'iphone' WHERE id = ?").bind(table, t.id).run())
+    expect((await call('PATCH', `/test-cases/${t.id}`, { steps: [comment('two')], baseStepsRev: t.stepsRev })).status).toBe(200)
+    restore()
+    let now = await stored(t.id)
+    expect([now.steps.map((s) => s.value), now.data, now.name, now.description, now.device]).toEqual([['two'], JSON.parse(table), 'Renamed', 'New', 'iphone'])
+    // A save of the data table, crossed by a save of the steps.
+    restore = crossing(() => void db.prepare('UPDATE test_cases SET steps = ? WHERE id = ?').bind(JSON.stringify([comment('three')]), t.id).run())
+    expect((await call('PATCH', `/test-cases/${t.id}`, { data: null })).status).toBe(200)
+    restore()
+    now = await stored(t.id)
+    expect([now.steps.map((s) => s.value), now.data, now.name]).toEqual([['three'], null, 'Renamed'])
+    // Nothing to write is not an error, and changes nothing.
+    const same = await call<TestCase>('PATCH', `/test-cases/${t.id}`, {})
+    expect([same.status, same.body.updatedAt]).toEqual([200, now.updatedAt])
+  })
+
+  it('does not delete a captured screen while the assistant works on the test case', async () => {
+    const t = await newCase('Checkout', [comment('one')])
+    await db.prepare("INSERT INTO uis (id, test_case_id, name, url, title, width, height, screenshot_key, elements, created_at, device) VALUES ('u1', ?, 'UI1', 'https://shop.example/', '', 10, 10, 'k', '[]', 'x', 'desktop')").bind(t.id).run()
+    await db.prepare("INSERT INTO assistant_sessions (id, test_case_id, status, events, created_at, started_at) VALUES ('s1', ?, 'running', '[]', ?, ?)").bind(t.id, new Date().toISOString(), new Date().toISOString()).run()
+    const refused = await call('DELETE', '/uis/u1')
+    expect([refused.status, refused.code]).toEqual([409, 'assistant_busy'])
+    await db.prepare("UPDATE assistant_sessions SET status = 'done' WHERE id = 's1'").run()
+    expect((await call('DELETE', '/uis/u1')).status).toBe(200)
+    expect(await db.prepare("SELECT 1 AS x FROM uis WHERE id = 'u1'").first()).toBeNull()
+  })
+
   it('says it is the assistant when the assistant is what changed them', async () => {
     const t = await newCase('Checkout', [comment('one')])
     await db.prepare("INSERT INTO assistant_sessions (id, test_case_id, status, events, created_at, started_at) VALUES ('s1', ?, 'running', '[]', ?, ?)").bind(t.id, new Date().toISOString(), new Date().toISOString()).run()

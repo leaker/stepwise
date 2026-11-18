@@ -197,15 +197,26 @@ testCases.patch('/test-cases/:tid', async (c) => {
   const id = c.req.param('tid')
   const current = await getTestCaseRow(c.env.DB, id)
   const body = await readBody(c.req)
-  const name = body.name === undefined ? current.name : requireName(body.name, isSharedRow(current) ? 'Shared step' : 'Test case')
-  const description = optionalText(body.description, 'description', 2000) ?? current.description
-  const device = optionalDevice(body.device) ?? current.device
+  // Only the columns the request names are written. A save of the steps and a save of the data table (or a
+  // rename in another tab) can cross each other, and writing back what this request merely read would undo
+  // the other one.
+  const set: string[] = []
+  const args: unknown[] = []
+  const write = (column: string, value: unknown) => {
+    set.push(`${column} = ?`)
+    args.push(value)
+  }
+  if (body.name !== undefined) write('name', requireName(body.name, isSharedRow(current) ? 'Shared step' : 'Test case'))
+  const description = optionalText(body.description, 'description', 2000)
+  if (description !== undefined) write('description', description)
+  const device = optionalDevice(body.device)
+  if (device !== undefined) write('device', device)
   // The data table is not part of what the assistant edits, so it can be saved while a session is running.
   const table = optionalData(body.data)
   if (table && isSharedRow(current)) throw new HttpError(400, 'A shared step cannot have a data table: it uses the data of the test case that calls it')
-  const data = table === undefined ? current.data : table ? JSON.stringify(table) : ''
+  if (table !== undefined) write('data', table ? JSON.stringify(table) : '')
   if (body.steps === undefined) {
-    await c.env.DB.prepare('UPDATE test_cases SET name = ?, description = ?, device = ?, data = ?, updated_at = ? WHERE id = ?').bind(name, description, device, data, now(), id).run()
+    if (set.length) await c.env.DB.prepare(`UPDATE test_cases SET ${set.join(', ')}, updated_at = ? WHERE id = ?`).bind(...args, now(), id).run()
   } else {
     // While the assistant works on a test case it owns the step list: it reads, changes and writes it back
     // call by call, and a save from the editor (another tab, a script) in between would be lost or would
@@ -216,17 +227,18 @@ testCases.patch('/test-cases/:tid', async (c) => {
     // is still typing it. It is reported in the editor and refused when a run is created.)
     const nested = isSharedRow(current) ? parsed.findIndex((s) => s.command === 'shared_step') : -1
     if (nested >= 0) throw new HttpError(400, `Step ${nested + 1}: ${NESTED_SHARED_MESSAGE}`)
-    const steps = JSON.stringify(parsed)
+    write('steps', JSON.stringify(parsed))
     // The editor says which version of the steps its save is based on. When that is no longer the stored
     // one (another tab saved, a repair was approved, the assistant worked on them), writing would silently
     // undo that change: the save is refused and the editor reloads. A client that sends no revision
     // (a script that owns the test case) overwrites, as before.
     const base = optionalText(body.baseStepsRev, 'baseStepsRev', 64)
     if (base !== undefined && base !== stepsRevision(current.steps)) throw await stepsConflict(c.env.DB, id)
+    const based = base === undefined ? null : current.steps
     const saved = await c.env.DB.prepare(
-      "UPDATE test_cases SET name = ?1, description = ?2, device = ?3, steps = ?4, updated_at = ?5, data = ?7 WHERE id = ?6 AND (?8 IS NULL OR steps = ?8) AND NOT EXISTS (SELECT 1 FROM assistant_sessions WHERE test_case_id = ?6 AND status IN ('queued', 'running'))",
+      `UPDATE test_cases SET ${set.join(', ')}, updated_at = ? WHERE id = ? AND (? IS NULL OR steps = ?) AND NOT EXISTS (SELECT 1 FROM assistant_sessions WHERE test_case_id = ? AND status IN ('queued', 'running'))`,
     )
-      .bind(name, description, device, steps, now(), id, data, base === undefined ? null : current.steps)
+      .bind(...args, now(), id, based, based, id)
       .run()
     if (saved.meta.changes === 0) throw await stepsConflict(c.env.DB, id)
   }
@@ -353,7 +365,10 @@ testCases.patch('/uis/:uid', async (c) => {
 testCases.delete('/uis/:uid', async (c) => {
   const id = c.req.param('uid')
   const current = await getUiRow(c.env.DB, id)
-  await c.env.DB.prepare('DELETE FROM uis WHERE id = ?').bind(id).run()
+  // The assistant builds steps from the screens it captures: one must not vanish between its capture and its next step.
+  await sweepStaleSessions(c.env.DB)
+  const gone = await c.env.DB.prepare("DELETE FROM uis WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM assistant_sessions WHERE test_case_id = ?2 AND status IN ('queued', 'running'))").bind(id, current.test_case_id).run()
+  if (gone.meta.changes === 0) throw new HttpError(409, 'The assistant is working on this test case and may be using this screen. Wait for it to finish, or abort it, then delete the screen.', 'assistant_busy')
   const shared = await c.env.DB.prepare('SELECT 1 AS x FROM uis WHERE screenshot_key = ? LIMIT 1').bind(current.screenshot_key).first()
   if (!shared) c.executionCtx.waitUntil(removeShots(c.env, [current.screenshot_key]))
   return c.json({ ok: true })
