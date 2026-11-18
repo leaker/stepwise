@@ -52,8 +52,17 @@ export function commandOf(value: unknown): CommandId {
   return value as CommandId
 }
 
-export function targetFrom(uis: Ui[], uiId: string | undefined, elementId: string | undefined, device: string): ElementRef {
-  if (!uiId || !elementId) return fail('This command acts on an element: pass ui_id and element_id from a capture_screen result.')
+/**
+ * `latest`: the capture this session made last. A model that names an element and leaves the capture out
+ * means that one (the element ids it has just read), so the step is built from it and the answer says so.
+ */
+export function targetFrom(uis: Ui[], uiId: string | undefined, elementId: string | undefined, device: string, latest?: string | null): ElementRef {
+  if (!elementId) return fail(`This command acts on an element, and element_id is missing${uiId ? '' : ' (so is ui_id)'}. Pass the ui_id of a capture_screen result and an element_id from its element list.`)
+  if (!uiId) {
+    if (!latest || !uis.some((u) => u.id === latest)) return fail(`ui_id is missing: element_id "${elementId}" only means something together with the ui_id of the capture it was listed in. Capture the screen with capture_screen first, then pass its ui_id with the element_id.`)
+    if (!uis.find((u) => u.id === latest)!.elements.some((e) => e.id === elementId)) return fail(`ui_id is missing, and the latest capture (ui_id "${latest}") has no element "${elementId}". Send the call again with the ui_id of the capture this element_id was listed in.`)
+    uiId = latest
+  }
   const ui = uis.find((u) => u.id === uiId)
   if (!ui) return fail(`There is no capture with ui_id "${uiId}" in this test case. Use the ui_id returned by capture_screen.`)
   if (ui.device !== device) return fail(`Capture ${ui.name} was taken on another device (${ui.device}); this test case runs on ${device}. Capture the screen again and use an element from the new capture.`)

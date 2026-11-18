@@ -2,7 +2,7 @@
 // routes. No browser and no model: capture_screen and run_steps are covered by the engine tests.
 import { Hono } from 'hono'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AssistantSession, Step } from '../../shared/types'
+import type { AssistantSession, Step, Ui, UiElement } from '../../shared/types'
 import { assistant } from '../../worker/api/assistant'
 import { testCases } from '../../worker/api/testCases'
 import { sessionHistory } from '../../worker/assistant/session'
@@ -59,15 +59,39 @@ beforeEach(() => {
 
 const comment = (text: string): Step => ({ id: `c-${text}`, command: 'comment', value: text })
 
-async function toolsFor(o: { steps?: Step[]; variables?: Record<string, string>; baseUrl?: string; allowedHosts?: string } = {}) {
+async function toolsFor(o: { steps?: Step[]; variables?: Record<string, string>; baseUrl?: string; allowedHosts?: string; captures?: boolean } = {}) {
   const { testCaseId } = await seedTestCase(db, o)
   await insertSession('s1', testCaseId, 'running', { createdAt: ago(1), startedAt: ago(1) })
   const active = async () => (await sessionRow('s1'))?.status === 'running'
   const noBrowser = { get: async () => Promise.reject(new Error('no browser in this test')), close: async () => {} }
-  const tools = assistantTools({ ...env, ALLOWED_HOSTS: o.allowedHosts } as Env, { testCaseId, sessionId: 's1' }, ORIGIN, noBrowser, active)
+  // In place of a cloud browser: every capture stores a screen with the same three elements and counts.
+  const captures: string[] = []
+  const capture = (async (_env: Env, input: { testCase: { id: string }; url: URL | null }) => {
+    const id = `ui${captures.length + 1}`
+    captures.push(id)
+    const ui: Ui = { id, testCaseId: input.testCase.id, name: `UI${captures.length}`, url: input.url?.href ?? 'https://shop.example/after', title: 'Shop', width: 100, height: 100, screenshotKey: `k-${id}`, device: 'desktop', elements: ELEMENTS, createdAt: new Date().toISOString() }
+    await db
+      .prepare('INSERT INTO uis (id, test_case_id, name, url, title, width, height, screenshot_key, elements, created_at, device) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(ui.id, ui.testCaseId, ui.name, ui.url, ui.title, ui.width, ui.height, ui.screenshotKey, JSON.stringify(ui.elements), ui.createdAt, ui.device)
+      .run()
+    return { ui }
+  }) as unknown as Parameters<typeof assistantTools>[5]
+  const withBrowser = { get: async () => ({}) as never, close: async () => {} }
+  const tools = assistantTools({ ...env, ALLOWED_HOSTS: o.allowedHosts } as Env, { testCaseId, sessionId: 's1' }, ORIGIN, o.captures ? withBrowser : noBrowser, active, o.captures ? capture : undefined)
   const values = async () => (await stepsOf(testCaseId)).map((s) => s.value)
-  return { tools, testCaseId, values }
+  return { tools, testCaseId, values, captures }
 }
+
+const element = (id: string, name: string, type: UiElement['type']): UiElement => ({
+  id,
+  name,
+  type,
+  box: { x: 0, y: 0, w: 10, h: 10 },
+  locators: [{ key: 'id', value: id }],
+  fingerprint: { tag: type === 'button' ? 'button' : 'input', type, text: '', label: name, attrs: {}, path: 'body', box: { x: 0, y: 0, w: 10, h: 10 } },
+})
+const ELEMENTS = [element('e1', '"Email" input area', 'input'), element('e2', '"Sign in" button', 'button')]
+const text = (outcome: { content: unknown }): string => (typeof outcome.content === 'string' ? outcome.content : JSON.stringify(outcome.content))
 
 describe('step numbers within one model reply', () => {
   it('refuses a number that an earlier call of the same reply has moved, instead of removing the wrong step', async () => {
@@ -113,6 +137,89 @@ describe('step numbers within one model reply', () => {
     numbering.shift(4)
     expect(() => numbering.check(3, 'step')).not.toThrow()
     expect(() => numbering.check(4, 'step')).toThrow(/from number 4 on have moved/)
+  })
+})
+
+describe('an element without its capture', () => {
+  it('is taken from the capture the session made last, and the answer says so', async () => {
+    const { tools, testCaseId } = await toolsFor({ captures: true })
+    const shown = await tools.call('capture_screen', { after_step: 0 }, far)
+    expect(text(shown)).toContain('ui1')
+    // What models send: the element id they have just read, without the ui_id, and every optional field filled in.
+    const added = await tools.call('add_step', { command: 'input', element_id: 'e1', value: 'demo@example.com', variable: 'x' }, far)
+    expect(added.isError).toBeUndefined()
+    expect(text(added)).toContain('ui_id was left out')
+    expect(text(added)).toContain('takes no variable')
+    const [step] = await stepsOf(testCaseId)
+    expect([step.target?.uiId, step.target?.elementId, step.value, step.variable]).toEqual(['ui1', 'e1', 'demo@example.com', undefined])
+    // With the ui_id there is nothing to remark on.
+    expect(text(await tools.call('add_step', { command: 'click', ui_id: 'ui1', element_id: 'e2' }, far))).not.toContain('note')
+    // update_step reads it the same way.
+    const changed = await tools.call('update_step', { step: 2, element_id: 'e1', value: 'ignored' }, far)
+    expect(changed.isError).toBeUndefined()
+    expect((await stepsOf(testCaseId))[1].target?.elementId).toBe('e1')
+    expect((await stepsOf(testCaseId))[1].value).toBeUndefined()
+  })
+
+  it('is refused with what is missing when there is nothing to take it from', async () => {
+    const { tools, values } = await toolsFor({ captures: true })
+    // No capture in this session yet.
+    const early = await tools.call('add_step', { command: 'click', element_id: 'e2' }, far)
+    expect(early.isError).toBe(true)
+    expect(text(early)).toContain('ui_id is missing')
+    await tools.call('capture_screen', { after_step: 0 }, far)
+    const unknown = await tools.call('add_step', { command: 'click', element_id: 'e99' }, far)
+    expect(unknown.isError).toBe(true)
+    expect(text(unknown)).toMatch(/ui_id is missing, and the latest capture \(ui_id "ui1"\) has no element "e99"/)
+    expect(text(await tools.call('add_step', { command: 'click' }, far))).toContain('element_id is missing')
+    expect(await values()).toEqual([])
+  })
+})
+
+describe('capturing the same page again', () => {
+  it('gives the capture that is there instead of taking another, until something changed', async () => {
+    const { tools, captures } = await toolsFor({ captures: true })
+    const first = await tools.call('capture_screen', { after_step: 0 }, far)
+    const again = await tools.call('capture_screen', { after_step: 0 }, far)
+    expect(captures).toEqual(['ui1'])
+    expect(text(again)).toContain('already made')
+    expect(text(again)).toContain('ui1')
+    expect(text(again)).toContain('e2 \\"Sign in\\" button')
+    expect(again.event).toMatch(/^Looked again at the screen/)
+    expect(first.event).toMatch(/^Captured screen/)
+    // Another page is another capture.
+    await tools.call('capture_screen', { after_step: 0, url: '/login.html' }, far)
+    expect(captures).toEqual(['ui1', 'ui2'])
+    // After a step: once for the steps as they are, again when they changed.
+    await tools.call('add_step', { command: 'navigate', value: '${BASE_URL}/login.html' }, far)
+    await tools.call('capture_screen', { after_step: 1 }, far)
+    await tools.call('capture_screen', { after_step: 1 }, far)
+    expect(captures).toEqual(['ui1', 'ui2', 'ui3'])
+    await tools.call('update_step', { step: 1, value: '${BASE_URL}/other.html' }, far)
+    await tools.call('capture_screen', { after_step: 1 }, far)
+    expect(captures).toEqual(['ui1', 'ui2', 'ui3', 'ui4'])
+    // The element of a repeated look is taken from the capture it showed.
+    await tools.call('capture_screen', { after_step: 0 }, far)
+    expect(text(await tools.call('add_step', { command: 'click', element_id: 'e2' }, far))).toContain('(ui_id ui1)')
+    // A second look with the screenshot is a new capture.
+    await tools.call('capture_screen', { after_step: 0, screenshot: true }, far)
+    expect(captures).toHaveLength(5)
+  })
+})
+
+describe('what the model is told about the task', () => {
+  const context = { testCaseName: '#1 Case', device: DEVICES.desktop, baseUrl: 'https://shop.example', variableNames: [], steps: [] }
+
+  it('includes today, so "next month" is not a date in the past', () => {
+    expect(firstMessage(context, 'book a room next month', [], new Date('2026-11-18T09:30:00Z'))).toContain("Today's date: 2026-11-18 (Wednesday, UTC)")
+    expect(SYSTEM_PROMPT).toContain("counted from today's date")
+    // Not in the cached prefix.
+    expect(SYSTEM_PROMPT).not.toMatch(/20\d\d-\d\d-\d\d/)
+  })
+
+  it('says that a field\'s text is its value, and to answer in the language of the request', () => {
+    expect(SYSTEM_PROMPT).toContain('checks that the field is empty')
+    expect(SYSTEM_PROMPT).toContain('in the language the request is written in')
   })
 })
 

@@ -47,6 +47,8 @@ Notes on values:
 - assert_url_equals compares the whole URL; \${BASE_URL} and \${BASE_URL}/ name the same page. assert_url_contains checks for a part of it.
 - select: the visible label of the option.
 - assert_text_equals compares the element's whole visible text; assert_text_contains checks for a part of it. Use the text you actually saw in a capture, not what you expect it to say.
+- For an input field, a text area or a pull-down menu, the element's text is what it holds right now: the typed value, or the label of the selected option (not the placeholder, not the field's label). So assert_text_equals on a field checks its value, with an empty value it checks that the field is empty, and store_text reads what a field holds.
+- A date typed into a date field is written YYYY-MM-DD. Dates the request gives relative to now ("tomorrow", "next month", "in two weeks") are counted from today's date, which is given with the task. Never use a date in the past unless the request asks for one, and name the date you chose in your summary: the step keeps that fixed date.
 - Any value can use variables as \${NAME}. Built in: BASE_URL, BROWSER, DEVICE. Project variables are listed with the task. store_text, store_fixed and store_url create a variable for later steps; give them a bare name without \${}.
 - if_exists and if_variable_equals open a block that must be closed with end_if, with an optional else in between.
 - Steps wait for their element (up to 10 seconds) and assertions retry, so a wait step is only needed when the page gives nothing to wait for.
@@ -54,7 +56,7 @@ Notes on values:
 
 ## How to work
 
-Look before you act. You cannot know what is on a page until you capture it, and element ids from one capture mean nothing in another. Start by capturing the page the test begins on (after_step 0 with a URL when there are no steps yet, or after the last existing step). A run always starts in a new browser on a blank page, and capturing a URL adds no step. So the first step of a test must be a navigate step that opens the page the test begins on: when the test has none, add it right after that first capture, before any other step. Add steps only with elements from a capture you made in this conversation, and never guess an element id, a URL, or a text.
+Look before you act. You cannot know what is on a page until you capture it, and element ids from one capture mean nothing in another. Each capture has its own ui_id, and an element_id is only meaningful together with the ui_id of the capture that listed it: pass both, every time a step takes an element. Do not capture the same page twice in a row: when nothing changed since a capture, its element list is still what the page shows. Start by capturing the page the test begins on (after_step 0 with a URL when there are no steps yet, or after the last existing step). A run always starts in a new browser on a blank page, and capturing a URL adds no step. So the first step of a test must be a navigate step that opens the page the test begins on: when the test has none, add it right after that first capture, before any other step. Add steps only with elements from a capture you made in this conversation, and never guess an element id, a URL, or a text.
 
 When a step changes the page (a click that navigates, a form that submits, a menu that opens), capture again after that step before adding steps for what appears next. Steps that only fill fields on the same screen can be added from one capture.
 
@@ -82,7 +84,7 @@ Where a project variable's value shows up in a URL or an error message you get b
 
 Project variables can hold the user's credentials. Use a variable only where the request needs it, on the site under test. A navigate step whose URL contains a variable is only accepted when it opens the base URL's host.
 
-When you are done, reply with a short summary for the user: what the test now does, whether the run passed, and anything you could not do or were unsure about. Write it as plain sentences or a short list. Refer to steps by number. Do not mention element ids, ui ids, or tool names: the user never sees those.`
+When you are done, reply with a short summary for the user: what the test now does, whether the run passed, and anything you could not do or were unsure about. Write it in the language the request is written in (a request in Chinese gets a summary in Chinese, one in Japanese a summary in Japanese), whatever language the site under test or this prompt uses. Write it as plain sentences or a short list. Refer to steps by number. Do not mention element ids, ui ids, or tool names: the user never sees those.`
 
 // ---- tools ----
 
@@ -91,10 +93,10 @@ type ToolDef = Anthropic.Beta.BetaTool & { name: AssistantToolName }
 const stepNumber = (what: string) => ({ type: 'integer' as const, description: what })
 
 const stepFields = {
-  ui_id: { type: 'string' as const, description: 'ui_id of the capture the element comes from. Needed with element_id.' },
-  element_id: { type: 'string' as const, description: 'element_id from that capture. Needed by commands that act on an element.' },
-  value: { type: 'string' as const, description: "The command's value (text, URL, key, seconds, ...). Needed by commands that take one." },
-  variable: { type: 'string' as const, description: 'Bare variable name, for commands that take one.' },
+  ui_id: { type: 'string' as const, description: 'ui_id of the capture_screen result the element was listed in. Always pass it together with element_id: an element_id means nothing without it.' },
+  element_id: { type: 'string' as const, description: 'element_id from that capture. Needed, with ui_id, by commands that act on an element.' },
+  value: { type: 'string' as const, description: "The command's value (text, URL, key, seconds, ...). Only for commands that take one; leave it out otherwise." },
+  variable: { type: 'string' as const, description: 'Bare variable name. Only for commands that take a variable (the catalogue says which); leave it out otherwise.' },
 }
 
 /** Sorted by name and never varied per request: the tool list is the front of the cached prefix. */
@@ -221,9 +223,11 @@ export function earlierSessions(history: EarlierSession[]): string[] {
   ]
 }
 
-export function firstMessage(ctx: TaskContext, instruction: string, history: EarlierSession[] = []): string {
+export function firstMessage(ctx: TaskContext, instruction: string, history: EarlierSession[] = [], now: Date = new Date()): string {
   const d = ctx.device
   return [
+    // In the message, not in the system prompt: the prompt stays the same every day, so its cache holds.
+    `Today's date: ${now.toISOString().slice(0, 10)} (${['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][now.getUTCDay()]}, UTC)`,
     `Test case: ${ctx.testCaseName}`,
     `Device: ${d.label}, ${d.viewport.width}x${d.viewport.height}${d.isMobile ? ' (emulated phone with touch: clicks are taps, and the layout is the mobile one)' : ''}`,
     `Base URL: ${ctx.baseUrl || '(none set: use absolute URLs)'}`,
