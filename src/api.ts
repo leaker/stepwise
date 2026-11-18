@@ -28,6 +28,16 @@ export class ApiError extends Error {
   }
 }
 
+let onUnauthorized: (() => void) | null = null
+/**
+ * Called when a request is refused for want of the access code (the session ran out, or the code was
+ * changed), whoever made it: a query, a mutation or the editor's own save. Not for a wrong code typed into
+ * the access form, which that form reports itself.
+ */
+export const setUnauthorizedHandler = (fn: (() => void) | null) => {
+  onUnauthorized = fn
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   let res: Response
   try {
@@ -54,6 +64,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       data && typeof data === 'object' && 'error' in data && typeof (data as { error: unknown }).error === 'string'
         ? (data as { error: string }).error
         : `Request failed (${res.status} ${res.statusText || method + ' ' + path})`
+    if (res.status === 401 && !(method === 'POST' && path === '/session')) onUnauthorized?.()
     const code = data && typeof data === 'object' && 'code' in data ? (data as { code: unknown }).code : undefined
     throw new ApiError(res.status, msg, code === 'assistant_busy' || code === 'steps_changed' ? code : undefined)
   }

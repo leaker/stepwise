@@ -16,6 +16,21 @@
   border: 1px solid var(--line);
   border-radius: var(--r-dialog);
 }
+/* The access form over a page that is already open (the session ended while it was in use). */
+.gate-over {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  max-width: calc(100% - 32px);
+  overflow: visible;
+}
+.gate-over .gate-card {
+  box-shadow: var(--shadow-dialog);
+}
+.gate-over::backdrop {
+  background: rgb(22 27 38 / 0.6);
+}
 .gate-card h1 {
   margin-top: 12px;
   font-size: 1.1875rem;

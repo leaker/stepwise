@@ -2,11 +2,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Check, ChevronDown, CloudAlert, ListPlus, Table2, Play, Plus, Redo2, Sparkles, Square, Undo2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Link, useParams } from 'react-router-dom'
-import { COMMAND_BY_ID, DEFAULT_COMMAND, sharedLabel, stepSentence } from '../../shared/commands'
+import { Link, useBlocker, useParams } from 'react-router-dom'
+import { COMMAND_BY_ID, DEFAULT_COMMAND, MAX_STEPS, sharedLabel, stepSentence } from '../../shared/commands'
 import { hasPatterns } from '../../shared/data'
 import { DEVICE_IDS, DEVICES, deviceOf } from '../../shared/devices'
-import { positionLabel, reportedSteps } from '../../shared/expand'
+import { nextToRun, positionLabel, reportedSteps } from '../../shared/expand'
 import type { AssistantSession, CommandId, DeviceId, Step, StepResult, TestCase, Ui, UiElement } from '../../shared/types'
 import { api, ApiError, qk } from '../api'
 import { DataGrid, useDataDraft } from '../components/DataGrid'
@@ -195,6 +195,41 @@ function EditorInner({ tid }: { tid: string }) {
     }
   }, [flush])
 
+  // ----- leaving with unsaved steps -----
+  // A link, the Back button of the app or of the browser: the steps are saved first. When that does not work
+  // (no connection, a step the server refuses, the assistant holding the steps, a change made elsewhere) the
+  // editor stays open and asks, instead of dropping what was not saved.
+  const conflictRef = useRef(false)
+  conflictRef.current = conflict
+  const blocker = useBlocker(
+    useCallback(
+      ({ currentLocation, nextLocation }: { currentLocation: { pathname: string }; nextLocation: { pathname: string } }) =>
+        currentLocation.pathname !== nextLocation.pathname && (save.current.dirty || !!save.current.inflight || conflictRef.current),
+      [],
+    ),
+  )
+  const [leaving, setLeaving] = useState(false)
+  useEffect(() => {
+    if (blocker.state !== 'blocked') return setLeaving(false)
+    let stale = false
+    // What a conflict left unsaved cannot be saved from here at all: that is asked about right away.
+    void (conflictRef.current ? Promise.resolve(false) : flush()).then((ok) => {
+      if (stale) return
+      if (ok && !conflictRef.current) blocker.proceed()
+      else setLeaving(true)
+    })
+    return () => {
+      stale = true
+    }
+  }, [blocker.state]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Signed in again after the access code ran out (the form is shown over the editor, which stays as it was):
+  // what could not be saved meanwhile is saved now.
+  const signedIn = useQuery({ queryKey: qk.session, queryFn: api.session, staleTime: Infinity }).data?.ok
+  useEffect(() => {
+    if (signedIn && save.current.dirty && !save.current.inflight && !lockedRef.current) void flush()
+  }, [signedIn, flush])
+
   // ----- selection, element picking, inspector -----
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [focusId, setFocusId] = useState<string | null>(null)
@@ -251,12 +286,18 @@ function EditorInner({ tid }: { tid: string }) {
   )
 
   const insertAt = useCallback(
-    (index: number, step: Step) => {
-      if (lockedRef.current) return
+    (index: number, step: Step): boolean => {
+      if (lockedRef.current) return false
+      // The server stores no more, and one step too many would make every later save fail.
+      if (stepsRef.current.length >= MAX_STEPS) {
+        toast(`A test case can have ${MAX_STEPS} steps at most. Remove a step, or move some to a shared step, before adding another.`, 'error')
+        return false
+      }
       const next = [...stepsRef.current]
       next.splice(index, 0, step)
       commit(next)
       setSelectedId(step.id)
+      return true
     },
     [commit],
   )
@@ -271,8 +312,12 @@ function EditorInner({ tid }: { tid: string }) {
       return
     }
     const target = makeTarget(u, el)
-    if (pickFor) {
-      commit(stepsRef.current.map((s) => (s.id === pickFor.id ? { ...s, target } : s)))
+    const isTextCheck = (c: CommandId) => c === 'assert_text_equals' || c === 'assert_text_contains'
+    // Only a step whose command acts on an element gets one; the command may have been changed since it asked.
+    if (pickFor && COMMAND_BY_ID[pickFor.command]?.target) {
+      // A text assertion that says nothing yet starts from what the screen showed, as a new one does.
+      const expected = isTextCheck(pickFor.command) && !pickFor.value ? { value: el.fingerprint.text } : {}
+      commit(stepsRef.current.map((s) => (s.id === pickFor.id ? { ...s, target, ...expected } : s)))
       setPickForId(null)
       setSelectedId(pickFor.id)
       setFocusId(pickFor.id)
@@ -281,9 +326,9 @@ function EditorInner({ tid }: { tid: string }) {
       // A fingerprint keeps the first 120 characters only: a longer text can be checked with "contains", not "equals".
       const command = el.type === 'text' && text.length >= 120 ? 'assert_text_contains' : (DEFAULT_COMMAND[el.type] ?? 'click')
       // Text assertions start from what the screen showed at capture time, so the step is runnable as-is.
-      const step = newStep(command, command === 'assert_text_equals' || command === 'assert_text_contains' ? { target, value: text } : { target })
-      insertAt(insertIndex(), step)
-      setFocusId(step.id)
+      const step = newStep(command, isTextCheck(command) ? { target, value: text } : { target })
+      setPickForId(null)
+      if (insertAt(insertIndex(), step)) setFocusId(step.id)
     }
     setFlash((n) => n + 1)
     setInspect(null)
@@ -399,9 +444,9 @@ function EditorInner({ tid }: { tid: string }) {
   const expected = useMemo(() => (runData ? reportedSteps(runData.steps, runData.range) : []), [runData])
   const runningId = useMemo(() => {
     if (!runData || runData.status !== 'running') return null
-    const next = expected.find((s) => !reported.has(s.id))
+    const next = nextToRun(runData.steps, runData.range, (id) => reported.has(id))
     return next ? (next.origin?.callId ?? next.id) : null
-  }, [runData, expected, reported])
+  }, [runData, reported])
   const finished = runData && isTerminal(runData.status) ? runData : null
   useEffect(() => {
     if (!finished) return
@@ -633,9 +678,9 @@ function EditorInner({ tid }: { tid: string }) {
       void qc.invalidateQueries({ queryKey: qk.sharedSteps(created.projectId) })
       qc.setQueryData(qk.sharedSteps(created.projectId), (old: typeof sharedQuery.data) => [...(old ?? []), created])
       const at = palette?.index ?? stepsRef.current.length
-      insertAt(Math.min(at, stepsRef.current.length), newStep('shared_step', { value: created.id }))
+      const added = insertAt(Math.min(at, stepsRef.current.length), newStep('shared_step', { value: created.id }))
       setPalette(null)
-      toast(`Created shared step ${sharedLabel(created)}. Use “Open” on the step to add its steps.`)
+      toast(added ? `Created shared step ${sharedLabel(created)}. Use “Open” on the step to add its steps.` : `Created shared step ${sharedLabel(created)}. It was not added to this test case.`)
     },
   })
   // The steps (by id) that "Move to a new shared step" was asked for; the dialog asks for the name.
@@ -650,6 +695,8 @@ function EditorInner({ tid }: { tid: string }) {
     onSuccess: ({ before, testCase, shared: created }) => {
       qc.setQueryData(qk.testCase(tid), testCase)
       revRef.current = testCase.stepsRev
+      // The call that replaced the steps is checked against this list: it must have the new shared step at once.
+      qc.setQueryData(qk.sharedSteps(testCase.projectId), (old: typeof sharedQuery.data) => (old ? [...old.filter((t) => t.id !== created.id), created] : old))
       void qc.invalidateQueries({ queryKey: qk.sharedSteps(testCase.projectId) })
       // One undo step puts the steps back in the test case; the shared step stays in the project.
       const h = hist.current
@@ -688,8 +735,25 @@ function EditorInner({ tid }: { tid: string }) {
     if (lockedRef.current) return toast(LOCKED_NOTE, 'error')
     if (stepsRef.current.length === 0) {
       const step = newStep('navigate', { value: url })
-      insertAt(0, step)
-      capture.mutate({ afterStepId: step.id })
+      if (!insertAt(0, step)) return
+      capture.mutate(
+        { afterStepId: step.id },
+        {
+          // Nothing was captured (the URL was refused, no browser was free): the form is still there, and
+          // launching again must start over. The step this launch added goes, so a corrected URL is not
+          // captured behind a first step that still opens the wrong one.
+          onError: () => {
+            const cur = stepsRef.current
+            if (lockedRef.current || cur.length !== 1 || cur[0].id !== step.id || cur[0].value !== url) return
+            const h = hist.current
+            if (h.undo[h.undo.length - 1]?.length === 0) h.undo.pop()
+            h.redo = []
+            h.key = null
+            apply([])
+            setSelectedId(null)
+          },
+        },
+      )
     } else {
       capture.mutate({ url })
     }
@@ -980,7 +1044,11 @@ function EditorInner({ tid }: { tid: string }) {
                 onDeleteMany={removeSteps}
                 onExtract={setExtracting}
                 onChange={(id, patch, coalesce) => commit(stepsRef.current.map((s) => (s.id === id ? { ...s, ...patch } : s)), coalesce)}
-                onCommand={(id, command) => commit(stepsRef.current.map((s) => (s.id === id ? changeCommand(s, command) : s)))}
+                onCommand={(id, command) => {
+                  commit(stepsRef.current.map((s) => (s.id === id ? changeCommand(s, command) : s)))
+                  // The step no longer takes an element: the next click on the screen adds a step of its own.
+                  if (pickForId === id && !COMMAND_BY_ID[command].target) setPickForId(null)
+                }}
                 onMove={(id, toIndex) => {
                   const cur = stepsRef.current
                   const from = cur.findIndex((s) => s.id === id)
@@ -1038,6 +1106,7 @@ function EditorInner({ tid }: { tid: string }) {
           inspect={inspect}
           onInspect={setInspect}
           onSaveElement={(ref, name, forStep) => {
+            if (lockedRef.current) return toast(LOCKED_NOTE, 'error')
             // The name belongs to the element: every step that uses it shows the new one. The locator choice is per step.
             let changed = false
             const next = stepsRef.current.map((s) => {
@@ -1099,6 +1168,14 @@ function EditorInner({ tid }: { tid: string }) {
         {histMsg}
       </span>
 
+      {leaving && blocker.state === 'blocked' && (
+        <Confirm title="Leave without saving?" confirmLabel="Leave anyway" onConfirm={() => blocker.proceed()} onClose={() => blocker.reset()}>
+          {conflict
+            ? 'The last change to the steps was not saved, because the steps were changed somewhere else in the meantime. If you leave now, that change is lost. To keep working with it, stay and load the saved steps: undo then brings back what is on screen now.'
+            : 'The latest changes to the steps could not be saved (the reason was shown when saving failed). If you leave now, they are lost. Stay to fix the problem and try again with “Not saved, retry”.'}
+        </Confirm>
+      )}
+
       {extracting && (
         <ExtractDialog count={extracting.length} busy={extract.isPending} onSubmit={(name) => extract.mutate(name)} onClose={() => !extract.isPending && setExtracting(null)} />
       )}
@@ -1110,8 +1187,9 @@ function EditorInner({ tid }: { tid: string }) {
           shared={isShared ? undefined : { list: sharedQuery.data, creating: createShared.isPending, onCreate: () => createShared.mutate() }}
           onPick={(command: CommandId, value?: string) => {
             const step = newStep(command, value === undefined ? {} : { value })
-            insertAt(Math.min(palette.index, stepsRef.current.length), step)
+            const added = insertAt(Math.min(palette.index, stepsRef.current.length), step)
             setPalette(null)
+            if (!added) return
             if (COMMAND_BY_ID[command].target) {
               setPickForId(step.id)
               setInspect(null)

@@ -1,8 +1,8 @@
 import { MutationCache, QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { KeyRound } from 'lucide-react'
-import { lazy, Suspense, useRef, useState, type ReactNode } from 'react'
-import { BrowserRouter, Link, Route, Routes } from 'react-router-dom'
-import { api, ApiError, qk } from './api'
+import { lazy, Suspense, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { createBrowserRouter, Link, Outlet, RouterProvider } from 'react-router-dom'
+import { api, ApiError, qk, setUnauthorizedHandler, type Session } from './api'
 import { Button, ErrorState, Loading, Logo, Shell, toastError, Toaster } from './components/ui'
 import { ProjectPage } from './pages/ProjectPage'
 import { ProjectsPage } from './pages/ProjectsPage'
@@ -23,11 +23,50 @@ const queryClient: QueryClient = new QueryClient({
   },
   mutationCache: new MutationCache({
     onError: (err, _vars, _ctx, mutation) => {
-      if (err instanceof ApiError && err.status === 401) void queryClient.invalidateQueries({ queryKey: qk.session })
       if (!mutation.meta?.silent) toastError(err)
     },
   }),
 })
+
+// A request was refused for want of the access code: ask the server how the session stands, which brings up
+// the access form. Queries, mutations and the editor's own saves all end up here. Only while the session was
+// thought to be good, so the requests that fail while the form is up do not ask again and again.
+setUnauthorizedHandler(() => {
+  const known = queryClient.getQueryData<Session>(qk.session)
+  if (!known || known.ok || !known.required) void queryClient.invalidateQueries({ queryKey: qk.session })
+})
+
+/**
+ * The access form over a page that is already open. The page under it stays mounted, so nothing that was
+ * typed there is lost while the code is entered again; a modal dialog makes it inert meanwhile. It cannot
+ * be dismissed: it goes when the session is good.
+ */
+function GateOverlay({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLDialogElement>(null)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const open = () => {
+      if (el.isConnected && !el.open) el.showModal()
+    }
+    const onCancel = (e: Event) => e.preventDefault()
+    // A second Escape in a row is not cancelable in every browser: the dialog is opened again.
+    const onClose = () => queueMicrotask(open)
+    open()
+    el.addEventListener('cancel', onCancel)
+    el.addEventListener('close', onClose)
+    return () => {
+      el.removeEventListener('cancel', onCancel)
+      el.removeEventListener('close', onClose)
+      if (el.open) el.close()
+    }
+  }, [])
+  return (
+    <dialog ref={ref} className="gate-over" aria-label="Access code required">
+      {children}
+    </dialog>
+  )
+}
 
 function AccessGate({ children }: { children: ReactNode }) {
   const qc = useQueryClient()
@@ -48,12 +87,15 @@ function AccessGate({ children }: { children: ReactNode }) {
     },
   })
 
+  // Once the app has been shown it stays mounted, whatever the session does afterwards (see GateOverlay).
+  const entered = useRef(false)
   if (session.isPending) return <Loading />
-  if (session.isError) return <ErrorState error={session.error} onRetry={() => session.refetch()} />
-  if (!session.data.required || session.data.ok) return <>{children}</>
+  if (session.isError && !session.data) return <ErrorState error={session.error} onRetry={() => session.refetch()} />
+  const authorized = !session.data.required || session.data.ok
+  if (authorized) entered.current = true
+  const expired = entered.current
 
-  return (
-    <div className="gate">
+  const form = (
       <form
         className="gate-card"
         onSubmit={(e) => {
@@ -68,8 +110,12 @@ function AccessGate({ children }: { children: ReactNode }) {
         }}
       >
         <Logo />
-        <h1>Enter the access code</h1>
-        <p className="muted">This workspace is private. Ask whoever shared the link for its code.</p>
+        <h1>{expired ? 'Enter the access code again' : 'Enter the access code'}</h1>
+        <p className="muted">
+          {expired
+            ? 'Your access to this workspace has ended (it lasts 30 days, and ends when the code is changed). Nothing on the page is lost: it is all still there once you are back in.'
+            : 'This workspace is private. Ask whoever shared the link for its code.'}
+        </p>
         <label className="sr-only" htmlFor="access-code">
           Access code
         </label>
@@ -107,10 +153,16 @@ function AccessGate({ children }: { children: ReactNode }) {
           </p>
         )}
         <Button type="submit" variant="primary" icon={<KeyRound size={16} />} busy={signIn.isPending}>
-          Open workspace
+          {expired ? 'Continue' : 'Open workspace'}
         </Button>
       </form>
-    </div>
+  )
+  if (!expired) return <div className="gate">{form}</div>
+  return (
+    <>
+      {children}
+      {!authorized && <GateOverlay>{form}</GateOverlay>}
+    </>
   )
 }
 
@@ -126,24 +178,36 @@ function NotFound() {
   )
 }
 
+function Root() {
+  return (
+    <AccessGate>
+      <Suspense fallback={<Loading />}>
+        <Outlet />
+      </Suspense>
+    </AccessGate>
+  )
+}
+
+// A data router, for the editor's useBlocker: leaving it with steps that could not be saved asks first.
+const router = createBrowserRouter([
+  {
+    element: <Root />,
+    children: [
+      { path: '/', element: <ProjectsPage /> },
+      { path: '/p/:pid', element: <ProjectPage /> },
+      { path: '/t/:tid', element: <TestCasePage /> },
+      { path: '/t/:tid/edit', element: <Editor /> },
+      { path: '/r/:rid', element: <RunPage /> },
+      { path: '/b/:bid', element: <BatchRunPage /> },
+      { path: '*', element: <NotFound /> },
+    ],
+  },
+])
+
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AccessGate>
-          <Suspense fallback={<Loading />}>
-            <Routes>
-              <Route path="/" element={<ProjectsPage />} />
-              <Route path="/p/:pid" element={<ProjectPage />} />
-              <Route path="/t/:tid" element={<TestCasePage />} />
-              <Route path="/t/:tid/edit" element={<Editor />} />
-              <Route path="/r/:rid" element={<RunPage />} />
-              <Route path="/b/:bid" element={<BatchRunPage />} />
-              <Route path="*" element={<NotFound />} />
-            </Routes>
-          </Suspense>
-        </AccessGate>
-      </BrowserRouter>
+      <RouterProvider router={router} />
       <Toaster />
     </QueryClientProvider>
   )
