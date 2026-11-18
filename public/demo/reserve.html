@@ -85,10 +85,22 @@
         var error = document.getElementById('reserve-error')
         var total = document.getElementById('total')
         var detail = document.getElementById('total-detail')
-        var fields = form.elements
+        // Looked up once, by name, before Harbor.ready() renames ids for ?ui=v2: Firefox drops a control from
+        // form.elements[name] when an id equal to its name changes, so that lookup is not used.
+        function control(name) {
+          return form.querySelector('[name="' + name + '"]')
+        }
+        var fields = {
+          checkin: control('checkin'),
+          nights: control('nights'),
+          guests: control('guests'),
+          breakfast: control('breakfast'),
+          name: control('name'),
+          notes: control('notes'),
+        }
 
         function read() {
-          var planId = fields.plan.value
+          var planId = form.querySelector('[name="plan"]:checked').value
           var plan = Harbor.PLANS[planId]
           var nights = Math.max(1, Math.min(14, parseInt(fields.nights.value, 10) || 1))
           var guests = parseInt(fields.guests.value, 10)
@@ -115,7 +127,7 @@
         }
 
         var preset = /plan=(\w+)/.exec(location.hash)
-        if (preset && Harbor.PLANS[preset[1]]) fields.plan.value = preset[1]
+        if (preset && Harbor.PLANS[preset[1]]) form.querySelector('[name="plan"][value="' + preset[1] + '"]').checked = true
 
         form.addEventListener('input', render)
         form.addEventListener('change', render)
@@ -132,6 +144,10 @@
           error.textContent = message
           mark(field, true)
           field.focus()
+          // Focus alone does not always scroll (Safari's date field), and the message is at the top of the form:
+          // bring the message into view, then make sure the field is.
+          error.scrollIntoView({ block: 'nearest' })
+          field.scrollIntoView({ block: 'nearest' })
         }
         checked.forEach(function (field) {
           mark(field, false)

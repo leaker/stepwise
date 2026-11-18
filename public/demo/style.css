@@ -66,6 +66,9 @@ input[type='text'], input[type='email'], input[type='password'], input[type='dat
   width: 100%; padding: 10px 12px; border: 1px solid #b9c4cf; border-radius: 8px; font: inherit; background: #fff; color: var(--ink);
 }
 textarea { min-height: 84px; resize: vertical; }
+/* Safari focuses the segments inside a date field, so the field itself never matches :focus-visible and gets
+   no ring from the browser. Where that is the case it is given the ring of the other fields. */
+input[type='date']:focus-within:not(:focus-visible) { outline-style: auto; }
 .choice { display: flex; align-items: center; gap: 8px; min-height: 24px; font-size: 15px; margin-bottom: 8px; }
 fieldset { border: 0; padding: 0; margin: 0 0 16px; }
 .hint { color: var(--muted); font-size: 13px; }

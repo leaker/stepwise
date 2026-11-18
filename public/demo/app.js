@@ -61,7 +61,8 @@
       })
     }
     var user = getUser()
-    var onDashboard = /dashboard\.html$/.test(location.pathname)
+    // The asset server may serve the page without its extension (/demo/dashboard).
+    var onDashboard = /\/dashboard(\.html)?$/.test(location.pathname)
     each('.session-link', function (a) {
       if (user) {
         a.textContent = 'My stays'
@@ -101,6 +102,8 @@
         })
         nav.addEventListener('toggle', function (event) {
           setOpen(event.newState === 'open')
+          // Safari does not focus a clicked button, so after Escape focus would be on <body>.
+          if (event.newState === 'closed' && document.activeElement === document.body) toggle.focus()
         })
         if (narrow.addEventListener) narrow.addEventListener('change', sync)
         sync()
@@ -118,6 +121,13 @@
         document.addEventListener('click', function (event) {
           if (header.classList.contains('nav-open') && !header.contains(event.target)) setOpen(false)
         })
+        // Leaving the phone layout closes it, as the popover branch does.
+        var phone = window.matchMedia && window.matchMedia('(max-width: 639px)')
+        if (phone && phone.addEventListener) {
+          phone.addEventListener('change', function () {
+            if (!phone.matches) setOpen(false)
+          })
+        }
       }
     }
     document.documentElement.classList.add('ready')
