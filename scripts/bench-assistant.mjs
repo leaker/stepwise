@@ -42,7 +42,7 @@ const inputs = (steps, value) => live(steps).some((s) => s.command === 'input' &
 const count = (steps, test) => live(steps).filter(test).length
 /** Every step of `before` (by id) is still there, enabled and unchanged. */
 const kept = (steps, before) => before.every((b) => live(steps).some((s) => s.id === b.id && s.command === b.command && (s.value ?? '') === (b.value ?? '')))
-const CJK = /[㐀-鿿]/
+const CJK = /[\u3400-\u9fff]/
 
 // ---- set-up helpers: a scenario that starts from an existing test builds it the way the editor does ----
 
