@@ -427,7 +427,7 @@ export interface AssistantStatus {
 export type AssistantSessionStatus = 'queued' | 'running' | 'done' | 'failed' | 'aborted'
 
 /** Tools the assistant can call; see worker/assistant/prompt.ts. */
-export type AssistantToolName = 'get_steps' | 'capture_screen' | 'add_step' | 'update_step' | 'delete_step' | 'run_steps'
+export type AssistantToolName = 'get_steps' | 'capture_screen' | 'add_step' | 'update_step' | 'delete_step' | 'run_steps' | 'set_data_table' | 'review_request'
 
 /** One line of a session's transcript. */
 export interface AssistantEvent {
@@ -438,7 +438,7 @@ export interface AssistantEvent {
   at: string
   /** More about a tool event, e.g. the error of the step that failed. */
   detail?: string
-  /** `tool` events: which tool, and whether the call was rejected or its run failed. */
+  /** `tool` events: which tool (none for a check Stepwise made itself), and whether the call was rejected or its run failed. */
   tool?: AssistantToolName
   failed?: boolean
 }

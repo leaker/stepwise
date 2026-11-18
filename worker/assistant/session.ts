@@ -81,7 +81,7 @@ export async function processAssistantSession(env: Env, sessionId: string, appOr
   try {
     if (!model && !env.ANTHROPIC_API_KEY) throw new Error('The assistant is not configured on this deployment (ANTHROPIC_API_KEY is not set).')
     const instruction = (JSON.parse(claimed.events) as { kind: string; text: string }[]).find((e) => e.kind === 'user')?.text ?? ''
-    const tools = assistantTools(env, { testCaseId: claimed.test_case_id, sessionId }, appOrigin, browser, active)
+    const tools = assistantTools(env, { testCaseId: claimed.test_case_id, sessionId, request: instruction }, appOrigin, browser, active)
     const chosen = sessionModel(env, override)
     result = await runAssistant({
       model: model ?? anthropicClient(env.ANTHROPIC_API_KEY!, chosen.model, chosen.effort),

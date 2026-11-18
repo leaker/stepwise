@@ -120,22 +120,28 @@ export class TurnNumbering {
   private shiftedFrom = Infinity
   /** What changed it: a step that was removed or inserted, or an add_step that was refused. */
   private cause: 'moved' | 'add_step' = 'moved'
+  /** Steps Stepwise itself put at the top in this reply (see pushedDown): every number the model wrote is that much too low. */
+  private offset = 0
 
   /** A new model reply: its calls see the list as it is now. */
   reset(): void {
     this.shiftedFrom = Infinity
     this.cause = 'moved'
+    this.offset = 0
   }
 
-  /** Refuse a step number that an earlier call of this reply has moved. */
-  check(n: number, key: string): void {
-    if (n < this.shiftedFrom) return
+  /**
+   * The step number a call of this reply means, in the list as it is now. Refuses a number that an earlier
+   * call of this reply has moved; a number written before Stepwise added a step at the top is translated.
+   */
+  check(n: number, key: string): number {
+    if (n < this.shiftedFrom) return n >= 1 ? n + this.offset : n
     if (this.cause === 'add_step') {
       fail(
         `Not done: an earlier add_step in this reply was refused, so the step that was to become number ${this.shiftedFrom} was not added and the numbers from there on are not the ones you counted on: ${key} ${n} is another step than you meant, or none. Nothing was changed by this call. Fix the refused add_step first, then send this call again with the number from the current list (get_steps shows it).`,
       )
     }
-    fail(
+    return fail(
       `Not done: an earlier call in this reply removed or inserted a step, so the steps from number ${this.shiftedFrom} on have moved and ${key} ${n} may no longer be the step you meant. Nothing was changed by this call. Send it again with the number from the current list (get_steps shows it). To change several steps in one reply, work from the highest number down.`,
     )
   }
@@ -145,10 +151,70 @@ export class TurnNumbering {
    * (`cause` add_step) an append that was refused, which would have been number `from`.
    */
   shift(from: number, cause: 'moved' | 'add_step' = 'moved'): void {
+    // Kept in the numbering the model wrote its calls in.
+    from = Math.max(1, from - this.offset)
     if (from >= this.shiftedFrom) return
     this.shiftedFrom = from
     this.cause = cause
   }
+
+  /**
+   * Stepwise put a step of its own at the top (the Navigate step a test must start with). The model wrote the
+   * rest of this reply without it, so every step number in those calls is one too low, and is read as one more.
+   */
+  pushedDown(): void {
+    this.offset++
+  }
+}
+
+// ---- a test starts on a blank page ----
+
+/** Commands that read or act on the page without naming an element. */
+const PAGE_COMMANDS = new Set<CommandId>(['swipe', 'press_key', 'screenshot', 'assert_url_equals', 'assert_url_contains', 'assert_title_equals', 'assert_title_contains', 'store_url'])
+
+/**
+ * A run starts in a new browser on a blank page. Returns the index of the first enabled step that needs a
+ * page while no step before it can have opened one, or -1. A shared step call counts as opening one (its
+ * steps are the user's; an expanded list has them inline and is judged step by step).
+ */
+export function blankStart(steps: Step[]): number {
+  for (const [i, s] of steps.entries()) {
+    if (s.disabled) continue
+    if (s.command === 'navigate' || (s.command === 'shared_step' && !s.call)) return -1
+    if (COMMAND_BY_ID[s.command].target || PAGE_COMMANDS.has(s.command)) return i
+  }
+  return -1
+}
+
+/** A URL the way a navigate step should name it: built from ${BASE_URL} when it is a page of the site under test. */
+export function navigateValue(url: string, baseUrl: string): string {
+  const base = baseUrl.replace(/\/+$/, '')
+  if (base && (url === base || url.startsWith(`${base}/`) || url.startsWith(`${base}?`) || url.startsWith(`${base}#`))) return `\${BASE_URL}${url.slice(base.length)}`
+  return url
+}
+
+// ---- values the request did not spell out ----
+
+const normal = (text: string): string => text.replace(/\s+/g, ' ').trim().toLowerCase()
+
+/** The option of a pull-down menu a select step's value names, or null. Compared the way the engine does: by label, ignoring case and spacing. */
+export function optionNamed(options: string[], value: string): string | null {
+  return options.find((o) => normal(o) === normal(value)) ?? null
+}
+
+/**
+ * Values typed or selected by steps the assistant wrote that the request does not contain: a date it chose,
+ * an account it found on the page, an option it took because the one asked for does not exist. Each is
+ * something the user should hear about. Values built from variables are left out.
+ */
+export function unmentionedValues(steps: Step[], written: ReadonlySet<string>, request: string): { step: number; command: CommandId; value: string }[] {
+  const said = normal(request)
+  return steps.flatMap((s, i) => {
+    const value = s.value ?? ''
+    if (s.disabled || !written.has(s.id) || (s.command !== 'input' && s.command !== 'select')) return []
+    if (value.trim() === '' || value.includes('${') || said.includes(normal(value))) return []
+    return [{ step: i + 1, command: s.command, value }]
+  })
 }
 
 // ---- where a step the assistant writes may send project variables ----
@@ -271,7 +337,8 @@ export function listElements(elements: UiElement[], max = MAX_LISTED_ELEMENTS): 
     .map((e) => {
       const name = oneLine(e.name)
       const text = oneLine(e.fingerprint.text)
-      return `${e.id} ${name}${text && !name.includes(clipText(text, 40)) ? ` | text: ${clipText(text, 100)}` : ''}`
+      const options = e.options?.length ? ` | options: ${e.options.slice(0, 30).map((o) => JSON.stringify(o)).join(', ')}${e.options.length > 30 ? `, and ${e.options.length - 30} more` : ''}` : ''
+      return `${e.id} ${name}${text && !name.includes(clipText(text, 40)) ? ` | text: ${clipText(text, 100)}` : ''}${options}`
     })
   return { lines, omitted: usable.length - keep.size }
 }

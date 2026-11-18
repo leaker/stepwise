@@ -531,7 +531,7 @@ function simulate(run: Run, onDone?: () => void) {
   setTimeout(tick, 600)
 }
 
-/** A scripted assistant session: one capture, two steps, a trial run, a summary. Honours an abort between beats. */
+/** A scripted assistant session: one capture, two steps, a trial run, the review of the request, a summary. Honours an abort between beats. */
 function simulateAssistant(session: AssistantSession, tc: TestCase) {
   const say = (event: Omit<AssistantEvent, 'at'>) => session.events.push({ ...event, at: now() })
   const turn = (output: number) => {
@@ -567,6 +567,10 @@ function simulateAssistant(session: AssistantSession, tc: TestCase) {
     () => {
       turn(80)
       say({ kind: 'tool', tool: 'run_steps', text: `Ran steps 1-${tc.steps.length}: all passed` })
+    },
+    () => {
+      turn(90)
+      say({ kind: 'tool', tool: 'review_request', text: 'Checked the request against the steps: 1 point' })
     },
     () => {
       turn(180)

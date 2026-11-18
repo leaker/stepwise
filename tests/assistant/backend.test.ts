@@ -50,6 +50,7 @@ const stepsOf = async (testCaseId: string) => JSON.parse((await db.prepare('SELE
 const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString()
 
 beforeEach(() => {
+  Object.assign(runs, { failAt: 0, error: 'Element not found', variables: [] })
   db = memoryD1()
   sent.length = 0
   env = { DB: db, ANTHROPIC_API_KEY: 'test-key', RUN_QUEUE: { send: async (m: unknown) => void sent.push(m) } } as unknown as Env
@@ -59,7 +60,10 @@ beforeEach(() => {
 
 const comment = (text: string): Step => ({ id: `c-${text}`, command: 'comment', value: text })
 
-async function toolsFor(o: { steps?: Step[]; variables?: Record<string, string>; baseUrl?: string; allowedHosts?: string; captures?: boolean } = {}) {
+/** What the stand-in for a run reports: every enabled step passed, or the step with this 1-based number failed. */
+const runs = { failAt: 0, error: 'Element not found', variables: [] as Record<string, string>[] }
+
+async function toolsFor(o: { steps?: Step[]; variables?: Record<string, string>; baseUrl?: string; allowedHosts?: string; captures?: boolean; request?: string } = {}) {
   const { testCaseId } = await seedTestCase(db, o)
   await insertSession('s1', testCaseId, 'running', { createdAt: ago(1), startedAt: ago(1) })
   const active = async () => (await sessionRow('s1'))?.status === 'running'
@@ -69,7 +73,7 @@ async function toolsFor(o: { steps?: Step[]; variables?: Record<string, string>;
   const capture = (async (_env: Env, input: { testCase: { id: string }; url: URL | null }) => {
     const id = `ui${captures.length + 1}`
     captures.push(id)
-    const ui: Ui = { id, testCaseId: input.testCase.id, name: `UI${captures.length}`, url: input.url?.href ?? 'https://shop.example/after', title: 'Shop', width: 100, height: 100, screenshotKey: `k-${id}`, device: 'desktop', elements: ELEMENTS, createdAt: new Date().toISOString() }
+    const ui: Ui = { id, testCaseId: input.testCase.id, name: `UI${captures.length}`, url: input.url?.href ?? 'https://shop.example/after', title: 'Shop', width: 100, height: 100, screenshotKey: `k-${id}`, device: 'desktop', elements: input.url?.pathname.includes('form') ? FORM_ELEMENTS : ELEMENTS, createdAt: new Date().toISOString() }
     await db
       .prepare('INSERT INTO uis (id, test_case_id, name, url, title, width, height, screenshot_key, elements, created_at, device) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
       .bind(ui.id, ui.testCaseId, ui.name, ui.url, ui.title, ui.width, ui.height, ui.screenshotKey, JSON.stringify(ui.elements), ui.createdAt, ui.device)
@@ -77,7 +81,16 @@ async function toolsFor(o: { steps?: Step[]; variables?: Record<string, string>;
     return { ui }
   }) as unknown as Parameters<typeof assistantTools>[5]
   const withBrowser = { get: async () => ({}) as never, close: async () => {} }
-  const tools = assistantTools({ ...env, ALLOWED_HOSTS: o.allowedHosts } as Env, { testCaseId, sessionId: 's1' }, ORIGIN, o.captures ? withBrowser : noBrowser, active, o.captures ? capture : undefined)
+  // In place of the engine: a run that passes every enabled step, or fails at runs.failAt.
+  const run = (async (_env: Env, _browser: unknown, input: { steps: Step[]; variables: Record<string, string> }) => {
+    runs.variables.push(input.variables)
+    const results = input.steps
+      .filter((s) => !s.disabled)
+      .map((s, i) => ({ number: i + 1, sentence: s.command, status: runs.failAt === i + 1 ? 'failed' : 'passed', ...(runs.failAt === i + 1 ? { error: runs.error } : {}) }))
+    const failed = results.findIndex((r) => r.status === 'failed')
+    return { status: failed < 0 ? 'succeeded' : 'failed', results: failed < 0 ? results : results.slice(0, failed + 1), log: '' }
+  }) as unknown as Parameters<typeof assistantTools>[6]
+  const tools = assistantTools({ ...env, ALLOWED_HOSTS: o.allowedHosts } as Env, { testCaseId, sessionId: 's1', request: o.request }, ORIGIN, o.captures ? withBrowser : noBrowser, active, o.captures ? capture : undefined, o.captures ? run : undefined)
   const values = async () => (await stepsOf(testCaseId)).map((s) => s.value)
   return { tools, testCaseId, values, captures }
 }
@@ -91,6 +104,11 @@ const element = (id: string, name: string, type: UiElement['type']): UiElement =
   fingerprint: { tag: type === 'button' ? 'button' : 'input', type, text: '', label: name, attrs: {}, path: 'body', box: { x: 0, y: 0, w: 10, h: 10 } },
 })
 const ELEMENTS = [element('e1', '"Email" input area', 'input'), element('e2', '"Sign in" button', 'button')]
+/** A second page: a pull-down menu with its options, and a text. */
+const FORM_ELEMENTS: UiElement[] = [
+  { ...element('f1', '"Contact" pull-down menu', 'select'), options: ['Choose one', 'By email', 'By telephone'] },
+  { ...element('f2', '"Total" text', 'text'), fingerprint: { ...element('f2', '', 'text').fingerprint, tag: 'p', text: '$120.00' } },
+]
 const text = (outcome: { content: unknown }): string => (typeof outcome.content === 'string' ? outcome.content : JSON.stringify(outcome.content))
 
 describe('step numbers within one model reply', () => {
@@ -150,15 +168,17 @@ describe('an element without its capture', () => {
     expect(added.isError).toBeUndefined()
     expect(text(added)).toContain('ui_id was left out')
     expect(text(added)).toContain('takes no variable')
-    const [step] = await stepsOf(testCaseId)
+    // (The test had no Navigate step, so one was put in front: see "a test that would start on a blank page".)
+    const [, step] = await stepsOf(testCaseId)
     expect([step.target?.uiId, step.target?.elementId, step.value, step.variable]).toEqual(['ui1', 'e1', 'demo@example.com', undefined])
     // With the ui_id there is nothing to remark on.
+    tools.beginTurn!()
     expect(text(await tools.call('add_step', { command: 'click', ui_id: 'ui1', element_id: 'e2' }, far))).not.toContain('note')
     // update_step reads it the same way.
-    const changed = await tools.call('update_step', { step: 2, element_id: 'e1', value: 'ignored' }, far)
+    const changed = await tools.call('update_step', { step: 3, element_id: 'e1', value: 'ignored' }, far)
     expect(changed.isError).toBeUndefined()
-    expect((await stepsOf(testCaseId))[1].target?.elementId).toBe('e1')
-    expect((await stepsOf(testCaseId))[1].value).toBeUndefined()
+    expect((await stepsOf(testCaseId))[2].target?.elementId).toBe('e1')
+    expect((await stepsOf(testCaseId))[2].value).toBeUndefined()
   })
 
   it('is refused with what is missing when there is nothing to take it from', async () => {
@@ -596,5 +616,277 @@ describe('built-in variable names', () => {
     expect(() => check('https://${BROWSER}.shop.example/', { BROWSER: 'evil.example/x?' })).toThrow('chrome.shop.example is not in')
     expect(() => check('https://shop.example/${DEVICE}', { DEVICE: 'tablet' })).not.toThrow()
     expect(() => check('https://${DEVICE}.evil.example/', { DEVICE: 'shop.example/x?' })).not.toThrow() // left to the navigation guard at run time
+  })
+})
+
+// ---- guards: structurally wrong tests are corrected or refused where they are written ----
+
+describe('a test that would start on a blank page', () => {
+  it('gets the Navigate step of the page the session captured, and the numbers of the same reply are read one higher', async () => {
+    const { tools, testCaseId } = await toolsFor({ captures: true })
+    tools.beginTurn!()
+    await tools.call('capture_screen', { after_step: 0, url: '/login.html' }, far)
+    // One reply: two steps and the capture after the second, numbered as the model counted them (1, 2).
+    tools.beginTurn!()
+    const first = await tools.call('add_step', { command: 'input', ui_id: 'ui1', element_id: 'e1', value: 'demo@example.com' }, far)
+    expect(first.isError).toBeUndefined()
+    expect(text(first)).toContain('was added as step 1')
+    expect(JSON.parse(text(first))).toMatchObject({ step: 2, total_steps: 2 })
+    expect(JSON.parse(text(await tools.call('add_step', { command: 'click', ui_id: 'ui1', element_id: 'e2' }, far)))).toMatchObject({ step: 3 })
+    const after = await tools.call('capture_screen', { after_step: 2 }, far)
+    expect(after.event).toBe('Captured screen after step 3 (UI2, 2 elements)')
+    expect((await stepsOf(testCaseId)).map((s) => [s.command, s.value])).toEqual([['navigate', '${BASE_URL}/login.html'], ['input', 'demo@example.com'], ['click', undefined]])
+    // The next reply sees the list as it is: its numbers are taken as written.
+    tools.beginTurn!()
+    expect((await tools.call('delete_step', { step: 3 }, far)).event).toContain('Removed step 3: Click')
+  })
+
+  it('is refused, with the step to add, when no page was captured by its URL', async () => {
+    const { tools, values } = await toolsFor({ captures: true })
+    const added = await tools.call('add_step', { command: 'assert_title_equals', value: 'Shop' }, far)
+    expect(added.isError).toBe(true)
+    expect(text(added)).toContain('no Navigate step before it')
+    expect(await values()).toEqual([])
+    // Steps that need no page may come first, and a navigate step settles it.
+    expect((await tools.call('add_step', { command: 'store_fixed', variable: 'NAME', value: 'x' }, far)).isError).toBeUndefined()
+    expect((await tools.call('add_step', { command: 'navigate', value: '${BASE_URL}/' }, far)).isError).toBeUndefined()
+    expect((await tools.call('add_step', { command: 'assert_title_equals', value: 'Shop' }, far)).isError).toBeUndefined()
+  })
+
+  it('is not run or replayed: the answer names the step and the Navigate step that is missing', async () => {
+    const click: Step = { id: 'c1', command: 'click', target: { uiId: 'old', elementId: 'e2', name: '"Sign in" button', locator: { key: 'id', value: 'e2' }, candidates: [], fingerprint: ELEMENTS[1].fingerprint } }
+    const { tools, captures } = await toolsFor({ captures: true, steps: [{ id: 'n1', command: 'navigate', value: '${BASE_URL}/', disabled: true }, click] })
+    for (const [name, input] of [['run_steps', {}], ['capture_screen', { after_step: 2 }]] as const) {
+      const outcome = await tools.call(name, input, far)
+      expect(outcome.isError).toBe(true)
+      expect(text(outcome)).toMatch(/step 2 \(Click "Sign in" button\) needs a page, and no Navigate step comes before it/)
+      expect(text(outcome)).toContain('command navigate, after_step 0')
+    }
+    expect(captures).toEqual([])
+    expect(runs.variables).toEqual([])
+  })
+})
+
+describe('an element from before this session', () => {
+  it('is refused for a new step, with the capture to make instead', async () => {
+    const { tools, testCaseId, values } = await toolsFor({ captures: true, steps: [{ id: 'n1', command: 'navigate', value: '${BASE_URL}/' }] })
+    await db
+      .prepare('INSERT INTO uis (id, test_case_id, name, url, title, width, height, screenshot_key, elements, created_at, device) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind('earlier', testCaseId, 'UI0', 'https://shop.example/', 'Shop', 100, 100, 'k', JSON.stringify(ELEMENTS), ago(60), 'desktop')
+      .run()
+    const added = await tools.call('add_step', { command: 'click', ui_id: 'earlier', element_id: 'e2' }, far)
+    expect(added.isError).toBe(true)
+    expect(text(added)).toContain('is a capture from before this session')
+    expect(await values()).toEqual(['${BASE_URL}/'])
+    // A capture that does not exist at all is still told apart.
+    expect(text(await tools.call('add_step', { command: 'click', ui_id: 'nope', element_id: 'e2' }, far))).toContain('There is no capture with ui_id "nope"')
+  })
+})
+
+describe('a value checked against what the capture showed', () => {
+  const formTools = async () => {
+    const made = await toolsFor({ captures: true, request: 'Ask to be contacted by phone and check the total' })
+    const shown = await made.tools.call('capture_screen', { after_step: 0, url: '/form.html' }, far)
+    return { ...made, shown }
+  }
+
+  it('lists the options of a pull-down menu, and refuses a select for an option it does not have', async () => {
+    const { tools, shown, testCaseId } = await formTools()
+    expect(text(shown)).toContain('f1 \\"Contact\\" pull-down menu | options: \\"Choose one\\", \\"By email\\", \\"By telephone\\"')
+    const wrong = await tools.call('add_step', { command: 'select', ui_id: 'ui1', element_id: 'f1', value: 'By phone' }, far)
+    expect(wrong.isError).toBe(true)
+    expect(text(wrong)).toContain('has no option "By phone". Its options are: "Choose one", "By email", "By telephone"')
+    expect(text(wrong)).toContain('status substituted')
+    // The label is taken as the page writes it.
+    expect((await tools.call('add_step', { command: 'select', ui_id: 'ui1', element_id: 'f1', value: ' by TELEPHONE ' }, far)).isError).toBeUndefined()
+    expect((await stepsOf(testCaseId)).at(-1)?.value).toBe('By telephone')
+    // A value built from a variable cannot be checked here and is let through.
+    expect((await tools.call('add_step', { command: 'select', ui_id: 'ui1', element_id: 'f1', value: '${HOW}' }, far)).isError).toBeUndefined()
+  })
+
+  it('expects the captured text when an assertion comes without a value, and points out an expectation the capture did not show', async () => {
+    const { tools, testCaseId } = await formTools()
+    const bare = await tools.call('add_step', { command: 'assert_text_equals', ui_id: 'ui1', element_id: 'f2' }, far)
+    expect(bare.isError).toBeUndefined()
+    expect(text(bare)).toContain('value was left out')
+    expect((await stepsOf(testCaseId)).at(-1)?.value).toBe('$120.00')
+    const guessed = await tools.call('add_step', { command: 'assert_text_contains', ui_id: 'ui1', element_id: 'f2', value: '$630' }, far)
+    expect(guessed.isError).toBeUndefined()
+    expect(text(guessed)).toContain('does not contain what the step expects')
+    expect(text(await tools.call('add_step', { command: 'assert_text_contains', ui_id: 'ui1', element_id: 'f2', value: '120' }, far))).not.toContain('note')
+  })
+
+  it('names the values the request does not contain when the request is reviewed', async () => {
+    const { tools } = await formTools()
+    await tools.call('add_step', { command: 'select', ui_id: 'ui1', element_id: 'f1', value: 'By telephone' }, far)
+    await tools.call('add_step', { command: 'assert_text_equals', ui_id: 'ui1', element_id: 'f2', value: '$120.00' }, far)
+    await tools.call('run_steps', {}, far)
+    const review = await tools.call(
+      'review_request',
+      { requirements: [{ requirement: 'ask to be contacted by phone', status: 'substituted', steps: [2], note: 'There is no "phone" option; "By telephone" was selected.' }, { requirement: 'check the total', status: 'done', steps: [3] }] },
+      far,
+    )
+    expect(review.isError).toBeUndefined()
+    const body = JSON.parse(text(review))
+    expect(body.values_you_chose).toEqual(['step 2: select "By telephone"'])
+    expect(body.points[0].steps).toEqual(['2. Select "By telephone" in "Contact" pull-down menu'])
+    expect(body.test).toContain('passed')
+    expect(review.event).toBe('Checked the request against the steps: 2 points, 1 done differently')
+    expect(review.detail).toContain('Changed: ask to be contacted by phone')
+  })
+})
+
+describe('the data table', () => {
+  it('is set by the assistant, and a full run then tries every row and stops at the one that fails', async () => {
+    const { tools, testCaseId } = await toolsFor({ captures: true, steps: [{ id: 'n1', command: 'navigate', value: '${BASE_URL}/login.html' }] })
+    expect(text(await tools.call('set_data_table', { columns: ['EMAIL', 'bad name'], rows: [] }, far))).toContain('Use letters, digits and _ only')
+    expect(text(await tools.call('set_data_table', { columns: ['EMAIL'], rows: [['a', 'b']] }, far))).toContain('Row 1 has 2 cells')
+    const set = await tools.call('set_data_table', { columns: ['EMAIL'], rows: [['a@example.com'], ['b@example.com'], ['c@example.com']] }, far)
+    expect(set.isError).toBeUndefined()
+    expect(JSON.parse(text(set))).toMatchObject({ rows: 3, unused_columns: ['EMAIL'] })
+    expect(JSON.parse((await db.prepare('SELECT data FROM test_cases WHERE id = ?').bind(testCaseId).first<{ data: string }>())!.data)).toEqual({ columns: ['EMAIL'], rows: [['a@example.com'], ['b@example.com'], ['c@example.com']] })
+    expect((await tools.context()).data).toEqual({ columns: ['EMAIL'], rows: 3 })
+
+    const passed = await tools.call('run_steps', {}, far)
+    expect(JSON.parse(text(passed))).toMatchObject({ status: 'passed', data_rows_tried: 3 })
+    expect(runs.variables.map((v) => v.EMAIL)).toEqual(['a@example.com', 'b@example.com', 'c@example.com'])
+    expect(passed.event).toBe('Ran step 1 with 3 data rows: all passed')
+
+    // A partial run uses the first row only.
+    runs.variables.length = 0
+    await tools.call('add_step', { command: 'navigate', value: '${BASE_URL}/x' }, far)
+    await tools.call('run_steps', { from: 1, to: 1 }, far)
+    expect(runs.variables.map((v) => v.EMAIL)).toEqual(['a@example.com'])
+
+    // Emptied, the test case runs once again.
+    expect((await tools.call('set_data_table', { columns: [], rows: [] }, far)).event).toBe('Removed the data table')
+    expect((await tools.context()).data).toBeUndefined()
+  })
+})
+
+// ---- the gate: what has to be true before a session may end ----
+
+describe('ending a session', () => {
+  const point = (requirement: string, status = 'done', steps: number[] = [1], note?: string) => ({ requirement, status, steps, ...(note ? { note } : {}) })
+
+  it('is refused until the whole test was run after the last change, passed, and the request was reviewed', async () => {
+    const { tools } = await toolsFor({ captures: true })
+    // Nothing was changed: a session that only answers may end.
+    expect(await tools.finish!('Step 1 opens the login page.')).toEqual({ ok: true })
+    await tools.call('add_step', { command: 'navigate', value: '${BASE_URL}/login.html' }, far)
+    expect(await tools.finish!('Done.')).toMatchObject({ ok: false, final: false, event: 'The steps were changed after the last full run' })
+    // A partial run is not the whole test.
+    await tools.call('add_step', { command: 'assert_title_equals', value: 'Shop' }, far)
+    await tools.call('run_steps', { from: 1, to: 1 }, far)
+    expect(await tools.finish!('Done.')).toMatchObject({ ok: false, event: 'The steps were changed after the last full run' })
+
+    runs.failAt = 2
+    runs.error = 'The title is "Sign in"'
+    await tools.call('run_steps', {}, far)
+    const failed = await tools.finish!('The test passes.')
+    expect(failed).toMatchObject({ ok: false, final: false })
+    expect(failed.ok === false && failed.event).toContain('The last run failed: step 2')
+    expect(failed.ok === false && failed.reminder).toMatch(/^Stepwise \(automatic check, not the user\): you are not finished: the last run of the test failed/)
+
+    // Fixed and run again: what is left is the review.
+    runs.failAt = 0
+    await tools.call('update_step', { step: 2, value: 'Sign in' }, far)
+    await tools.call('run_steps', {}, far)
+    expect(await tools.finish!('The test passes.')).toMatchObject({ ok: false, event: 'The request was not yet checked against the final steps' })
+    expect((await tools.call('review_request', { requirements: [point('open the login page'), point('check the title', 'done', [2])] }, far)).isError).toBeUndefined()
+    expect(await tools.finish!('The test passes.')).toEqual({ ok: true })
+
+    // Another change puts all of it back.
+    await tools.call('delete_step', { step: 2 }, far)
+    expect(await tools.finish!('Done.')).toMatchObject({ ok: false, event: 'The steps were changed after the last full run' })
+  })
+
+  it('accepts a test that fails when the review says what could not be done', async () => {
+    const { tools } = await toolsFor({ captures: true })
+    await tools.call('add_step', { command: 'navigate', value: '${BASE_URL}/' }, far)
+    await tools.call('add_step', { command: 'assert_title_equals', value: 'Free shipping' }, far)
+    runs.failAt = 2
+    await tools.call('run_steps', {}, far)
+    // Claiming everything is done does not open the gate.
+    await tools.call('review_request', { requirements: [point('open the shop'), point('check the title', 'done', [2])] }, far)
+    expect(await tools.finish!('Done.')).toMatchObject({ ok: false })
+    const honest = await tools.call('review_request', { requirements: [point('open the shop'), point('check the title', 'not_done', [2], 'The page title is "Shop", not "Free shipping".')] }, far)
+    expect(honest.failed).toBe(true)
+    expect(honest.detail).toBe('Not done: check the title (The page title is "Shop", not "Free shipping".)')
+    expect(JSON.parse(text(honest)).test).toContain('The last run failed')
+    expect(await tools.finish!('The test fails at step 2: the title is "Shop".')).toEqual({ ok: true })
+  })
+
+  it('stops reminding in the end: the third time for the same reason is final', async () => {
+    const { tools } = await toolsFor({ captures: true })
+    await tools.call('add_step', { command: 'navigate', value: '${BASE_URL}/' }, far)
+    expect(await tools.finish!('Done.')).toMatchObject({ ok: false, final: false })
+    expect(await tools.finish!('Done.')).toMatchObject({ ok: false, final: false })
+    expect(await tools.finish!('Done.')).toMatchObject({ ok: false, final: true })
+  })
+
+  it('sends a question back once when nothing was built, and lets a statement through', async () => {
+    const { tools } = await toolsFor({ captures: true })
+    const asked = await tools.finish!('Which page should the test start on?')
+    expect(asked).toMatchObject({ ok: false, final: false })
+    expect(asked.ok === false && asked.reminder).toContain('nobody can answer during a session')
+    expect(await tools.finish!('Which page should the test start on?')).toEqual({ ok: true })
+  })
+
+  it('checks the review itself: step numbers, a note for what was not done as asked, an assertion for a check', async () => {
+    const { tools } = await toolsFor({ captures: true, steps: [{ id: 'n1', command: 'navigate', value: '${BASE_URL}/' }, { id: 'c1', command: 'comment', value: 'x', disabled: true }] })
+    const refused = async (requirements: unknown) => text(await tools.call('review_request', { requirements }, far))
+    expect(await refused([])).toContain('one entry for every separate thing')
+    expect(await refused([point('open', 'done', [3])])).toContain('names step 3, and the test case has 2 steps')
+    expect(await refused([point('note it', 'done', [2])])).toContain('step 2, which is disabled')
+    expect(await refused([point('use the Ocean plan', 'substituted', [1])])).toContain('note is missing')
+    expect(await refused([point('open', 'finished', [1])])).toContain('status must be one of')
+    const warned = JSON.parse(await refused([point('check that the welcome message is shown')]))
+    expect(warned.warnings[0]).toContain('asks for a check, but none of its steps (1) is an assertion')
+    expect(warned.warnings[1]).toContain('no assertion at all')
+    expect(JSON.parse(await refused([point('确认页面上显示了客人姓名')])).warnings[0]).toContain('asks for a check')
+  })
+})
+
+describe('the language of the summary', () => {
+  it('is asked for once when the request is in Chinese or Japanese and the summary is not', async () => {
+    const { tools } = await toolsFor({ captures: true, request: '登录后检查欢迎信息' })
+    const english = await tools.finish!('The test passes.')
+    expect(english).toMatchObject({ ok: false, final: false, event: 'The summary was not written in Chinese, the language of the request' })
+    expect(await tools.finish!('The test passes.')).toEqual({ ok: true })
+  })
+
+  it('is left alone when the summary is in the language of the request, and the task names that language', async () => {
+    const { tools } = await toolsFor({ captures: true, request: 'ログインのテストを作ってください' })
+    expect(await tools.finish!('テストは成功しました。')).toEqual({ ok: true })
+    expect(firstMessage({ testCaseName: 'x', device: DEVICES.desktop, baseUrl: '', variableNames: [], steps: [] }, 'ログインのテスト')).toContain('Language of the request: Japanese.')
+    expect(firstMessage({ testCaseName: 'x', device: DEVICES.desktop, baseUrl: '', variableNames: [], steps: [] }, 'Sign in')).not.toContain('Language of the request')
+  })
+})
+
+describe('an element passed to a command that takes none', () => {
+  it('is ignored, and the answer says so', async () => {
+    const { tools, values } = await toolsFor({ captures: true })
+    await tools.call('capture_screen', { after_step: 0 }, far)
+    const added = await tools.call('add_step', { command: 'navigate', ui_id: 'ui1', element_id: null, value: '${BASE_URL}/', variable: null, after_step: null }, far)
+    expect(added.isError).toBeUndefined()
+    expect(text(added)).toContain('navigate takes no element')
+    expect(await values()).toEqual(['${BASE_URL}/'])
+  })
+})
+
+describe('a run that fails', () => {
+  it('comes with what to do next, and says to stop when the same step keeps failing', async () => {
+    const { tools } = await toolsFor({ captures: true })
+    await tools.call('add_step', { command: 'navigate', value: '${BASE_URL}/' }, far)
+    await tools.call('capture_screen', { after_step: 1 }, far)
+    await tools.call('add_step', { command: 'click', ui_id: 'ui1', element_id: 'e2' }, far)
+    runs.failAt = 2
+    const first = JSON.parse(text(await tools.call('run_steps', {}, far)))
+    expect(first).toMatchObject({ status: 'failed', first_error: { step: 2, message: 'Element not found' } })
+    expect(first.what_to_do).toContain('call capture_screen with after_step 1')
+    expect(first.what_to_do).not.toContain('Stop varying it')
+    await tools.call('run_steps', {}, far)
+    expect(JSON.parse(text(await tools.call('run_steps', {}, far))).what_to_do).toContain('This step has now failed in 3 runs. Stop varying it.')
   })
 })

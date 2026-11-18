@@ -1,5 +1,5 @@
 // The assistant's chat panel: the transcript of the test case's sessions and the box to ask for more.
-import { Camera, CircleAlert, Info, ListChecks, Pencil, Play, Plus, SendHorizontal, Sparkles, Square, Trash2, X } from 'lucide-react'
+import { Camera, CircleAlert, ClipboardCheck, Info, ListChecks, Pencil, Play, Plus, SendHorizontal, Sparkles, Square, Table2, Trash2, X } from 'lucide-react'
 import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { AssistantEvent, AssistantSession, AssistantStatus, AssistantToolName } from '../../shared/types'
 import { Button, IconButton, Popover, Spinner } from '../components/ui'
@@ -180,6 +180,8 @@ const TOOL_ICON: Record<AssistantToolName, ReactNode> = {
   update_step: <Pencil size={13} />,
   delete_step: <Trash2 size={13} />,
   run_steps: <Play size={13} />,
+  set_data_table: <Table2 size={13} />,
+  review_request: <ClipboardCheck size={13} />,
 }
 
 function SessionView({ session }: { session: AssistantSession }) {
