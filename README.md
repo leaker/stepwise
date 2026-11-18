@@ -53,7 +53,8 @@ affiliated with, endorsed by, or derived from the code of any such product.
 - **Self-healing** - in batch runs, when a step's element cannot be found the engine looks for the
   closest match, continues with it and marks the run *unresolved*. Approving the repair saves the new
   locator to the test case and to the element on its captured screen (the screenshot is kept; capture
-  again to refresh it); rejecting it turns the run into a failure. A decision is final. A repair of a
+  again to refresh it); rejecting it turns the run into a failure. A decision is final, so *Reject* asks
+  once more before it is sent. A repair of a
   step that came from a shared step is saved to the shared step, once, for every test case that calls it.
   In a data-driven run each pattern is reviewed by itself; approving a repair also approves the same
   repair in the other patterns of that run, and the locator is saved once.
@@ -254,15 +255,17 @@ How it works:
 - Each session is a fresh model conversation. Its first message holds the instruction, the test case's
   device and base URL, the current steps as numbered sentences, and what the last four sessions on the
   same test case were asked and how each ended (its summary, or what stopped it and the last failure),
-  so a follow-up such as "continue" or "check the user name instead" is understood. The system prompt explains the
-  product and lists the commands (generated from `shared/commands.ts`).
+  so a follow-up such as "continue" or "check the user name instead" is understood. It also carries today's
+  date (UTC), so "next month" does not become a date in the past. The system prompt explains the
+  product and lists the commands (generated from `shared/commands.ts`); it asks for the summary in the
+  language of the request.
 - The model works through six tools, executed in the Worker with the same code the HTTP API uses:
 
   | Tool | What it does |
   | --- | --- |
   | `get_steps` | Lists the current steps. |
-  | `capture_screen` | Captures a URL, or the page after replaying steps 1..N. Stores a captured screen like the *Capture* button does and returns its elements, one line each (`e12 "Add breakfast" checkbox`). A downscaled screenshot is added only when the model asks for one. |
-  | `add_step` / `update_step` / `delete_step` | Edit the steps. An element must come from a capture of this test case, on the test case's device; the step gets the element's recommended locator and keeps the other candidates. |
+  | `capture_screen` | Captures a URL, or the page after replaying steps 1..N. Stores a captured screen like the *Capture* button does and returns its elements, one line each (`e12 "Add breakfast" checkbox`). A downscaled screenshot is added only when the model asks for one. Asked for the same page again with the same steps, it answers with the capture it already made instead of taking another. |
+  | `add_step` / `update_step` / `delete_step` | Edit the steps. An element must come from a capture of this test case, on the test case's device; the step gets the element's recommended locator and keeps the other candidates. An element named without its capture is taken from the session's latest capture, and a value or variable passed to a command that has none is ignored; the answer says so either way. |
   | `run_steps` | Runs all steps or a range in a fresh browser with the engine (no self-healing) and reports each step. Nothing is stored as a run. |
 
   Tool input is validated before anything happens (unknown command, an element that is not in that
@@ -276,7 +279,9 @@ How it works:
 - While a session is queued or running the step list is read-only, in the editor and on the server:
   `PATCH /api/test-cases/:id` with `steps` answers 409 (`assistant_busy`), and the assistant's own writes
   stop the moment the session is no longer running. Saving the name, the device or the data table during
-  a session is allowed and does not get in the assistant's way. An editor in another tab finds out with
+  a session is allowed and does not get in the assistant's way. The captured screens are read-only too:
+  the editor does not rename or delete them or change their elements meanwhile, and `DELETE /api/uis/:id`
+  answers 409. An editor in another tab finds out with
   its next save, locks, and loads the assistant's steps when the session ends. When it ends, the editor loads the steps it left and its undo stack gets
   one entry, so a single undo removes everything the assistant did; if they cannot be loaded, the editor
   stays read-only and keeps trying rather than letting an edit save the old steps over the new ones.
@@ -406,7 +411,10 @@ Other scripts: `pnpm typecheck` (app, worker and shared), `pnpm test` (Vitest), 
 Optional settings go in `.dev.vars` (see `.dev.vars.example`):
 
 - `ACCESS_CODE` - when set, every `/api` route except `/api/session` needs the code: the UI asks for
-  it once and keeps an HttpOnly cookie (`__Host-sw_access` over https); scripts send `Authorization: Bearer <code>`.
+  it once and keeps an HttpOnly cookie (`__Host-sw_access` over https) for 30 days; scripts send `Authorization: Bearer <code>`
+  (the *Run from CI* snippet in the project settings includes that header when a code is set). When the
+  cookie runs out, or the code is changed, while a page is open, the form is shown over that page and
+  nothing on it is lost: the editor saves what it could not as soon as the code is entered again.
   Use a long random code (for example `openssl rand -base64 24`). Wrong codes are counted per client
   address by the `ACCESS_LIMITER` rate limiting binding in `wrangler.jsonc`: after 10 in a minute the
   address gets 429 for a minute and its codes are not compared. That slows guessing down; it is the
@@ -652,7 +660,10 @@ current page when the address had no `.html`.
   256 KB in total as stored (JSON, UTF-8), so not every cell can be at its limit at once: the table
   lives in one D1 row with the steps and is copied into every run. Rows times steps may not exceed
   2000 step results in one run. Pasted text is split into cells at tabs, or at commas when it has
-  several lines with the same number of cells; a single line without tabs is pasted into one cell. Edits
+  several lines with the same number of cells; a single line without tabs is pasted into one cell (into a
+  table that has no column yet it names the first column, or the columns when it is a list of names such as
+  `EMAIL,PASSWORD`). An imported row with more cells than the first row has column names loses the rest,
+  and the import says how many cells that was. Edits
   to the table are a draft until *Save data*: the draft is kept while the tab stays open and the browser
   asks before a reload, but it is not stored anywhere. Patterns run sequentially, never in
   parallel, and the 15 minute limit is for the whole run, so a long test case with many rows has to be
@@ -671,6 +682,19 @@ current page when the address had no `.html`.
   and called from a phone test case may meet a different layout. A run with its shared steps expanded can
   hold 500 steps at most. The assistant keeps, disables or removes a call that is already in a test case,
   but it does not add calls or choose shared steps.
+- A test case holds 500 steps at most, a step value 5000 characters, an element name 300 and a locator
+  2000. The editor's fields stop there and a step over a limit is marked on its row; the API answers 400.
+  An assertion that looks for an empty text (*contains*, URL, title) and a *Select* without an option are
+  errors in the editor: they would pass on any page. To check that a field is empty, use *Assert UI
+  element equals* with an empty text (the text of a field is its value).
+- The editor saves as you type. When a save fails (no connection, a step the server refuses, the
+  assistant or another tab holding the steps), it says so and keeps the changes on screen; leaving the
+  editor then (a link, *Back*, the browser's back button) saves once more and asks before the changes
+  are dropped. `PATCH /api/test-cases/:id` writes only the fields it is sent, so a save of the steps and a
+  save of the data table or the name cannot undo each other.
+- Deleting a test case deletes its captured screens and the results of its single runs. Its results
+  inside batch runs stay in those reports, marked as belonging to a deleted test case. *Recent runs* on
+  the test case page lists single runs and runs inside batch runs.
 - A run is never retried once it has started. Only a run that could not get a browser (Browser Run's
   concurrency or rate limit) is tried again, up to three times, before it is marked failed.
 - A request body may be 1 MB at most; a run may take 15 minutes at most, all of its patterns included.
