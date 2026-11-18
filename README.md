@@ -16,6 +16,13 @@ affiliated with, endorsed by, or derived from the code of any such product.
 - **Steps without code** - a step is a command (click, input, select, assertions, waits, variables,
   If / Otherwise / End branch, ...) plus an element picked from a capture. The command set is in
   `shared/commands.ts`.
+- **Shared steps** - a named sequence of steps (S1, S2, ...) kept once per project and called from any
+  number of test cases with the *Shared step* command, also inside an If block. Editing it changes every
+  test case that calls it. A shared step opens in the same editor (captures, element picking, the
+  assistant) and can be run by itself for debugging. In the editor a call shows the shared step's name,
+  expands to preview its steps and links to it; *Move to a new shared step* in a step's menu turns the
+  selected steps (Shift+click or Shift+arrow keys to select several) into one. The project page lists
+  the shared steps with the test cases that use each; one that is in use cannot be deleted.
 - **Devices** - a test case runs on the desktop browser (1280x800) or on an emulated phone (iPhone 15,
   Pixel 8): phone viewport, user agent, touch input and pixel ratio. Captures and runs use the test
   case's device, clicks become taps, and *Swipe* moves the page (directions are the finger's: swiping up
@@ -31,7 +38,8 @@ affiliated with, endorsed by, or derived from the code of any such product.
 - **Self-healing** - in batch runs, when a step's element cannot be found the engine looks for the
   closest match, continues with it and marks the run *unresolved*. Approving the repair saves the new
   locator to the test case and to the element on its captured screen (the screenshot is kept; capture
-  again to refresh it); rejecting it turns the run into a failure. A decision is final.
+  again to refresh it); rejecting it turns the run into a failure. A decision is final. A repair of a
+  step that came from a shared step is saved to the shared step, once, for every test case that calls it.
 - **Abort** for single and batch runs.
 - **AI assistant** (optional) - describe a test in plain language in the editor's chat panel and the
   assistant builds the steps: it captures the pages, adds steps with the elements it found, and runs
@@ -107,6 +115,18 @@ The contract is `worker/engine/index.ts`: `captureUi(page)` and `runSteps(page, 
   tag is not enough, so a different message or an unrelated button is a failure, not a repair.
   Commands that expect an element to be absent, and conditional branches, never heal.
 
+- **Shared steps.** A test case stores a call as one step that holds the shared step's id. When a run
+  is created (single, batch or CI), the step list it snapshots is expanded (`shared/expand.ts`): the
+  call stays as a marker row, followed by the shared step's steps as they are at that moment, each
+  recording the call, the shared step and its own id there. The engine skips the marker and runs the
+  rest as ordinary steps, so If blocks, variables, waits and self-healing behave as if the steps were
+  written in place. Reports number them under the call (`3.1`, `3.2`, ...) and group them under
+  "Shared step S1: Sign in". A step range, and "capture after step N", count a call as one step: a range
+  that ends on a call includes all of it. Because the run holds a copy, editing, renaming or deleting a
+  shared step afterwards does not change an existing report. A call whose shared step no longer exists,
+  belongs to another project, contains a call itself or has an unbalanced If block is refused when the
+  run is created, with the step number.
+
 Each step stores its own copy of its target element, so a run does not depend on the capture still existing.
 
 ## Try self-healing
@@ -122,11 +142,13 @@ variable for it, and its test case opens `${BASE_URL}/login.html${SITE_VERSION}`
 3. A single run now fails at the first element (single runs never heal). Start a **batch run** instead:
    the steps are repaired as they go and the run ends *Needs review*.
 4. Open the run, review each repair (before / after, old and new locator, similarity) and approve or
-   reject it. Approved locators are written back to the test case.
+   reject it. Approved locators are written back to the test case, or to the shared step when the
+   repaired step came from one (the example suite's last two cases sign in through the shared step
+   "Sign in": approve its repairs in one of them and the other passes on the next run).
 
 ## Example suite
 
-`scripts/seed-examples.mjs` builds five test cases in the demo project through the public HTTP API, the
+`scripts/seed-examples.mjs` builds one shared step and seven test cases in the demo project through the public HTTP API, the
 way a person does in the editor: save the steps, capture the screen after a step, pick elements from the
 capture by name, add steps, capture again. It needs nothing but Node.
 
@@ -136,10 +158,10 @@ pnpm seed:examples https://stepwise.example.com --code-file ~/.stepwise-code --r
 ```
 
 `--code-file` names a file that holds the access code (it is sent as a bearer token and never printed).
-`--run` starts a batch run of the five cases afterwards, waits for it and prints a table; the exit code
+`--run` starts a batch run of the seven cases afterwards, waits for it and prints a table; the exit code
 is 1 only if a case failed or the suite could not be built (runs that were repaired by self-healing and
 wait for review do not count as failures). A finished case whose name already exists is left alone, so the
-script can be run again. A case that could not be built completely is removed again, also when the script
+script can be run again (the same goes for the shared step). A case that could not be built completely is removed again, also when the script
 is interrupted (Ctrl-C; exit code 130). While a case is being built its description starts with a marker,
 so one that was left behind anyway (the process was killed, the connection dropped) is recognised and
 built again by the next run instead of being taken for a finished one.
@@ -151,9 +173,14 @@ built again by the next run instead of being taken for a finished one.
 | Reserve a room end to end | Every kind of form field (date, number, pull-down menu, checkbox, radio button, text area), a value stored in a variable (`TOTAL`) and checked on the next page with `${TOTAL}`. |
 | Conditional flow with variables | Store fixed value, If variable equals / Otherwise / End branch, If UI element exists, comments, Wait until visible, Assert variable equals. |
 | Mobile: open the menu and start a reservation | An emulated iPhone 15: the navigation is behind a *Menu* button there, so the test taps Menu, then Reserve, swipes and checks the form. |
+| Shared step: the guest area after signing in | Starts with a call to the shared step *Sign in* (S1) instead of its own login steps, then checks the dashboard. |
+| Shared step: start a reservation after signing in | A second caller of the same shared step: the elements after the call are picked from a capture that replayed through it. |
+
+The shared step *Sign in* (navigate, two inputs, click) is built first, with its own captured screen. The
+first five cases are as before: each of them still reads top to bottom on its own.
 
 The suite also works for the self-healing walkthrough above: with `SITE_VERSION` set to `?ui=v2`, a batch
-run repairs the renamed elements in all five cases and ends *Needs review*.
+run repairs the renamed elements in all seven cases and ends *Needs review*.
 
 ## AI assistant
 
@@ -553,7 +580,13 @@ current page when the address had no `.html`.
   platform's time limits; Browser Run's own concurrency and session limits apply too.
 - Captures do not look inside iframes or closed shadow roots, and elements inside an open shadow
   root only get CSS locators (XPath cannot reach them).
-- No users, roles, schedules, notifications, shared steps, data-driven tests, loops or visual diffs.
+- No users, roles, schedules, notifications, data-driven tests, loops or visual diffs.
+- Shared steps do not nest (a shared step cannot call another one), and a call takes no parameters:
+  what varies between callers goes through variables set before the call. A shared step has no device of
+  its own at run time: it runs on the device of the test case that calls it, so one captured on desktop
+  and called from a phone test case may meet a different layout. A run with its shared steps expanded can
+  hold 500 steps at most. The assistant keeps, disables or removes a call that is already in a test case,
+  but it does not add calls or choose shared steps.
 - A run is never retried once it has started. Only a run that could not get a browser (Browser Run's
   concurrency or rate limit) is tried again, up to three times, before it is marked failed.
 - A request body may be 1 MB at most; a run may take 15 minutes at most.

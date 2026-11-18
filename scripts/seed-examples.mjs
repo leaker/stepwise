@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Builds the example suite in the "Harbor Inn demo" project through the public HTTP API, the way a
 // person does in the editor: save the steps, capture the screen after a step, pick elements from the
-// capture by name, add steps, capture again.
+// capture by name, add steps, capture again. It builds one shared step ("Sign in") first, then the test
+// cases; the last two call the shared step instead of signing in with steps of their own.
 //
 //   node scripts/seed-examples.mjs <baseUrl> [--code-file <path>] [--run]
 //
@@ -9,7 +10,7 @@
 //   --code-file <path>   file that holds the access code (sent as "Authorization: Bearer"; never printed)
 //   --run                afterwards start a batch run of the example cases and print the results
 //
-// A test case that this script (or a person) finished is left alone, so the script can be run again. A case
+// A test case or shared step that this script (or a person) finished is left alone, so the script can be run again. A case
 // it could not finish - a failed build, Ctrl-C, a lost connection - is removed again when it can be, and is
 // recognised and rebuilt by the next run when it cannot: while a case is being built its description starts
 // with a marker that only the final save replaces.
@@ -149,6 +150,24 @@ async function signIn(b) {
   return b.capture()
 }
 
+/** Shared steps, built before the test cases: a case's build gets their ids by name. */
+const SHARED = [
+  {
+    kind: 'shared',
+    name: 'Sign in',
+    description:
+      'Opens the login page and signs in with the demo account. Test cases call it with the "Shared step" command instead of repeating these four steps; changing it here changes all of them, and a locator repaired by self-healing is saved here once.',
+    device: 'desktop',
+    async build(b) {
+      b.add('navigate', { value: LOGIN_URL })
+      const login = await b.capture()
+      b.add('input', { target: pick(login, '"Email" input area'), value: 'demo@example.com' })
+      b.add('input', { target: pick(login, '"Password" input area'), value: 'demo1234' })
+      b.add('click', { target: pick(login, '"Sign in" button') })
+    },
+  },
+]
+
 const CASES = [
   {
     name: 'Sign in with valid credentials',
@@ -251,33 +270,68 @@ const CASES = [
       b.add('assert_url_contains', { value: 'reserve' })
     },
   },
+  // The two below start with a call to the shared step. A capture replays through the call, so the elements
+  // picked after it come from the page the shared step leaves the test on.
+  {
+    name: 'Shared step: the guest area after signing in',
+    description:
+      'Step 1 calls the shared step "Sign in" (S1) instead of repeating the login steps. The rest checks what a signed-in guest sees: the welcome heading, the list of past stays and the dashboard URL.',
+    device: 'desktop',
+    async build(b, shared) {
+      b.add('shared_step', { value: shared['Sign in'] })
+      const dashboard = await b.capture()
+      b.add('assert_text_equals', { target: pick(dashboard, '"Welcome back, Demo User" text'), value: 'Welcome back, Demo User' })
+      b.add('assert_exists', { target: pick(dashboard, '"Past stays" text') })
+      b.add('assert_url_contains', { value: 'dashboard' })
+    },
+  },
+  {
+    name: 'Shared step: start a reservation after signing in',
+    description:
+      'Also starts with the shared step "Sign in" (S1), then opens the reservation form from the dashboard and checks its heading. Two test cases calling one shared step is the point: edit the sign-in once, and both follow.',
+    device: 'desktop',
+    async build(b, shared) {
+      b.add('shared_step', { value: shared['Sign in'] })
+      const dashboard = await b.capture()
+      b.add('click', { target: pick(dashboard, '"Reserve a room" link') })
+      const form = await b.capture()
+      b.add('assert_text_equals', { target: pick(form, '"Reserve a room" text'), value: 'Reserve a room' })
+      b.add('assert_url_contains', { value: 'reserve' })
+    },
+  },
 ]
 
 /** The build in progress, for the interrupt handler: undoes what was started on the server. */
 let undoCurrent = null
 
-/** Create (or complete) one example case. Returns its id, or throws after undoing what it started. */
-async function seedCase(project, existing, spec) {
+/** `#3` for a test case, `S3` for a shared step. */
+const label = (t) => `${t.kind === 'shared' ? 'S' : '#'}${t.number}`
+
+/**
+ * Create (or complete) one example case or shared step. Returns its id, or throws after undoing what it
+ * started. `shared`: ids of the shared steps by name, for the cases that call one.
+ */
+async function seedCase(project, existing, spec, shared = {}) {
   const found = existing.find((t) => t.name === spec.name)
   // The demo project is created with case 1 holding only its "Navigate" step: that one is completed in place.
   const stub = found && found.steps.length <= 1 && found.steps.every((s) => s.command === 'navigate')
   // Left behind by a run that was cut off before it could save the finished case or undo its work.
   const partial = found && found.description.startsWith(BUILDING)
   if (found && !stub && !partial) {
-    console.log(`  = #${found.number} ${spec.name}: already there (${found.steps.length} steps), left as it is`)
+    console.log(`  = ${label(found)} ${spec.name}: already there (${found.steps.length} steps), left as it is`)
     return found.id
   }
   let testCase = found
   // What to put back when the build fails. A partly built case has nothing worth keeping: its steps go.
   const before = found ? { steps: partial ? [] : found.steps, description: found.description, device: found.device } : null
   if (testCase) {
-    console.log(`  + #${testCase.number} ${spec.name}: ${partial ? 'found partly built by an earlier run that was cut off, building it again' : 'completing the existing test case'}`)
+    console.log(`  + ${label(testCase)} ${spec.name}: ${partial ? 'found partly built by an earlier run that was cut off, building it again' : 'completing the existing test case'}`)
     testCase = await api('PATCH', `/test-cases/${testCase.id}`, { description: BUILDING + spec.description, device: spec.device, ...(partial ? { steps: [] } : {}) })
     // The screens the cut-off run captured belong to steps that no longer exist.
     if (partial) for (const ui of await api('GET', `/test-cases/${testCase.id}/uis`)) await api('DELETE', `/uis/${ui.id}`)
   } else {
-    testCase = await api('POST', `/projects/${project.id}/test-cases`, { name: spec.name, description: BUILDING + spec.description, device: spec.device })
-    console.log(`  + #${testCase.number} ${spec.name}: created (${DEVICE_LABEL[spec.device] ?? spec.device})`)
+    testCase = await api('POST', `/projects/${project.id}/${spec.kind === 'shared' ? 'shared-steps' : 'test-cases'}`, { name: spec.name, description: BUILDING + spec.description, device: spec.device })
+    console.log(`  + ${label(testCase)} ${spec.name}: created (${spec.kind === 'shared' ? 'shared step' : (DEVICE_LABEL[spec.device] ?? spec.device)})`)
   }
   const builder = new Builder(testCase, found && !partial ? structuredClone(found.steps) : [])
   // Do not leave a half-built case behind. A new case is deleted (its captured screens go with it); the
@@ -289,9 +343,9 @@ async function seedCase(project, existing, spec) {
     await api('PATCH', `/test-cases/${found.id}`, before, clean)
     for (const uiId of builder.uiIds) await api('DELETE', `/uis/${uiId}`, undefined, clean).catch(() => {})
   }
-  undoCurrent = { undo, label: `#${testCase.number} ${spec.name}` }
+  undoCurrent = { undo, label: `${label(testCase)} ${spec.name}` }
   try {
-    await spec.build(builder)
+    await spec.build(builder, shared)
     // The last save is the one that makes the case complete: steps and the real description together.
     await api('PATCH', `/test-cases/${testCase.id}`, { steps: builder.steps, description: spec.description })
     undoCurrent = null
@@ -303,7 +357,7 @@ async function seedCase(project, existing, spec) {
       await undo()
     } catch {
       // The marker in its description is still there, so the next run builds it again instead of trusting it.
-      console.error(`    could not undo the partly built test case #${testCase.number}; the next run of this script will build it again`)
+      console.error(`    could not undo the partly built ${label(testCase)}; the next run of this script will build it again`)
     }
     throw new Error(`"${spec.name}": ${e instanceof Error ? e.message : e}`, { cause: e })
   }
@@ -397,9 +451,14 @@ async function main() {
     throw new Error(`The project variable SITE_VERSION is "${project.variables.SITE_VERSION}". Clear it first: the examples are built from the original design of the sample site.`)
   }
 
+  // Shared steps first: the cases that call one need its id, and a call to a shared step that is not there cannot run.
+  const existingShared = await api('GET', `/projects/${project.id}/shared-steps`)
+  const shared = {}
+  for (const spec of SHARED) shared[spec.name] = await seedCase(project, existingShared, spec)
+
   const existing = await api('GET', `/projects/${project.id}/test-cases`)
   const ids = []
-  for (const spec of CASES) ids.push(await seedCase(project, existing, spec))
+  for (const spec of CASES) ids.push(await seedCase(project, existing, spec, shared))
   console.log(`\nThe example suite is in place: ${baseUrl}/p/${project.id}`)
 
   if (runAfter && !(await runBatch(project, ids))) process.exitCode = 1
