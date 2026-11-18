@@ -2,9 +2,10 @@ import { Hono } from 'hono'
 import { sharedLabel, validateSteps } from '../../shared/commands'
 import { hasPatterns, rowValues, runVariables } from '../../shared/data'
 import { DEFAULT_DEVICE, isDeviceId } from '../../shared/devices'
-import { flatRange, NESTED_SHARED_MESSAGE, positionsOf } from '../../shared/expand'
+import { stepsRevision } from '../../shared/revision'
+import { flatRange, NESTED_SHARED_MESSAGE, positionLabel, positionsOf } from '../../shared/expand'
 import type { DataTable, DeviceId, Step, TestCase } from '../../shared/types'
-import { deleteShots, getProjectRow, getTestCaseRow, isSharedRow, lastRunsFor, newId, now, resolveBaseUrl, sweepStaleRuns, toTestCase, toUi, type TestCaseRow, type UiRow } from '../db'
+import { removeShots, getProjectRow, getTestCaseRow, isSharedRow, lastRunsFor, newId, now, resolveBaseUrl, sweepStaleRuns, toTestCase, toUi, type TestCaseRow, type UiRow } from '../db'
 import { sweepStaleSessions } from '../assistant/store'
 import { HttpError, type Env } from '../env'
 import { captureScreen } from '../runner'
@@ -161,11 +162,20 @@ testCases.post('/test-cases/:tid/extract-shared', async (c) => {
       ),
     ),
   ])
-  if (outcome[0].meta.changes === 0) throw new HttpError(409, 'The steps of this test case were changed in the meantime (by the assistant or in another tab). Reload and try again.')
+  if (outcome[0].meta.changes === 0) throw await stepsConflict(c.env.DB, source.id)
   return c.json({ testCase: await withLastRun(c.env.DB, await getTestCaseRow(c.env.DB, source.id)), shared: await withLastRun(c.env.DB, await getTestCaseRow(c.env.DB, sharedId)) }, 201)
 })
 
 // ---- one test case or shared step ----
+
+const STEPS_CHANGED = 'The steps were changed somewhere else in the meantime (another tab, an approved repair or the assistant). Reload them before editing, so that neither change is lost.'
+const ASSISTANT_BUSY = 'The assistant is editing the steps of this test case. Wait for it to finish, or abort it, then try again.'
+
+/** Why a conditional write of the steps did not apply: the assistant owns them right now, or they are no longer the ones the write was based on. */
+async function stepsConflict(db: D1Database, id: string): Promise<HttpError> {
+  const busy = await db.prepare("SELECT 1 AS x FROM assistant_sessions WHERE test_case_id = ? AND status IN ('queued', 'running') LIMIT 1").bind(id).first()
+  return busy ? new HttpError(409, ASSISTANT_BUSY, 'assistant_busy') : new HttpError(409, STEPS_CHANGED, 'steps_changed')
+}
 
 testCases.post('/projects/:pid/test-cases', async (c) => {
   const pid = c.req.param('pid')
@@ -207,12 +217,18 @@ testCases.patch('/test-cases/:tid', async (c) => {
     const nested = isSharedRow(current) ? parsed.findIndex((s) => s.command === 'shared_step') : -1
     if (nested >= 0) throw new HttpError(400, `Step ${nested + 1}: ${NESTED_SHARED_MESSAGE}`)
     const steps = JSON.stringify(parsed)
+    // The editor says which version of the steps its save is based on. When that is no longer the stored
+    // one (another tab saved, a repair was approved, the assistant worked on them), writing would silently
+    // undo that change: the save is refused and the editor reloads. A client that sends no revision
+    // (a script that owns the test case) overwrites, as before.
+    const base = optionalText(body.baseStepsRev, 'baseStepsRev', 64)
+    if (base !== undefined && base !== stepsRevision(current.steps)) throw await stepsConflict(c.env.DB, id)
     const saved = await c.env.DB.prepare(
-      "UPDATE test_cases SET name = ?1, description = ?2, device = ?3, steps = ?4, updated_at = ?5, data = ?7 WHERE id = ?6 AND NOT EXISTS (SELECT 1 FROM assistant_sessions WHERE test_case_id = ?6 AND status IN ('queued', 'running'))",
+      "UPDATE test_cases SET name = ?1, description = ?2, device = ?3, steps = ?4, updated_at = ?5, data = ?7 WHERE id = ?6 AND (?8 IS NULL OR steps = ?8) AND NOT EXISTS (SELECT 1 FROM assistant_sessions WHERE test_case_id = ?6 AND status IN ('queued', 'running'))",
     )
-      .bind(name, description, device, steps, now(), id, data)
+      .bind(name, description, device, steps, now(), id, data, base === undefined ? null : current.steps)
       .run()
-    if (saved.meta.changes === 0) throw new HttpError(409, 'The assistant is editing the steps of this test case. Wait for it to finish, or abort it, then try again.')
+    if (saved.meta.changes === 0) throw await stepsConflict(c.env.DB, id)
   }
   return c.json(await withLastRun(c.env.DB, await getTestCaseRow(c.env.DB, id)))
 })
@@ -237,8 +253,8 @@ testCases.delete('/test-cases/:tid', async (c) => {
   // Single runs go with the test case; runs that belong to a batch report stay as history.
   await c.env.DB.batch([c.env.DB.prepare('DELETE FROM runs WHERE test_case_id = ? AND batch_run_id IS NULL').bind(id), c.env.DB.prepare('DELETE FROM test_cases WHERE id = ?').bind(id)])
   c.executionCtx.waitUntil(
-    deleteShots(
-      c.env.SHOTS,
+    removeShots(
+      c.env,
       shots.results.map((r) => r.k),
       runs.results.map((r) => `run/${r.k}/`),
     ),
@@ -301,7 +317,12 @@ testCases.post('/test-cases/:tid/uis', async (c) => {
     assertExpanded({ ...expansion, problems: expansion.problems.filter((p) => reached.has(p.stepId)) })
     steps = expansion.steps
     replayTo = index + 1
-    assertNavigateTargetsAllowed(steps.slice(0, flatRange(steps, { from: 1, to: replayTo }).to), baseUrl, variables, c.env, appOrigin, positionsOf(steps))
+    const positions = positionsOf(steps)
+    const reach = flatRange(steps, { from: 1, to: replayTo }).to
+    // A branch that is still open after the replayed steps is fine (it is being built); a broken one among them is not.
+    const broken = validateSteps(steps, { from: 1, to: reach })[0]
+    if (broken) throw new HttpError(400, `Step ${positionLabel(positions[steps.findIndex((s) => s.id === broken.stepId)])}: ${broken.message}. Fix the branch structure, then capture again.`)
+    assertNavigateTargetsAllowed(steps.slice(0, reach), baseUrl, variables, c.env, appOrigin, positions)
   } else {
     if (typeof body.url !== 'string' || body.url.trim() === '') throw new HttpError(400, 'Enter the URL of the screen to capture')
     url = resolveUrl(body.url, baseUrl)
@@ -334,6 +355,6 @@ testCases.delete('/uis/:uid', async (c) => {
   const current = await getUiRow(c.env.DB, id)
   await c.env.DB.prepare('DELETE FROM uis WHERE id = ?').bind(id).run()
   const shared = await c.env.DB.prepare('SELECT 1 AS x FROM uis WHERE screenshot_key = ? LIMIT 1').bind(current.screenshot_key).first()
-  if (!shared) c.executionCtx.waitUntil(deleteShots(c.env.SHOTS, [current.screenshot_key]))
+  if (!shared) c.executionCtx.waitUntil(removeShots(c.env, [current.screenshot_key]))
   return c.json({ ok: true })
 })

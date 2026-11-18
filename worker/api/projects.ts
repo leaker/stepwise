@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { deleteShots, getProjectRow, newId, now, storedBaseUrl, toProject, type ProjectRow } from '../db'
+import { removeShots, getProjectRow, newId, now, storedBaseUrl, toProject, type ProjectRow } from '../db'
 import type { Env } from '../env'
 import { optionalBaseUrl, optionalText, optionalVariables, readBody, requireName } from '../validate'
 
@@ -59,8 +59,8 @@ projects.delete('/projects/:pid', async (c) => {
   ])
   await c.env.DB.prepare('DELETE FROM projects WHERE id = ?').bind(id).run()
   c.executionCtx.waitUntil(
-    deleteShots(
-      c.env.SHOTS,
+    removeShots(
+      c.env,
       [...new Set(uis.results.map((r) => r.k))],
       runs.results.map((r) => `run/${r.k}/`),
     ),

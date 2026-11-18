@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
-import { validateSteps } from '../../shared/commands'
+import { COMMAND_BY_ID, stepSentence, validateSteps } from '../../shared/commands'
 import { aggregateStatus, hasPatterns, rowValues, runVariables } from '../../shared/data'
-import { flatRange, positionLabel, positionsOf } from '../../shared/expand'
+import { flatRange, positionLabel, positionsOf, reportedSteps } from '../../shared/expand'
 import type { BatchRun, DataTable, RunPattern, RunStatus, Step, StepResult, UiElement } from '../../shared/types'
 import {
   environmentOf,
@@ -83,6 +83,28 @@ function reviewedStatus(status: RunStatus, results: StepResult[]): RunStatus {
   return results.some((r) => r.heal?.state === 'unresolved') ? 'unresolved' : 'succeeded'
 }
 
+/**
+ * A run is one database row: the snapshot of its steps, a result and a log line per executed step and data
+ * row, and the data rows themselves. D1 holds 2 MB per row; this leaves room for error messages, repair
+ * proposals and the log's headings.
+ */
+export const MAX_RUN_BYTES = 1_500_000
+const TOO_MUCH_DATA = 'This run would store more data than one run can hold (the steps, and a result and a log line for every step and data row). Remove data rows, shorten long step values, or split the test case.'
+const encoder = new TextEncoder()
+const bytes = (text: string): number => encoder.encode(text).length
+
+/** A cautious estimate of what a run's row will hold when every step has passed. `executed`: the steps one pattern executes. */
+export function estimateRunBytes(steps: Step[], executed: Step[], patterns: RunPattern[] | null): number {
+  let perPattern = 0
+  for (const s of executed) {
+    if (s.disabled || s.call) continue
+    // The result carries the step's sentence; the log line its command with the (clipped) value and the element.
+    perPattern += bytes(JSON.stringify(stepSentence(s))) + 220
+    perPattern += Math.min(bytes(JSON.stringify(s.value ?? '')), 1300) + (s.target ? bytes(s.target.name) + bytes(s.target.locator.value) : 0) + bytes(COMMAND_BY_ID[s.command]?.id ?? '') + 40
+  }
+  return bytes(JSON.stringify(steps)) + perPattern * (patterns?.length ?? 1) + (patterns ? bytes(JSON.stringify(patterns)) : 0) + 2000
+}
+
 const TOO_MANY_STEPS = `With its shared steps this has more than ${MAX_RUN_STEPS} steps, which is more than one run can hold`
 
 // ---- single runs ----
@@ -102,23 +124,23 @@ runs.post('/test-cases/:tid/runs', async (c) => {
   if (!hasEnabledSteps(steps)) throw new HttpError(400, `This ${isSharedRow(testCase) ? 'shared step' : 'test case'} has no steps to run`)
   if (steps.length > MAX_RUN_STEPS) throw new HttpError(400, TOO_MANY_STEPS)
   const positions = positionsOf(steps)
-  if (!range) {
-    const problems = validateSteps(steps)
-    if (problems.length) {
-      const first = problems[0]
-      throw new HttpError(400, `Step ${positionLabel(positions[steps.findIndex((s) => s.id === first.stepId)])}: ${first.message}`)
-    }
-  }
-  const origin = new URL(c.req.url).origin
-  const baseUrl = resolveBaseUrl(project.base_url, origin)
   // The steps before a partial run's range are replayed as set-up, so they are checked too.
   const executed = range ? steps.slice(0, flatRange(steps, range).to) : steps
+  // The whole list has to be sound for a whole run. A partial run only executes its steps and the ones
+  // before them: a branch that is still open after those is fine, as it is for the engine.
+  const first = validateSteps(steps, range ? { from: 1, to: executed.length } : null)[0]
+  if (first) throw new HttpError(400, `Step ${positionLabel(positions[steps.findIndex((s) => s.id === first.stepId)])}: ${first.message}`)
+  // Asked for by number, and nothing of it can run: a run that "succeeds" without executing a step says nothing.
+  if (range && reportedSteps(steps, range).length === 0) throw new HttpError(400, range.from === range.to ? `Step ${range.from} is disabled, so there is nothing to run` : `Steps ${range.from}-${range.to} are all disabled, so there is nothing to run`)
+  const origin = new URL(c.req.url).origin
+  const baseUrl = resolveBaseUrl(project.base_url, origin)
   // A data-driven test case runs once per data row. A partial run is for trying steps out, so it uses one
   // row: the first, or the one asked for.
   const table = tableOf(testCase)
   const row = parseRow(body.row, table)
   const patterns = table ? patternsOf(table, range ? [row] : undefined) : null
   if (patterns && patterns.length * executed.filter((s) => !s.disabled && !s.call).length > MAX_RUN_RESULTS) throw new HttpError(400, TOO_MANY_RESULTS)
+  if (estimateRunBytes(steps, executed, patterns) > MAX_RUN_BYTES) throw new HttpError(400, TOO_MUCH_DATA)
   const variables = JSON.parse(project.variables) as Record<string, string>
   for (const pattern of patterns ?? [null]) {
     try {
@@ -245,6 +267,9 @@ runs.post('/runs/:rid/heals/:stepId', async (c) => {
   // still the ones this decision was based on, so two reviewers cannot overwrite each other's decision.
   const unchanged = 'EXISTS (SELECT 1 FROM runs WHERE id = ? AND results = ?)'
   const statements: D1PreparedStatement[] = []
+  // The repair is written onto the steps as they were read here. Had they been saved in between (an editor's
+  // autosave), that write would be lost, so then nothing of this decision is applied; `saved` checks it.
+  let saved: { id: string; steps: string } | null = null
   let notSaved = ''
   if (action === 'approve' && target) {
     // Apply the repair to the live test case (or shared step): every step that uses this element gets the
@@ -258,8 +283,9 @@ runs.post('/runs/:rid/heals/:stepId', async (c) => {
         return { ...s, target: { ...s.target, locator: heal.newLocator, candidates: heal.newCandidates, fingerprint: { ...heal.newFingerprint, box: s.target.fingerprint.box } } }
       })
       if (changed) {
+        saved = { id: testCase.id, steps: JSON.stringify(steps) }
         statements.push(
-          c.env.DB.prepare(`UPDATE test_cases SET steps = ?, updated_at = ? WHERE id = ? AND ${unchanged}`).bind(JSON.stringify(steps), now(), testCase.id, id, run.results),
+          c.env.DB.prepare(`UPDATE test_cases SET steps = ?, updated_at = ? WHERE id = ? AND steps = ? AND ${unchanged}`).bind(saved.steps, now(), testCase.id, testCase.steps, id, run.results),
         )
       }
     }
@@ -274,25 +300,26 @@ runs.post('/runs/:rid/heals/:stepId', async (c) => {
       const elements = (JSON.parse(ui.elements) as UiElement[]).map((el) =>
         el.id === target.elementId ? { ...el, locators: heal.newCandidates.length ? heal.newCandidates : [heal.newLocator], fingerprint: { ...heal.newFingerprint, box: el.box } } : el,
       )
-      statements.push(c.env.DB.prepare(`UPDATE uis SET elements = ? WHERE id = ? AND ${unchanged}`).bind(JSON.stringify(elements), target.uiId, id, run.results))
+      statements.push(
+        c.env.DB.prepare(`UPDATE uis SET elements = ? WHERE id = ? AND ${unchanged}${saved ? ' AND EXISTS (SELECT 1 FROM test_cases WHERE id = ? AND steps = ?)' : ''}`).bind(
+          ...[JSON.stringify(elements), target.uiId, id, run.results, ...(saved ? [saved.id, saved.steps] : [])],
+        ),
+      )
     }
   }
   const line = `Repair of step ${positionLabel(result!)}${pattern ? ` in pattern ${pattern}` : ''} (${heal.elementName}) ${heal.state} by reviewer${alsoApproved ? `, and with it the same repair in ${alsoApproved} other ${alsoApproved === 1 ? 'pattern' : 'patterns'}` : ''}.${
     replaced ? ` It replaces the different repair of the same element approved for step ${positionLabel(replaced)}${replaced.pattern ? ` in pattern ${replaced.pattern}` : ''}.` : ''
   }${notSaved ? ` ${notSaved}` : ''}`
   statements.push(
-    c.env.DB.prepare("UPDATE runs SET results = ?, status = ?, patterns = ?, log = log || CASE WHEN log = '' THEN '' ELSE char(10) END || ? WHERE id = ? AND results = ? AND status = ?").bind(
-      JSON.stringify(results),
-      status,
-      patterns ? JSON.stringify(patterns) : null,
-      line,
-      id,
-      run.results,
-      run.status,
-    ),
+    c.env.DB.prepare(
+      `UPDATE runs SET results = ?, status = ?, patterns = ?, log = log || CASE WHEN log = '' THEN '' ELSE char(10) END || ? WHERE id = ? AND results = ? AND status = ?${saved ? ' AND EXISTS (SELECT 1 FROM test_cases WHERE id = ? AND steps = ?)' : ''}`,
+    ).bind(...[JSON.stringify(results), status, patterns ? JSON.stringify(patterns) : null, line, id, run.results, run.status, ...(saved ? [saved.id, saved.steps] : [])]),
   )
   const outcome = await c.env.DB.batch(statements)
-  if (outcome[outcome.length - 1].meta.changes === 0) throw new HttpError(409, 'This run was changed by someone else in the meantime. Reload and try again.')
+  if (outcome[outcome.length - 1].meta.changes === 0) {
+    const stillThere = await c.env.DB.prepare('SELECT 1 AS x FROM runs WHERE id = ? AND results = ? AND status = ?').bind(id, run.results, run.status).first()
+    throw new HttpError(409, stillThere ? 'The steps were saved by someone else at the same moment, so the repair was not applied. Try again.' : 'This run was changed by someone else in the meantime. Reload and try again.')
+  }
   if (run.batch_run_id) await refreshBatchRun(c.env.DB, run.batch_run_id)
   return c.json(toRun(await getRunRow(c.env.DB, id)))
 })
@@ -374,6 +401,7 @@ runs.post('/projects/:pid/batch-runs', async (c) => {
     const table = tableOf(t)
     if (table) patterns.set(t.id, patternsOf(table))
     if (table && table.rows.length * steps.filter((s) => !s.disabled && !s.call).length > MAX_RUN_RESULTS) throw new HttpError(400, `#${t.number} ${t.name} - ${TOO_MANY_RESULTS}`)
+    if (estimateRunBytes(steps, steps, patterns.get(t.id) ?? null) > MAX_RUN_BYTES) throw new HttpError(400, `#${t.number} ${t.name} - ${TOO_MUCH_DATA}`)
     for (const pattern of patterns.get(t.id) ?? [null]) {
       try {
         assertNavigateTargetsAllowed(steps, baseUrl, runVariables(variables, pattern?.values), c.env, origin, positionsOf(steps))
