@@ -5,6 +5,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   describeDataProblem,
   MAX_CELL_LENGTH,
+  MAX_DATA_BYTES,
   MAX_DATA_COLUMNS,
   MAX_DATA_ROWS,
   parseDelimited,
@@ -57,11 +58,14 @@ function pasteInto(table: DataTable, block: string[][], at: Cell): { table: Data
   return { table: { columns, rows }, clipped }
 }
 
-const LIMITS_NOTE = `Up to ${MAX_DATA_COLUMNS} columns, ${MAX_DATA_ROWS} rows and ${MAX_CELL_LENGTH} characters in a cell.`
+const LIMITS_NOTE = `Up to ${MAX_DATA_COLUMNS} columns, ${MAX_DATA_ROWS} rows, ${MAX_CELL_LENGTH} characters in a cell and ${MAX_DATA_BYTES / 1024} KB in total.`
+
+/** Not a cell: the box shown in place of the grid while the table has no column. */
+const EMPTY_BOX: Cell = { r: -2, c: 0 }
 
 export function DataGrid({ value, onChange, disabled }: { value: DataTable; onChange: (next: DataTable) => void; disabled?: boolean }) {
   const id = useId()
-  const tableRef = useRef<HTMLTableElement>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   // The cell to focus once the table has re-rendered (after a row or column was added or removed).
   const [focus, setFocus] = useState<Cell | null>(null)
@@ -81,7 +85,9 @@ export function DataGrid({ value, onChange, disabled }: { value: DataTable; onCh
 
   useEffect(() => {
     if (!focus) return
-    tableRef.current?.querySelector<HTMLInputElement>(`input[data-r="${focus.r}"][data-c="${focus.c}"]`)?.focus()
+    const root = rootRef.current
+    if (focus.r === EMPTY_BOX.r) root?.querySelector<HTMLElement>('.data-empty')?.focus()
+    else root?.querySelector<HTMLInputElement>(`input[data-r="${focus.r}"][data-c="${focus.c}"]`)?.focus()
     setFocus(null)
   }, [focus])
 
@@ -103,7 +109,8 @@ export function DataGrid({ value, onChange, disabled }: { value: DataTable; onCh
     // Without columns there is no table: its rows go with the last column.
     onChange(columns.length ? { columns, rows: value.rows.map((r) => r.filter((_, i) => i !== c)) } : EMPTY_TABLE)
     say(`Column ${value.columns[c] || c + 1} removed`)
-    if (columns.length) setFocus({ r: -1, c: Math.min(c, columns.length - 1) })
+    // The grid goes with its last column; the box that replaces it takes the focus the removed button had.
+    setFocus(columns.length ? { r: -1, c: Math.min(c, columns.length - 1) } : EMPTY_BOX)
   }
   const removeRow = (r: number) => {
     const rows = value.rows.filter((_, i) => i !== r)
@@ -123,7 +130,10 @@ export function DataGrid({ value, onChange, disabled }: { value: DataTable; onCh
     if (block.length === 0) return
     const { table, clipped } = pasteInto(value, block, cell)
     onChange(table)
-    say(`Pasted ${plural(block.length, 'row')} of ${plural(Math.max(...block.map((r) => r.length)), 'cell')}${clipped ? `. Some of it did not fit: ${LIMITS_NOTE}` : ''}`)
+    const note = `Pasted ${plural(block.length, 'row')} of ${plural(Math.max(...block.map((r) => r.length)), 'cell')}${clipped ? `. Some of it did not fit: ${LIMITS_NOTE}` : ''}`
+    say(note)
+    // Nothing on screen shows that part of the block was dropped, so that is said visibly too.
+    if (clipped) toast(note)
   }
 
   // Up, Down and Enter move between rows as in a spreadsheet; Tab moves between cells as in any form.
@@ -181,7 +191,7 @@ export function DataGrid({ value, onChange, disabled }: { value: DataTable; onCh
   }
 
   return (
-    <div className="data">
+    <div className="data" ref={rootRef}>
       <div className="data-bar">
         <Button size="sm" icon={<Plus size={14} />} disabled={disabled || value.columns.length >= MAX_DATA_COLUMNS} onClick={addColumn}>
           Add column
@@ -221,12 +231,13 @@ export function DataGrid({ value, onChange, disabled }: { value: DataTable; onCh
           </p>
           <p className="muted">
             Add a column, import a CSV file, or click here and paste cells copied from a spreadsheet (the first row names the columns). Each row is then one
-            run of the steps, and a step reads a cell as <code>{'${COLUMN}'}</code>.
+            run of the steps, and a step reads a cell as <code>{'${COLUMN}'}</code>. Pasted text without tabs is split at commas when it has several lines
+            with the same number of cells; a single line goes into one cell.
           </p>
         </div>
       ) : (
         <div className="data-scroll" role="region" aria-label="Data table" tabIndex={-1}>
-          <table className="data-grid" ref={tableRef}>
+          <table className="data-grid">
             <thead>
               <tr>
                 <th scope="col" className="data-n">
@@ -315,17 +326,38 @@ export function DataGrid({ value, onChange, disabled }: { value: DataTable; onCh
 
 const same = (a: DataTable, b: DataTable) => JSON.stringify(a) === JSON.stringify(b)
 
+// Unsaved drafts by test case id, with the saved table each started from. A draft outlives the component
+// that edits it, so a stray click on a link (or going from the test case page to the editor and back) does
+// not throw away a table that is saved explicitly; leaving the app is guarded by `beforeunload` below.
+const drafts = new Map<string, { base: DataTable; draft: DataTable }>()
+
 /** The data table of a test case as a draft that is saved explicitly, for the test case page and the editor. */
 export function useDataDraft(testCase: TestCase) {
   const qc = useQueryClient()
   const saved = testCase.data ?? EMPTY_TABLE
-  const [draft, setDraft] = useState<DataTable>(saved)
+  const [draft, setLocal] = useState<DataTable>(() => {
+    const kept = drafts.get(testCase.id)
+    return kept && same(kept.base, saved) ? kept.draft : saved
+  })
   // What the draft started from: when the saved table changes under it (a save, another tab), start again from that.
   const [base, setBase] = useState(saved)
+  const setDraft = (next: DataTable) => {
+    if (same(next, saved)) drafts.delete(testCase.id)
+    else drafts.set(testCase.id, { base: saved, draft: next })
+    setLocal(next)
+  }
   if (!same(base, saved)) {
     setBase(saved)
     setDraft(saved)
   }
+  const dirty = !same(draft, saved)
+  // A reload or closing the tab would lose the draft: ask first, as the editor does for unsaved steps.
+  useEffect(() => {
+    if (!dirty) return
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault()
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [dirty])
   const problems = useMemo(() => validateDataTable(draft), [draft])
   const save = useMutation({
     mutationFn: () => api.updateTestCase(testCase.id, { data: draft.columns.length ? draft : null }),
@@ -335,5 +367,5 @@ export function useDataDraft(testCase: TestCase) {
       toast(next.data ? `Data saved: ${plural(next.data.rows.length, 'row')}` : 'Data removed')
     },
   })
-  return { draft, setDraft, dirty: !same(draft, saved), problems, save, discard: () => setDraft(saved) }
+  return { draft, setDraft, dirty, problems, save, discard: () => setDraft(saved) }
 }

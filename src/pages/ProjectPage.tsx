@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronRight, Copy, CopyPlus, MoreHorizontal, Pencil, Play, Plus, Trash2, X } from 'lucide-react'
-import { useEffect, useId, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { isBuiltInVariable } from '../../shared/commands'
+import { isBuiltInVariable, validateSteps } from '../../shared/commands'
 import type { BatchRun, Project, TestCase } from '../../shared/types'
 import { api, qk } from '../api'
 import { Button, Confirm, DeviceChip, Dialog, Empty, ErrorState, Field, IconButton, Loading, MenuButton, Shell, StatusIcon, TableWrap, Tabs, toast } from '../components/ui'
@@ -243,16 +243,26 @@ function SharedStepsTab({ pid, list }: { pid: string; list: TestCase[] }) {
       refresh()
     },
   })
+  // The row whose menu opened the dialog is gone after a delete, and focus with it: it goes to "New shared step".
+  const deleted = useRef<string | null>(null)
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteTestCase(id),
+    onSuccess: (_, id) => {
+      deleted.current = id
+    },
     // Also after a refusal: the list of callers may be what changed.
     onSettled: () => {
       setDeleting(null)
       refresh()
     },
   })
+  useEffect(() => {
+    if (!deleted.current || list.some((t) => t.id === deleted.current)) return
+    deleted.current = null
+    document.querySelector<HTMLElement>('[data-new-shared]')?.focus()
+  }, [list])
   const newButton = (
-    <Button variant="primary" icon={<Plus size={16} />} busy={create.isPending} onClick={() => create.mutate()}>
+    <Button variant="primary" icon={<Plus size={16} />} busy={create.isPending} onClick={() => create.mutate()} data-new-shared>
       New shared step
     </Button>
   )
@@ -301,6 +311,12 @@ function SharedStepsTab({ pid, list }: { pid: string; list: TestCase[] }) {
                     {t.description && (
                       <div className="cell-desc" title={t.description}>
                         {t.description}
+                      </div>
+                    )}
+                    {/* Saved as it is (the editor saves while an If block is being written), but nothing that calls it can run. */}
+                    {validateSteps(t.steps).length > 0 && (
+                      <div className="cell-desc form-error">
+                        Its If / Otherwise / End steps do not balance{usedBy.length > 0 ? `: ${plural(usedBy.length, 'test case')} that ${usedBy.length === 1 ? 'calls' : 'call'} it cannot run until it is` : ''}.
                       </div>
                     )}
                   </th>

@@ -574,8 +574,11 @@ function EditorInner({ tid }: { tid: string }) {
       h.key = null
       stepsRef.current = testCase.steps
       setSteps(testCase.steps)
-      setSelectedId(testCase.steps.find((s) => s.command === 'shared_step' && s.value === created.id)?.id ?? null)
+      const callId = testCase.steps.find((s) => s.command === 'shared_step' && s.value === created.id)?.id ?? null
+      setSelectedId(callId)
       setExtracting(null)
+      // The rows the dialog was opened from are gone; the keyboard goes on from the call that replaced them.
+      if (callId) window.setTimeout(() => setFocusId(callId), 0)
       toast(`Moved ${plural(created.steps.length, 'step')} to shared step ${sharedLabel(created)}`)
     },
   })

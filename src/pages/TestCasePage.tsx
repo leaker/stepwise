@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronRight, Pencil } from 'lucide-react'
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { stepSentence } from '../../shared/commands'
 import { patternSummary } from '../../shared/data'
@@ -180,13 +180,32 @@ export function TestCasePage() {
 /** The data table of the test case. Saved explicitly: a half-typed table should not change what the next run does. */
 function DataPanel({ testCase }: { testCase: TestCase }) {
   const { draft, setDraft, dirty, problems, save, discard } = useDataDraft(testCase)
+  const formRef = useRef<HTMLFormElement>(null)
+  // Saving and discarding disable the button that was used (and, while saving, the cell Enter was pressed
+  // in), which would drop keyboard focus to the page. Where focus was is remembered and given back, or the
+  // grid takes it.
+  const refocus = useRef<{ from: Element | null } | null>(null)
+  const pending = save.isPending
+  useEffect(() => {
+    const wanted = refocus.current
+    if (!wanted || pending) return
+    refocus.current = null
+    const form = formRef.current
+    const from = wanted.from
+    if (from instanceof HTMLElement && form?.contains(from) && !from.matches(':disabled')) return from.focus()
+    form?.querySelector<HTMLElement>('.data-grid input:not(:disabled), .data-empty, .data-bar button:not(:disabled)')?.focus()
+  }, [dirty, pending])
+  const remember = () => (refocus.current = { from: document.activeElement })
   return (
     <form
+      ref={formRef}
       className="panel data-panel"
       id="data"
       onSubmit={(e) => {
         e.preventDefault()
-        if (dirty && problems.length === 0) save.mutate()
+        if (!dirty || problems.length > 0) return
+        remember()
+        save.mutate()
       }}
     >
       <h2>Data</h2>
@@ -204,7 +223,13 @@ function DataPanel({ testCase }: { testCase: TestCase }) {
         <Button type="submit" variant="primary" busy={save.isPending} disabled={!dirty || problems.length > 0}>
           Save data
         </Button>
-        <Button disabled={!dirty || save.isPending} onClick={discard}>
+        <Button
+          disabled={!dirty || save.isPending}
+          onClick={() => {
+            remember()
+            discard()
+          }}
+        >
           Discard changes
         </Button>
         {dirty && <span className="muted">Unsaved changes</span>}

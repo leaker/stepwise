@@ -7,9 +7,9 @@ import { sharedLabel, stepSentence } from '../../shared/commands'
 import { logOfPattern, patternSummary } from '../../shared/data'
 import { deviceOf } from '../../shared/devices'
 import { flatRange, positionLabel, positionsOf, reportedSteps, topLevelCount } from '../../shared/expand'
-import { locatorToString, type Box, type HealProposal, type Run, type RunPattern, type RunStatus, type StepResult, type Ui } from '../../shared/types'
+import { locatorToString, type Box, type HealProposal, type Run, type RunPattern, type StepResult, type Ui } from '../../shared/types'
 import { api, qk, shotUrl } from '../api'
-import { Button, DeviceChip, Dialog, ErrorState, IconButton, Loading, onTablistKeyDown, Shell, Spinner, StatusIcon, TableWrap, Tabs } from '../components/ui'
+import { Button, DeviceChip, Dialog, ErrorState, IconButton, Loading, onTablistKeyDown, Shell, Spinner, StatusIcon, TableWrap, Tabs, toast } from '../components/ui'
 import { cx, dateTime, duration, isTerminal, ms, plural, STATUS_LABEL } from '../lib/format'
 import { useModalDialog, useTick } from '../lib/hooks'
 
@@ -48,7 +48,7 @@ export function RunPage() {
       patterns[0])
     : undefined
   // What the tabs show: the run itself, or the selected pattern as if it were a run of its own.
-  const view: Run = pattern ? { ...r, status: patternStatus(r, pattern), results: r.results.filter((x) => x.pattern === pattern.index), log: logOfPattern(r.log, pattern.index) } : r
+  const view: Run = pattern ? { ...r, status: pattern.status, results: r.results.filter((x) => x.pattern === pattern.index), log: logOfPattern(r.log, pattern.index) } : r
   const failures = view.results.filter((x) => x.status === 'failed')
   const heals = view.results.filter((x) => x.heal)
   const shots = view.results.filter((x) => x.screenshotKey)
@@ -214,14 +214,6 @@ export function RunPage() {
   )
 }
 
-/**
- * The status a pattern is shown with. A pattern that is still waiting or running on a run that has
- * finished was never run to its end (the run was aborted, timed out or crashed): it takes the run's status.
- */
-function patternStatus(run: Run, p: RunPattern): RunStatus {
-  return isTerminal(run.status) && !isTerminal(p.status) ? (run.status === 'aborted' ? 'aborted' : 'failed') : p.status
-}
-
 /** The patterns of a data-driven run, as tabs: status, row number and the first values of the row. */
 function PatternBar({ run, current, onSelect }: { run: Run; current: number; onSelect: (index: number) => void }) {
   const patterns = run.patterns ?? []
@@ -234,7 +226,7 @@ function PatternBar({ run, current, onSelect }: { run: Run; current: number; onS
     <div className="patterns">
       <div className="patterns-tabs" ref={strip} role="tablist" aria-label="Patterns (data rows) of this run" onKeyDown={onTablistKeyDown}>
         {patterns.map((p) => {
-          const status = patternStatus(run, p)
+          const status = p.status
           const values = Object.entries(p.values)
           const notRun = isTerminal(run.status) && !p.startedAt
           return (
@@ -524,10 +516,20 @@ function HealDialog({ run, result, live, onClose }: { run: Run; result: StepResu
       void qc.invalidateQueries({ queryKey: qk.uis(ownerId) })
       if (origin) void qc.invalidateQueries({ queryKey: qk.sharedSteps(run.projectId) })
       if (run.batchRunId) void qc.invalidateQueries({ queryKey: qk.batchRun(run.batchRunId) })
+      // The dialog closes on the decision, so this is said where it will be seen.
+      if (r.results.find((x) => x.stepId === result.stepId && x.pattern === result.pattern)?.heal?.notSaved)
+        toast('Approved, but no step uses this element any more (it was moved or deleted after the run), so the new locator was not saved to a step.', 'error')
       onClose()
     },
   })
   const open = heal.state === 'unresolved'
+  // A different repair of the same element that was approved earlier in this run (in another pattern, or
+  // on another step that uses the element): approving this one replaces it.
+  const target = run.steps.find((s) => s.id === result.stepId)?.target
+  const sameElement = new Set(target ? run.steps.filter((s) => s.target?.uiId === target.uiId && s.target.elementId === target.elementId).map((s) => s.id) : [])
+  const earlier = run.results.find(
+    (x) => x !== result && x.heal?.state === 'approved' && sameElement.has(x.stepId) && (x.heal.newLocator.key !== heal.newLocator.key || x.heal.newLocator.value !== heal.newLocator.value),
+  )
   const score = Math.round(heal.score * 100)
 
   return (
@@ -550,6 +552,13 @@ function HealDialog({ run, result, live, onClose }: { run: Run; result: StepResu
                 ? `This step belongs to shared step ${sharedLabel(origin.shared)}. Approving saves the new locator there, for every test case that calls it, and to the element on its captured screen (the screenshot is not retaken).`
                 : 'Approving saves the new locator to the step and to the element on its captured screen (the screenshot is not retaken).'}{' '}
               {result.pattern && (run.patterns?.length ?? 0) > 1 ? 'The same repair in the other patterns of this run is approved with it. Rejecting marks this pattern, and so the run, as failed and changes nothing.' : 'Rejecting marks this run as failed and changes nothing.'}
+              {earlier && (
+                <strong>
+                  {' '}
+                  A different repair of this element (<code>{locatorToString(earlier.heal!.newLocator)}</code>) was already approved for step {positionLabel(earlier)}
+                  {earlier.pattern ? ` in pattern ${earlier.pattern}` : ''}: approving this one replaces it.
+                </strong>
+              )}
             </span>
             <Button variant="danger" busy={decide.isPending && decide.variables === 'reject'} disabled={decide.isPending} onClick={() => decide.mutate('reject')}>
               Reject
@@ -560,7 +569,10 @@ function HealDialog({ run, result, live, onClose }: { run: Run; result: StepResu
           </>
         ) : (
           <>
-            <span className="heal-foot-note">This repair was {heal.state}.</span>
+            <span className="heal-foot-note">
+              This repair was {heal.state}.
+              {heal.notSaved && ` No step of the ${origin ? 'shared step' : 'test case'} used this element any more (it was moved or deleted after the run), so the new locator was not saved to a step.`}
+            </span>
             <Button onClick={onClose} data-autofocus>
               Close
             </Button>

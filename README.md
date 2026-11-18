@@ -149,7 +149,13 @@ The contract is `worker/engine/index.ts`: `captureUi(page)` and `runSteps(page, 
   the next pattern. A pattern that fails does not stop the others. The run is one record: every step
   result carries its pattern number, the log has one section per pattern, and the run's status combines
   the patterns - failed if any failed, otherwise unresolved if any waits for a repair review, otherwise
-  succeeded; an abort stops the running pattern and the rest are not run. A step range or a capture
+  succeeded; an abort stops the running pattern and the rest are not run. When a run ends without the
+  consumer finishing it (aborted while queued, the time limit), the API reports its unfinished patterns
+  with the run's verdict, never as queued or running. If the browser session goes away during a pattern,
+  that pattern fails and the next one gets a new browser; if none can be started, the remaining patterns
+  fail with that reason (the run has started, so it is not put back on the queue). An approved repair is
+  saved once: the same repair in other patterns is approved with it, and approving a *different* repair
+  of the same element later replaces the first, which the review dialog and the log say. A step range or a capture
   replays the steps with one row (the first unless another is chosen), and navigate targets are checked
   against the allow-list with every row's values before the run starts.
 
@@ -207,7 +213,7 @@ The shared step *Sign in* (navigate, two inputs, click) is built first, with its
 first five cases are as before: each of them still reads top to bottom on its own.
 
 The suite also works for the self-healing walkthrough above: with `SITE_VERSION` set to `?ui=v2`, a batch
-run repairs the renamed elements in all seven cases and ends *Needs review*.
+run repairs the renamed elements in all eight cases and ends *Needs review*.
 
 ## AI assistant
 
@@ -609,12 +615,22 @@ current page when the address had no `.html`.
   root only get CSS locators (XPath cannot reach them).
 - No users, roles, schedules, notifications, loops or visual diffs.
 - Data-driven tests: a data table has at most 20 columns, 50 rows and 2000 characters in a cell, and
-  rows times steps may not exceed 2000 step results in one run. Patterns run sequentially, never in
+  256 KB in total as stored (JSON, UTF-8), so not every cell can be at its limit at once: the table
+  lives in one D1 row with the steps and is copied into every run. Rows times steps may not exceed
+  2000 step results in one run. Pasted text is split into cells at tabs, or at commas when it has
+  several lines with the same number of cells; a single line without tabs is pasted into one cell. Edits
+  to the table are a draft until *Save data*: the draft is kept while the tab stays open and the browser
+  asks before a reload, but it is not stored anywhere. Patterns run sequentially, never in
   parallel, and the 15 minute limit is for the whole run, so a long test case with many rows has to be
   split. Cells are text; there is no per-row device, no row filter and no shared data table between test
   cases (a shared step uses the data of the test case that calls it). A cell is a one-line field: a
   line break inside an imported or pasted cell is kept until that cell is edited. The assistant builds
   and tries steps with the first row.
+- A shared step is saved even while its If / Otherwise / End steps do not balance (the editor saves
+  as you type), but then no test case that calls it can run, and a batch run that includes one is
+  refused; the *Shared steps* tab marks such a shared step. Step ids are 1-64 letters, digits, `-`
+  or `_`. A repair proposed by an old run for a step that has since been moved to a shared step or
+  deleted can still be approved, but no step gets the locator, and the report says so.
 - Shared steps do not nest (a shared step cannot call another one), and a call takes no parameters:
   what varies between callers goes through variables set before the call. A shared step has no device of
   its own at run time: it runs on the device of the test case that calls it, so one captured on desktop

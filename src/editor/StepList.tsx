@@ -76,7 +76,9 @@ export function StepList(p: StepListProps) {
     if (!p.focusId) return
     const row = listRef.current?.querySelector<HTMLElement>(`[data-step="${p.focusId}"]`)
     row?.scrollIntoView({ block: 'nearest' })
-    row?.querySelector<HTMLElement>('input.step-input, select.step-input')?.focus()
+    // A shared step call has no field: its menu button is the row's control.
+    const call = p.steps.find((s) => s.id === p.focusId)?.command === 'shared_step'
+    row?.querySelector<HTMLElement>(call ? '.step-more' : 'input.step-input, select.step-input')?.focus()
   }, [p.focusId])
 
   useEffect(() => {
