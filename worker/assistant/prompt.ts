@@ -5,12 +5,18 @@
 import type Anthropic from '@anthropic-ai/sdk'
 import { COMMANDS, KEYS, stepSentence, SWIPE_DIRECTIONS } from '../../shared/commands'
 import type { DeviceProfile } from '../../shared/devices'
-import type { AssistantToolName, Step } from '../../shared/types'
+import type { AssistantToolName, SharedRef, Step } from '../../shared/types'
+
+/**
+ * The commands the assistant may write. A shared step call is not one of them: it can keep, move, disable
+ * or remove a call that is already there, but which shared step a test calls is the user's decision.
+ */
+export const ASSISTANT_COMMANDS = COMMANDS.filter((c) => c.id !== 'shared_step')
 
 const catalogue = (): string => {
   const lines: string[] = []
   let category = ''
-  for (const c of COMMANDS) {
+  for (const c of ASSISTANT_COMMANDS) {
     if (c.category !== category) {
       category = c.category
       lines.push(`${category}:`)
@@ -43,6 +49,7 @@ Notes on values:
 - Any value can use variables as \${NAME}. Built in: BASE_URL, BROWSER, DEVICE. Project variables are listed with the task. store_text, store_fixed and store_url create a variable for later steps; give them a bare name without \${}.
 - if_exists and if_variable_equals open a block that must be closed with end_if, with an optional else in between.
 - Steps wait for their element (up to 10 seconds) and assertions retry, so a wait step is only needed when the page gives nothing to wait for.
+- A step listed as "Shared step S1: ..." (command shared_step) calls a sequence of steps that the user keeps in one place for several test cases. It runs as part of this test, and a run reports its inner steps with in_shared_step. You cannot add such a step or change what it does. Leave it where it is unless the request is to remove or disable it, and build around it.
 
 ## How to work
 
@@ -95,7 +102,7 @@ export const TOOLS: ToolDef[] = [
     input_schema: {
       type: 'object',
       properties: {
-        command: { type: 'string', enum: COMMANDS.map((c) => c.id), description: 'Command id from the catalogue.' },
+        command: { type: 'string', enum: ASSISTANT_COMMANDS.map((c) => c.id), description: 'Command id from the catalogue.' },
         ...stepFields,
         after_step: stepNumber('Insert after this step number (0 inserts at the top). Omit to append at the end.'),
       },
@@ -155,7 +162,7 @@ export const TOOLS: ToolDef[] = [
       type: 'object',
       properties: {
         step: stepNumber('Step number to change.'),
-        command: { type: 'string', enum: COMMANDS.map((c) => c.id), description: 'New command id, if the command changes.' },
+        command: { type: 'string', enum: ASSISTANT_COMMANDS.map((c) => c.id), description: 'New command id, if the command changes.' },
         ...stepFields,
         disabled: { type: 'boolean', description: 'true to disable the step (it is skipped), false to enable it.' },
       },
@@ -167,8 +174,10 @@ export const TOOLS: ToolDef[] = [
 
 // ---- the first user message ----
 
-export const numberedSteps = (steps: Step[]): string =>
-  steps.length === 0 ? '(no steps yet)' : steps.map((s, i) => `${i + 1}. ${stepSentence(s)}${s.disabled ? ' (disabled)' : ''}`).join('\n')
+export type SharedNames = (id: string) => Pick<SharedRef, 'number' | 'name'> | undefined
+
+export const numberedSteps = (steps: Step[], shared?: SharedNames): string =>
+  steps.length === 0 ? '(no steps yet)' : steps.map((s, i) => `${i + 1}. ${stepSentence(s, shared)}${s.disabled ? ' (disabled)' : ''}`).join('\n')
 
 export interface TaskContext {
   testCaseName: string
@@ -176,6 +185,8 @@ export interface TaskContext {
   baseUrl: string
   variableNames: string[]
   steps: Step[]
+  /** Names of the shared steps the test case calls. */
+  shared?: SharedNames
 }
 
 export function firstMessage(ctx: TaskContext, instruction: string): string {
@@ -187,7 +198,7 @@ export function firstMessage(ctx: TaskContext, instruction: string): string {
     `Project variables: ${ctx.variableNames.length ? ctx.variableNames.join(', ') : '(none)'}`,
     '',
     'Current steps:',
-    numberedSteps(ctx.steps),
+    numberedSteps(ctx.steps, ctx.shared),
     '',
     'Request from the user:',
     instruction,

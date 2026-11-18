@@ -8,7 +8,8 @@ import { testCases } from '../../worker/api/testCases'
 import { maskVariables, TurnNumbering, variableUrlProblem } from '../../worker/assistant/steps'
 import { sweepStaleSessions } from '../../worker/assistant/store'
 import { assistantTools, PAGE_NOTE } from '../../worker/assistant/tools'
-import { SYSTEM_PROMPT } from '../../worker/assistant/prompt'
+import { firstMessage, SYSTEM_PROMPT, TOOLS } from '../../worker/assistant/prompt'
+import { DEVICES } from '../../shared/devices'
 import { HttpError, type Env } from '../../worker/env'
 import { assertNavigateTargetsAllowed, optionalVariables } from '../../worker/validate'
 import { memoryD1, seedTestCase } from './d1'
@@ -139,6 +140,80 @@ describe('writing steps', () => {
     expect(await values()).toEqual(['one', 'theirs'])
     expect((await tools.call('add_step', { command: 'comment', value: 'mine' }, far)).isError).toBeUndefined()
     expect(await values()).toEqual(['one', 'theirs', 'mine'])
+  })
+})
+
+describe('shared step calls', () => {
+  async function withCall() {
+    const t = await toolsFor({ steps: [comment('one')] })
+    const { project_id: projectId } = (await db.prepare('SELECT project_id FROM test_cases WHERE id = ?').bind(t.testCaseId).first<{ project_id: string }>())!
+    await db
+      .prepare("INSERT INTO test_cases (id, project_id, number, name, steps, kind, created_at, updated_at) VALUES ('sh1', ?, -1, 'Sign in', ?, 'shared', 'x', 'x')")
+      .bind(projectId, JSON.stringify([comment('inside')]))
+      .run()
+    // Written the way the editor does it, while no session is running.
+    const steps: Step[] = [comment('one'), { id: 'call', command: 'shared_step', value: 'sh1' }, comment('three')]
+    await db.prepare("UPDATE test_cases SET steps = ?, updated_at = '2026-01-02T00:00:00.000Z' WHERE id = ?").bind(JSON.stringify(steps), t.testCaseId).run()
+    return t
+  }
+
+  it('are not among the commands the model can write', () => {
+    for (const tool of TOOLS) {
+      const command = (tool.input_schema.properties as Record<string, { enum?: string[] }>).command
+      if (command) expect(command.enum).not.toContain('shared_step')
+    }
+    expect(SYSTEM_PROMPT).not.toContain('- shared_step:')
+    expect(SYSTEM_PROMPT).toContain('You cannot add such a step or change what it does')
+  })
+
+  it('are shown to the model by name', async () => {
+    const { tools } = await withCall()
+    const listed = JSON.parse(String((await tools.call('get_steps', {}, far)).content)) as { steps: { sentence: string; value?: string }[] }
+    expect(listed.steps.map((s) => s.sentence)).toEqual(['// one', 'Shared step S1: Sign in', '// three'])
+    expect(listed.steps[1].value).toBeUndefined()
+    const context = await tools.context()
+    expect(firstMessage({ ...context, device: DEVICES.desktop }, 'x')).toContain('2. Shared step S1: Sign in')
+  })
+
+  it('cannot be created, turned into, or re-pointed, and nothing is saved by the attempt', async () => {
+    const { tools, testCaseId } = await withCall()
+    const before = await stepsOf(testCaseId)
+    const refused = [
+      await tools.call('add_step', { command: 'shared_step', value: 'sh1' }, far),
+      await tools.call('update_step', { step: 1, command: 'shared_step', value: 'sh1' }, far),
+      await tools.call('update_step', { step: 2, value: 'other' }, far),
+      await tools.call('update_step', { step: 2, command: 'comment', value: 'gone' }, far),
+      await tools.call('update_step', { step: 2 }, far),
+    ]
+    for (const r of refused) {
+      expect(r.isError).toBe(true)
+      expect(String(r.content)).toContain('A shared step call cannot be added or changed here')
+    }
+    expect(await stepsOf(testCaseId)).toEqual(before)
+  })
+
+  it('can be disabled, enabled again and removed', async () => {
+    const { tools, testCaseId } = await withCall()
+    const off = await tools.call('update_step', { step: 2, disabled: true }, far)
+    expect(off.isError).toBeUndefined()
+    expect(off.event).toBe('Changed step 2: Shared step S1: Sign in (disabled)')
+    expect((await stepsOf(testCaseId))[1]).toEqual({ id: 'call', command: 'shared_step', value: 'sh1', disabled: true })
+    await tools.call('update_step', { step: 2, disabled: false }, far)
+    expect((await stepsOf(testCaseId))[1]).toEqual({ id: 'call', command: 'shared_step', value: 'sh1' })
+    const removed = await tools.call('delete_step', { step: 2 }, far)
+    expect(removed.event).toBe('Removed step 2: Shared step S1: Sign in')
+    expect((await stepsOf(testCaseId)).map((s) => s.id)).toEqual(['c-one', 'c-three'])
+  })
+
+  it('must be sound before a run or a replay goes through them', async () => {
+    const { tools, testCaseId } = await withCall()
+    await db.prepare("DELETE FROM test_cases WHERE id = 'sh1'").run()
+    const run = await tools.call('run_steps', {}, far)
+    expect(run.isError).toBe(true)
+    expect(String(run.content)).toContain('Step 2: The shared step this step calls no longer exists')
+    const replay = await tools.call('capture_screen', { after_step: 3 }, far)
+    expect(String(replay.content)).toContain('Step 2: The shared step this step calls no longer exists')
+    expect(await stepsOf(testCaseId)).toHaveLength(3)
   })
 })
 

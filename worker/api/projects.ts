@@ -6,7 +6,7 @@ import { optionalBaseUrl, optionalText, optionalVariables, readBody, requireName
 export const projects = new Hono<{ Bindings: Env }>()
 
 const LIST_SQL = `SELECT p.*,
-  (SELECT COUNT(*) FROM test_cases t WHERE t.project_id = p.id) AS test_case_count,
+  (SELECT COUNT(*) FROM test_cases t WHERE t.project_id = p.id AND t.kind = 'test') AS test_case_count,
   (SELECT COUNT(*) FROM batch_runs b WHERE b.project_id = p.id) AS batch_run_count
   FROM projects p`
 

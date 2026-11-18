@@ -235,6 +235,25 @@
   font-size: 0.78125rem;
   text-decoration: none;
 }
+/* Test cases that call a shared step. */
+.used-by {
+  margin: 0 0 4px;
+  padding: 0;
+  list-style: none;
+}
+.used-by li {
+  padding: 5px 0;
+  border-top: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.used-by li:first-child {
+  border-top: 0;
+}
+.used-by-cell {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+}
 .outline-foot {
   margin-top: 12px;
   font-size: 0.8125rem;
@@ -598,6 +617,17 @@ button.message:active {
 }
 .log-step.is-out .log-n {
   color: var(--rail-ink-2);
+}
+/* A shared step call: a heading for the steps under it, which carry numbers like 3.1. */
+.log-step.log-group {
+  background: var(--surface-2);
+  font-weight: 500;
+}
+.log-step.is-inner .log-sentence {
+  padding-inline-start: 14px;
+}
+.log-step.is-inner .log-n {
+  font-size: 0.75rem;
 }
 .log-console {
   background: var(--rail);

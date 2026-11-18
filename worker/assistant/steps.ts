@@ -42,7 +42,12 @@ export function stepIndex(steps: Step[], n: number, key = 'step'): number {
   return n - 1
 }
 
+/** Told to the model when it tries to write a shared step call. */
+export const SHARED_STEP_NOTE =
+  'A shared step call cannot be added or changed here: which shared step a test case calls is up to the user. An existing call can be removed with delete_step or switched off with update_step (disabled). Tell the user if the test needs a shared step.'
+
 export function commandOf(value: unknown): CommandId {
+  if (value === 'shared_step') return fail(SHARED_STEP_NOTE)
   if (typeof value !== 'string' || !Object.hasOwn(COMMAND_BY_ID, value)) return fail(`Unknown command "${String(value)}". Use a command id from the catalogue, for example click, input, navigate or assert_text_equals.`)
   return value as CommandId
 }

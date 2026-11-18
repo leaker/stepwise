@@ -2,14 +2,16 @@
 // A tool never throws for something the model can fix: it returns an error result with what to do instead.
 import { COMMAND_BY_ID, stepSentence, validateSteps } from '../../shared/commands'
 import { deviceOf } from '../../shared/devices'
+import { expandSteps, flatRange, positionLabel, positionsOf, type SharedLookup } from '../../shared/expand'
 import type { Step, Ui } from '../../shared/types'
-import { getProjectRow, getTestCaseRow, newId, resolveBaseUrl, toUi, type TestCaseRow, type UiRow } from '../db'
+import { getProjectRow, getTestCaseRow, isSharedRow, newId, resolveBaseUrl, rowLabel, toUi, type TestCaseRow, type UiRow } from '../db'
 import { errorMessage, HttpError, type Env } from '../env'
 import { captureScreen, trialRun, type BrowserLease } from '../runner'
+import { sharedLookupFor } from '../shared'
 import { assertNavigateTargetsAllowed, isHostAllowed, resolveUrl } from '../validate'
 import type { ToolContext, ToolHost, ToolOutcome, ToolResultContent } from './loop'
 import type { TaskContext } from './prompt'
-import { asInput, checkStep, commandOf, DEFAULT_VALUE, listElements, maskVariables, optionalInt, optionalString, requiredInt, stepIndex, targetFrom, ToolInputError, TurnNumbering, variableUrlProblem, type Input } from './steps'
+import { asInput, checkStep, commandOf, DEFAULT_VALUE, listElements, maskVariables, optionalInt, optionalString, requiredInt, SHARED_STEP_NOTE, stepIndex, targetFrom, ToolInputError, TurnNumbering, variableUrlProblem, type Input } from './steps'
 
 const json = (value: unknown): string => JSON.stringify(value)
 const clip = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
@@ -19,6 +21,8 @@ interface Loaded {
   steps: Step[]
   baseUrl: string
   variables: Record<string, string>
+  /** The shared steps the test case calls, for their names and for expanding the calls before a replay or a run. */
+  shared: SharedLookup
 }
 
 export interface AssistantTools extends ToolHost {
@@ -36,12 +40,22 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
   const load = async (): Promise<Loaded> => {
     const row = await getTestCaseRow(env.DB, testCaseId)
     const project = await getProjectRow(env.DB, row.project_id)
+    const steps = JSON.parse(row.steps) as Step[]
     return {
       row,
-      steps: JSON.parse(row.steps) as Step[],
+      steps,
       baseUrl: resolveBaseUrl(project.base_url, appOrigin),
       variables: JSON.parse(project.variables) as Record<string, string>,
+      shared: await sharedLookupFor(env.DB, [steps]),
     }
+  }
+  /** The steps as a run executes them: shared step calls replaced by their steps, up to step `to` of the test case. */
+  const expanded = (t: Loaded, to: number): Step[] => {
+    const { steps, problems } = expandSteps(t.steps, t.shared, t.row.project_id, isSharedRow(t.row))
+    const reached = new Set(t.steps.slice(0, to).map((s) => s.id))
+    const problem = problems.find((p) => reached.has(p.stepId))
+    if (problem) throw new ToolInputError(`Step ${t.steps.findIndex((s) => s.id === problem.stepId) + 1}: ${problem.message}. This cannot be fixed here: tell the user, or disable the step if the request allows it.`)
+    return steps
   }
   const loadUis = async (): Promise<Ui[]> => {
     const { results } = await env.DB.prepare('SELECT * FROM uis WHERE test_case_id = ? ORDER BY created_at, rowid').bind(testCaseId).all<UiRow>()
@@ -84,13 +98,14 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
     if (!(await active())) return true
     return Date.now() >= context.deadline ? 'Stopped: the assistant session ran out of time' : false
   }
-  const listed = (steps: Step[]) =>
-    steps.map((s, i) => ({
+  const listed = (t: Loaded) =>
+    t.steps.map((s, i) => ({
       step: i + 1,
-      sentence: stepSentence(s),
+      sentence: stepSentence(s, t.shared),
       command: s.command,
       ...(s.target ? { element: s.target.name, ui_id: s.target.uiId, element_id: s.target.elementId } : {}),
-      ...(s.value !== undefined ? { value: s.value } : {}),
+      // The value of a call is an internal id; the sentence names the shared step.
+      ...(s.value !== undefined && s.command !== 'shared_step' ? { value: s.value } : {}),
       ...(s.variable !== undefined ? { variable: s.variable } : {}),
       ...(s.disabled ? { disabled: true } : {}),
     }))
@@ -99,7 +114,7 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
 
   const getSteps = async (): Promise<ToolOutcome> => {
     const t = await load()
-    return { content: json({ device: deviceOf(t.row.device).id, base_url: t.baseUrl, steps: listed(t.steps) }), event: `Read the steps (${t.steps.length})` }
+    return { content: json({ device: deviceOf(t.row.device).id, base_url: t.baseUrl, steps: listed(t) }), event: `Read the steps (${t.steps.length})` }
   }
 
   const capture = async (input: Input, context: ToolContext): Promise<ToolOutcome> => {
@@ -112,10 +127,12 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
     const t = await load()
     let replayTo: number | null = null
     let url: URL | null = null
+    let steps: Step[] = []
     if (afterStep > 0) {
       numbering.check(afterStep, 'after_step')
       replayTo = stepIndex(t.steps, afterStep, 'after_step') + 1
-      assertNavigateTargetsAllowed(t.steps.slice(0, replayTo), t.baseUrl, t.variables, env, appOrigin)
+      steps = expanded(t, replayTo)
+      assertNavigateTargetsAllowed(steps.slice(0, flatRange(steps, { from: 1, to: replayTo }).to), t.baseUrl, t.variables, env, appOrigin, positionsOf(steps))
     } else if (afterStep === 0) {
       const text = (urlText ?? '').trim() || t.baseUrl
       if (!text) throw new ToolInputError('The project has no base URL, so pass url: the absolute http(s) URL of the page to capture.')
@@ -126,7 +143,7 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
 
     const res = await captureScreen(
       env,
-      { testCase: t.row, steps: t.steps, baseUrl: t.baseUrl, variables: t.variables, replayTo, url, appOrigin, preview: wantScreenshot, shouldAbort: stopReason(context) },
+      { testCase: t.row, steps, baseUrl: t.baseUrl, variables: t.variables, replayTo, url, appOrigin, preview: wantScreenshot, shouldAbort: stopReason(context) },
       await browser.get(),
     )
     const { ui, replayError, preview } = res
@@ -180,7 +197,7 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
     await saveSteps(t, next)
     // Inserted in the middle: what was step at+1 and everything after it has moved down by one.
     if (at < t.steps.length) numbering.shift(at + 1)
-    const sentence = stepSentence(step)
+    const sentence = stepSentence(step, t.shared)
     return { content: json({ step: at + 1, sentence, total_steps: next.length }), event: `Added step ${at + 1}: ${sentence}` }
   }
 
@@ -190,6 +207,19 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
     numbering.check(number, 'step')
     const index = stepIndex(t.steps, number)
     const current = t.steps[index]
+    if (current.command === 'shared_step') {
+      // The only thing the assistant may change about a call is whether it runs.
+      const others = ['command', 'ui_id', 'element_id', 'value', 'variable'].filter((k) => input[k] !== undefined && input[k] !== null)
+      if (others.length || typeof input.disabled !== 'boolean') throw new ToolInputError(`Step ${number} is a shared step call. ${SHARED_STEP_NOTE}`)
+      const step: Step = { ...current }
+      if (input.disabled) step.disabled = true
+      else delete step.disabled
+      const next = [...t.steps]
+      next[index] = step
+      await saveSteps(t, next)
+      const sentence = stepSentence(step, t.shared)
+      return { content: json({ step: index + 1, sentence, ...(step.disabled ? { disabled: true } : {}) }), event: `Changed step ${index + 1}: ${sentence}${step.disabled ? ' (disabled)' : ''}` }
+    }
     const command = input.command === undefined || input.command === null ? current.command : commandOf(input.command)
     const def = COMMAND_BY_ID[command]
     const uiId = optionalString(input, 'ui_id', 64)
@@ -217,7 +247,7 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
     const next = [...t.steps]
     next[index] = step
     await saveSteps(t, next)
-    const sentence = stepSentence(step)
+    const sentence = stepSentence(step, t.shared)
     return { content: json({ step: index + 1, sentence, ...(step.disabled ? { disabled: true } : {}) }), event: `Changed step ${index + 1}: ${sentence}${step.disabled ? ' (disabled)' : ''}` }
   }
 
@@ -226,7 +256,7 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
     const number = requiredInt(input, 'step')
     numbering.check(number, 'step')
     const index = stepIndex(t.steps, number)
-    const sentence = stepSentence(t.steps[index])
+    const sentence = stepSentence(t.steps[index], t.shared)
     const next = t.steps.filter((_, i) => i !== index)
     await saveSteps(t, next)
     numbering.shift(number)
@@ -242,15 +272,17 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
     if (input.to !== undefined && input.to !== null) numbering.check(to, 'to')
     if (from < 1 || to < from || to > t.steps.length) throw new ToolInputError(`from/to must be within steps 1-${t.steps.length}, with from not after to.`)
     const whole = from === 1 && to === t.steps.length
+    const steps = expanded(t, to)
+    const positions = positionsOf(steps)
     if (whole) {
-      const problem = validateSteps(t.steps)[0]
-      if (problem) throw new ToolInputError(`Step ${t.steps.findIndex((s) => s.id === problem.stepId) + 1}: ${problem.message}. Fix the branch structure, then run again.`)
+      const problem = validateSteps(steps)[0]
+      if (problem) throw new ToolInputError(`Step ${positionLabel(positions[steps.findIndex((s) => s.id === problem.stepId)])}: ${problem.message}. Fix the branch structure, then run again.`)
     }
-    assertNavigateTargetsAllowed(t.steps.slice(0, to), t.baseUrl, t.variables, env, appOrigin)
+    assertNavigateTargetsAllowed(steps.slice(0, flatRange(steps, { from: 1, to }).to), t.baseUrl, t.variables, env, appOrigin, positions)
 
     const outcome = await trialRun(env, await browser.get(), {
       device: deviceOf(t.row.device),
-      steps: t.steps,
+      steps,
       baseUrl: t.baseUrl,
       variables: t.variables,
       range: whole ? null : { from, to },
@@ -259,7 +291,8 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
     })
     // A step's error can quote what a variable held ("variable X is ..."): the model gets the name instead.
     const mask = (text: string) => maskVariables(text, t.variables)
-    const steps = outcome.results.map((r) => ({ step: r.number, sentence: r.sentence, status: r.status, ...(r.error ? { error: mask(clip(r.error, 500)) } : {}) }))
+    // A step inside a shared step is reported under the number of its call: that is the step the model can act on.
+    const reported = outcome.results.map((r) => ({ step: r.number, ...(r.sub ? { in_shared_step: r.sub } : {}), sentence: r.sentence, status: r.status, ...(r.error ? { error: mask(clip(r.error, 500)) } : {}) }))
     const firstFailed = outcome.results.find((r) => r.status === 'failed')
     const range = from === to ? `step ${from}` : `steps ${from}-${to}`
     const passed = outcome.status === 'succeeded'
@@ -268,7 +301,7 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
       content: json({
         status: passed ? 'passed' : stopped ? 'stopped' : outcome.status,
         ...(stopped ? { note: 'The run was stopped before it finished (the session was aborted or ran out of time). The steps listed are the ones that ran.' } : {}),
-        steps,
+        steps: reported,
         ...(firstFailed ? { first_error: { step: firstFailed.number, message: mask(clip(firstFailed.error ?? 'failed', 500)) } } : {}),
       }),
       event: `Ran ${range}: ${passed ? 'all passed' : firstFailed ? `step ${firstFailed.number} failed` : stopped ? 'stopped before it finished' : outcome.status}`,
@@ -297,7 +330,7 @@ export function assistantTools(env: Env, ids: { testCaseId: string; sessionId: s
   return {
     context: async () => {
       const t = await load()
-      return { testCaseName: `#${t.row.number} ${t.row.name}`, device: deviceOf(t.row.device), baseUrl: t.baseUrl, variableNames: Object.keys(t.variables), steps: t.steps }
+      return { testCaseName: `${rowLabel(t.row)} ${t.row.name}`, device: deviceOf(t.row.device), baseUrl: t.baseUrl, variableNames: Object.keys(t.variables), steps: t.steps, shared: t.shared }
     },
     beginTurn: () => numbering.reset(),
     call: async (name, input, context) => {

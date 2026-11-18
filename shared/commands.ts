@@ -1,4 +1,4 @@
-import type { CommandId, ElementType, Step } from './types'
+import type { CommandId, ElementType, SharedRef, Step } from './types'
 
 export type Category = 'UI operation' | 'UI input' | 'System' | 'Assertion' | 'Wait' | 'Variable' | 'Conditional'
 
@@ -43,6 +43,8 @@ export const COMMANDS: CommandDef[] = [
   { id: 'navigate', label: 'Navigate to URL', category: 'System', target: false, value: 'URL', sentence: 'Navigate to {value}', shot: true },
   { id: 'screenshot', label: 'Take screenshot', category: 'System', target: false, value: 'Name', sentence: 'Take screenshot {value}', shot: true },
   { id: 'comment', label: 'Comment', category: 'System', target: false, value: 'Comment', sentence: '// {value}', shot: false },
+  // Calls a project-level shared step; `value` is its id. A run replaces the call with the shared step's steps (shared/expand.ts).
+  { id: 'shared_step', label: 'Shared step', category: 'System', target: false, value: 'Shared step', sentence: 'Shared step {value}', shot: false },
 
   { id: 'assert_text_equals', label: 'Assert UI element equals', category: 'Assertion', target: true, value: 'Expected text', sentence: 'Assert {target} equals {value}', assertion: true, shot: true, healable: true },
   { id: 'assert_text_contains', label: 'Assert UI element contains', category: 'Assertion', target: true, value: 'Expected text', sentence: 'Assert {target} contains {value}', assertion: true, shot: true, healable: true },
@@ -95,10 +97,22 @@ export const KEYS = ['Enter', 'Tab', 'Escape', 'Backspace', 'Delete', 'ArrowUp',
  */
 export const SWIPE_DIRECTIONS = ['up', 'down', 'left', 'right']
 
-/** Render a step as a plain sentence, e.g. `Input "alice" to "Email" input area`. */
-export function stepSentence(step: Step): string {
+/** How a shared step is written wherever it is named: `S1: Sign in`. */
+export const sharedLabel = (ref: Pick<SharedRef, 'number' | 'name'>): string => `S${ref.number}: ${ref.name}`
+
+/**
+ * Render a step as a plain sentence, e.g. `Input "alice" to "Email" input area`. A shared step call holds
+ * only an id: `shared` resolves it (the steps of a run carry the name themselves, in `call`).
+ */
+export function stepSentence(step: Step, shared?: (id: string) => Pick<SharedRef, 'number' | 'name'> | undefined): string {
   const def = COMMAND_BY_ID[step.command]
   if (!def) return step.command
+  if (step.command === 'shared_step') {
+    const ref = step.call ?? shared?.(step.value ?? '')
+    if (ref) return `Shared step ${sharedLabel(ref)}`
+    // Without a way to look the name up, say no more than is known.
+    return !step.value ? 'Shared step (none chosen)' : shared ? 'Shared step (deleted)' : 'Shared step'
+  }
   return def.sentence
     .replace('{target}', step.target ? step.target.name : '(no element)')
     .replace('{value}', def.id === 'comment' || def.id === 'wait_seconds' || def.id === 'wait_visible' || def.id === 'press_key' || def.id === 'swipe' ? (step.value ?? '') : JSON.stringify(step.value ?? ''))

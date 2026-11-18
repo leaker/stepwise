@@ -2,14 +2,15 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Check, ChevronDown, CloudAlert, ListPlus, Play, Plus, Redo2, Sparkles, Square, Undo2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { COMMAND_BY_ID, DEFAULT_COMMAND, stepSentence } from '../../shared/commands'
+import { COMMAND_BY_ID, DEFAULT_COMMAND, sharedLabel, stepSentence } from '../../shared/commands'
 import { DEVICE_IDS, DEVICES, deviceOf } from '../../shared/devices'
+import { positionLabel, reportedSteps } from '../../shared/expand'
 import type { AssistantSession, CommandId, DeviceId, Step, StepResult, Ui, UiElement } from '../../shared/types'
 import { api, qk } from '../api'
-import { Button, Confirm, DeviceIcon, ErrorState, IconButton, Loading, MenuButton, Spinner, StatusIcon, toast, toastError } from '../components/ui'
+import { Button, Confirm, DeviceIcon, Dialog, ErrorState, Field, IconButton, Loading, MenuButton, Spinner, StatusIcon, toast, toastError } from '../components/ui'
 import { cx, isTerminal, plural, STATUS_LABEL, uid } from '../lib/format'
 import { AssistantPanel } from './AssistantPanel'
-import { changeCommand, makeTarget, newStep, sameStep, stepErrors } from './model'
+import { changeCommand, makeTarget, newStep, sameStep, sharedLookup, stepErrors } from './model'
 import { CommandPalette, StepList } from './StepList'
 import { UiPanel, type Inspect } from './UiPanel'
 
@@ -31,6 +32,10 @@ function EditorInner({ tid }: { tid: string }) {
   const project = useQuery({ queryKey: qk.project(pid ?? ''), queryFn: () => api.project(pid!), enabled: !!pid })
   const uisQuery = useQuery({ queryKey: qk.uis(tid), queryFn: () => api.uis(tid), staleTime: 0, refetchOnMount: 'always' })
   const uis = useMemo(() => uisQuery.data ?? [], [uisQuery.data])
+  // A shared step is edited here like a test case; it cannot call other shared steps, so it does not load them.
+  const isShared = tc.data?.kind === 'shared'
+  const sharedQuery = useQuery({ queryKey: qk.sharedSteps(pid ?? ''), queryFn: () => api.sharedSteps(pid!), enabled: !!pid && !isShared })
+  const shared = useMemo(() => sharedLookup(sharedQuery.data), [sharedQuery.data])
 
   // ----- steps, history, autosave -----
   const [steps, setSteps] = useState<Step[]>([])
@@ -161,6 +166,18 @@ function EditorInner({ tid }: { tid: string }) {
   const [currentUiId, setCurrentUiId] = useState<string | null>(null)
   const [flash, setFlash] = useState(0)
   const [palette, setPalette] = useState<{ index: number } | null>(null)
+  // The far end of a multi-selection that starts at the selected step (Shift+click, Shift+arrows).
+  const [rangeEndId, setRangeEndId] = useState<string | null>(null)
+  const range = useMemo(() => {
+    const a = steps.findIndex((s) => s.id === selectedId)
+    const b = steps.findIndex((s) => s.id === rangeEndId)
+    if (a < 0 || b < 0 || a === b) return new Set<string>()
+    return new Set(steps.slice(Math.min(a, b), Math.max(a, b) + 1).map((s) => s.id))
+  }, [steps, selectedId, rangeEndId])
+  // Whatever selects another step ends the multi-selection.
+  useEffect(() => setRangeEndId(null), [selectedId])
+  const rangeRef = useRef(range)
+  rangeRef.current = range
 
   const selectedStep = steps.find((s) => s.id === selectedId) ?? null
   const pickFor = steps.find((s) => s.id === pickForId) ?? null
@@ -182,6 +199,7 @@ function EditorInner({ tid }: { tid: string }) {
   selectedRef.current = selectedId
   const select = useCallback(
     (id: string) => {
+      setRangeEndId(null)
       if (selectedRef.current === id) return
       selectedRef.current = id
       setSelectedId(id)
@@ -262,6 +280,20 @@ function EditorInner({ tid }: { tid: string }) {
     [commit, pickForId],
   )
 
+  const removeSteps = useCallback(
+    (ids: string[]) => {
+      if (lockedRef.current || ids.length === 0) return
+      const gone = new Set(ids)
+      const cur = stepsRef.current
+      const first = cur.findIndex((s) => gone.has(s.id))
+      const next = cur.filter((s) => !gone.has(s.id))
+      commit(next)
+      setSelectedId(next[Math.min(Math.max(0, first), next.length - 1)]?.id ?? null)
+      if (pickForId && gone.has(pickForId)) setPickForId(null)
+    },
+    [commit, pickForId],
+  )
+
   // ----- run -----
   const [runId, setRunId] = useState<string | null>(null)
   const run = useQuery({
@@ -270,7 +302,10 @@ function EditorInner({ tid }: { tid: string }) {
     enabled: !!runId,
     refetchInterval: (q) => (q.state.data && isTerminal(q.state.data.status) ? false : 1000),
   })
-  const errors = useMemo(() => stepErrors(steps), [steps])
+  const errors = useMemo(
+    () => stepErrors(steps, { lookup: sharedQuery.data ? shared : undefined, projectId: pid ?? '', nested: isShared }),
+    [steps, shared, sharedQuery.data, pid, isShared],
+  )
   const start = useMutation({
     mutationFn: async (range: { from: number; to: number } | null) => {
       if (!(await flush())) throw new Error('The steps could not be saved, so the run was not started.')
@@ -288,27 +323,39 @@ function EditorInner({ tid }: { tid: string }) {
   // A row only shows a result while the step is still what the run executed; an edited step has not been run.
   const results = useMemo(() => {
     const ran = new Map((runData?.steps ?? []).map((s) => [s.id, s]))
+    // The run has every shared step call expanded: the results of a call's steps are shown on the call.
+    const inside = new Map<string, StepResult[]>()
+    for (const s of runData?.steps ?? []) {
+      const result = s.origin && reported.get(s.id)
+      if (!result) continue
+      const list = inside.get(s.origin!.callId)
+      if (list) list.push(result)
+      else inside.set(s.origin!.callId, [result])
+    }
     const current = new Map<string, StepResult>()
     for (const s of steps) {
-      const result = reported.get(s.id)
       const then = ran.get(s.id)
-      if (result && then && sameStep(s, then)) current.set(s.id, result)
+      if (!then || !sameStep(s, then)) continue
+      const result = then.call ? callResult(s, inside.get(s.id)) : reported.get(s.id)
+      if (result) current.set(s.id, result)
     }
     return current
   }, [steps, reported, runData?.steps])
+  /** The step of this editor that a step of the run belongs to: for a step inside a shared step, its call. */
+  const ownerOf = useCallback((stepId: string) => runData?.steps.find((s) => s.id === stepId)?.origin?.callId ?? stepId, [runData?.steps])
+  const expected = useMemo(() => (runData ? reportedSteps(runData.steps, runData.range) : []), [runData])
   const runningId = useMemo(() => {
     if (!runData || runData.status !== 'running') return null
-    const from = runData.range?.from ?? 1
-    const to = runData.range?.to ?? runData.steps.length
-    return runData.steps.find((s, i) => !s.disabled && i + 1 >= from && i + 1 <= to && !reported.has(s.id))?.id ?? null
-  }, [runData, reported])
+    const next = expected.find((s) => !reported.has(s.id))
+    return next ? (next.origin?.callId ?? next.id) : null
+  }, [runData, expected, reported])
   const finished = runData && isTerminal(runData.status) ? runData : null
   useEffect(() => {
     if (!finished) return
     void qc.invalidateQueries({ queryKey: qk.runs(tid) })
     void qc.invalidateQueries({ queryKey: qk.testCase(tid), refetchType: 'none' })
     const failed = finished.results.find((r) => r.status === 'failed')
-    if (failed) setSelectedId(failed.stepId)
+    if (failed) setSelectedId(ownerOf(failed.stepId))
   }, [finished?.id, finished?.status]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ----- assistant -----
@@ -477,6 +524,43 @@ function EditorInner({ tid }: { tid: string }) {
       }
     },
   })
+  // ----- shared steps -----
+  const createShared = useMutation({
+    mutationFn: () => api.createSharedStep(pid!, { device: tc.data?.device }),
+    onSuccess: (created) => {
+      void qc.invalidateQueries({ queryKey: qk.sharedSteps(created.projectId) })
+      qc.setQueryData(qk.sharedSteps(created.projectId), (old: typeof sharedQuery.data) => [...(old ?? []), created])
+      const at = palette?.index ?? stepsRef.current.length
+      insertAt(Math.min(at, stepsRef.current.length), newStep('shared_step', { value: created.id }))
+      setPalette(null)
+      toast(`Created shared step ${sharedLabel(created)}. Use “Open” on the step to add its steps.`)
+    },
+  })
+  // The steps (by id) that "Move to a new shared step" was asked for; the dialog asks for the name.
+  const [extracting, setExtracting] = useState<string[] | null>(null)
+  const extract = useMutation({
+    mutationFn: async (name: string) => {
+      // The server moves the steps it has stored, so it must have the ones on screen.
+      if (!(await flush())) throw new Error('The steps could not be saved, so nothing was moved.')
+      const before = stepsRef.current
+      return { before, ...(await api.extractShared(tid, { stepIds: extracting ?? [], name: name.trim() || undefined })) }
+    },
+    onSuccess: ({ before, testCase, shared: created }) => {
+      qc.setQueryData(qk.testCase(tid), testCase)
+      void qc.invalidateQueries({ queryKey: qk.sharedSteps(testCase.projectId) })
+      // One undo step puts the steps back in the test case; the shared step stays in the project.
+      const h = hist.current
+      h.undo.push(before)
+      h.redo = []
+      h.key = null
+      stepsRef.current = testCase.steps
+      setSteps(testCase.steps)
+      setSelectedId(testCase.steps.find((s) => s.command === 'shared_step' && s.value === created.id)?.id ?? null)
+      setExtracting(null)
+      toast(`Moved ${plural(created.steps.length, 'step')} to shared step ${sharedLabel(created)}`)
+    },
+  })
+
   const captureAfter = useMemo(() => {
     const at = selectedId ? steps.findIndex((s) => s.id === selectedId) : -1
     const i = at >= 0 ? at : steps.length - 1
@@ -485,8 +569,8 @@ function EditorInner({ tid }: { tid: string }) {
   const shownReplayError = useMemo(() => {
     if (!replayError || replayError.uiId !== ui?.id) return null
     const i = steps.findIndex((s) => s.id === replayError.stepId)
-    return { n: i + 1, sentence: i >= 0 ? stepSentence(steps[i]) : null, message: replayError.message }
-  }, [replayError, ui?.id, steps])
+    return { n: i + 1, sentence: i >= 0 ? stepSentence(steps[i], shared) : null, message: replayError.message }
+  }, [replayError, ui?.id, steps, shared])
   const capturing = capture.isPending
     ? 'afterStepId' in capture.variables
       ? `Replaying steps 1–${Math.max(1, steps.findIndex((s) => s.id === (capture.variables as { afterStepId: string }).afterStepId) + 1)}, then capturing…`
@@ -529,7 +613,8 @@ function EditorInner({ tid }: { tid: string }) {
       // Keys that belong to an input method's conversion are not shortcuts.
       if (e.isComposing || e.keyCode === 229) return
       if (e.key === 'Escape') {
-        if (pickForId) setPickForId(null)
+        if (rangeRef.current.size) setRangeEndId(null)
+        else if (pickForId) setPickForId(null)
         else if (inspect) setInspect(null)
         else if (editable) t.blur()
         return
@@ -545,19 +630,24 @@ function EditorInner({ tid }: { tid: string }) {
       const onOutline = !!t.closest?.('.el-box')
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId) {
         e.preventDefault()
-        removeStep(selectedId)
+        if (rangeRef.current.size) removeSteps([...rangeRef.current])
+        else removeStep(selectedId)
       } else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !onOutline) {
         const cur = stepsRef.current
         if (!cur.length) return
         e.preventDefault()
-        const i = cur.findIndex((s) => s.id === selectedId)
-        const next = i < 0 ? 0 : Math.max(0, Math.min(cur.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))
-        select(cur[next].id)
+        const move = (id: string | null) => {
+          const i = cur.findIndex((s) => s.id === id)
+          return i < 0 ? 0 : Math.max(0, Math.min(cur.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))
+        }
+        // With Shift the selected step stays where it is and the other end of the selection moves.
+        if (e.shiftKey && selectedId) setRangeEndId(cur[move(rangeEndId ?? selectedId)].id)
+        else select(cur[move(selectedId)].id)
       }
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [undo, redo, commit, removeStep, select, selectedId, pickForId, inspect])
+  }, [undo, redo, commit, removeStep, removeSteps, select, selectedId, rangeEndId, pickForId, inspect])
 
   // ----- resizable split -----
   const [split, setSplit] = useState(() => {
@@ -603,24 +693,26 @@ function EditorInner({ tid }: { tid: string }) {
   return (
     <div className="ed">
       <header className="ed-top">
-        <Link to={`/t/${tid}`} className="ed-back" title="Back to the test case">
+        <Link to={`/t/${tid}`} className="ed-back" title={isShared ? 'Back to the shared step' : 'Back to the test case'}>
           <ArrowLeft size={16} />
           <span>Back</span>
         </Link>
         <nav className="ed-crumbs" aria-label="Breadcrumb">
-          <Link to={`/p/${t.projectId}`} className="truncate" title={project.data?.name}>
+          <Link to={`/p/${t.projectId}${isShared ? '?tab=shared' : ''}`} className="truncate" title={project.data?.name}>
             {project.data?.name ?? 'Project'}
           </Link>
           <span aria-hidden>/</span>
           <span className="truncate ed-crumb-current" title={t.name}>
             {t.name}
           </span>
-          <span className="ed-hash num">#{t.number}</span>
+          <span className="ed-hash num" title={isShared ? 'Shared step: test cases call it with the “Shared step” command' : undefined}>
+            {isShared ? `S${t.number}` : `#${t.number}`}
+          </span>
         </nav>
         <SaveBadge state={saveState} onRetry={() => void flush()} />
         <MenuButton
           className="ed-device"
-          label="Device this test case is captured and run on"
+          label={isShared ? 'Device this shared step is captured on (a test case that calls it runs it on its own device)' : 'Device this test case is captured and run on'}
           disabled={running || setDevice.isPending || locked}
           items={DEVICE_IDS.map((id) => ({
             label: DEVICES[id].label,
@@ -654,7 +746,7 @@ function EditorInner({ tid }: { tid: string }) {
                 {runData.range && <span className="ed-run-range num">steps {runData.range.from === runData.range.to ? runData.range.from : `${runData.range.from}–${runData.range.to}`}</span>}
                 {!isTerminal(runData.status) && runData.steps.length > 0 && (
                   <span className="ed-run-range num">
-                    {runData.results.length} / {runData.steps.filter((s, i) => !s.disabled && i + 1 >= (runData.range?.from ?? 1) && i + 1 <= (runData.range?.to ?? runData.steps.length)).length}
+                    {runData.results.length} / {expected.length}
                   </span>
                 )}
               </span>
@@ -737,7 +829,18 @@ function EditorInner({ tid }: { tid: string }) {
                 pickFor={pickForId}
                 focusId={focusId}
                 canRun={!running && !blocked}
+                range={range}
+                sharedSteps={sharedQuery.data}
+                shared={shared}
+                subResults={reported}
+                canExtract={!isShared}
                 onSelect={select}
+                onExtend={(id) => {
+                  if (!selectedRef.current) select(id)
+                  else setRangeEndId(id)
+                }}
+                onDeleteMany={removeSteps}
+                onExtract={setExtracting}
                 onChange={(id, patch, coalesce) => commit(stepsRef.current.map((s) => (s.id === id ? { ...s, ...patch } : s)), coalesce)}
                 onCommand={(id, command) => commit(stepsRef.current.map((s) => (s.id === id ? changeCommand(s, command) : s)))}
                 onMove={(id, toIndex) => {
@@ -858,12 +961,17 @@ function EditorInner({ tid }: { tid: string }) {
         {histMsg}
       </span>
 
+      {extracting && (
+        <ExtractDialog count={extracting.length} busy={extract.isPending} onSubmit={(name) => extract.mutate(name)} onClose={() => !extract.isPending && setExtracting(null)} />
+      )}
+
       {palette && (
         <CommandPalette
           position={palette.index >= steps.length ? 'at the end' : `as step ${palette.index + 1}`}
           onClose={() => setPalette(null)}
-          onPick={(command: CommandId) => {
-            const step = newStep(command)
+          shared={isShared ? undefined : { list: sharedQuery.data, creating: createShared.isPending, onCreate: () => createShared.mutate() }}
+          onPick={(command: CommandId, value?: string) => {
+            const step = newStep(command, value === undefined ? {} : { value })
             insertAt(Math.min(palette.index, stepsRef.current.length), step)
             setPalette(null)
             if (COMMAND_BY_ID[command].target) {
@@ -877,6 +985,46 @@ function EditorInner({ tid }: { tid: string }) {
         />
       )}
     </div>
+  )
+}
+
+/** What a shared step call shows as its own result: the outcome of the steps inside it. */
+function callResult(call: Step, inside: StepResult[] | undefined): StepResult | undefined {
+  if (!inside?.length) return undefined
+  const failed = inside.find((r) => r.status === 'failed')
+  const status = failed ? 'failed' : inside.some((r) => r.status === 'healed') ? 'healed' : 'passed'
+  return {
+    stepId: call.id,
+    number: inside[0].number,
+    status,
+    sentence: '',
+    durationMs: inside.reduce((n, r) => n + r.durationMs, 0),
+    ...(failed ? { error: `Step ${positionLabel(failed)}: ${failed.error ?? 'failed'}` } : {}),
+  }
+}
+
+function ExtractDialog({ count, busy, onSubmit, onClose }: { count: number; busy: boolean; onSubmit: (name: string) => void; onClose: () => void }) {
+  const [name, setName] = useState('')
+  return (
+    <Dialog
+      title={count === 1 ? 'Move this step to a new shared step' : `Move ${count} steps to a new shared step`}
+      onClose={onClose}
+      onSubmit={() => onSubmit(name)}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button type="submit" variant="primary" busy={busy}>
+            Move
+          </Button>
+        </>
+      }
+    >
+      <Field label="Name of the shared step" hint="The steps move there, and this test case calls it in their place. Other test cases can call it too; editing it changes all of them.">
+        <input className="input" data-autofocus value={name} maxLength={120} placeholder="New shared step" onChange={(e) => setName(e.target.value)} />
+      </Field>
+    </Dialog>
   )
 }
 

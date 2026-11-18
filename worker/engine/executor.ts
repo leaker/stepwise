@@ -2,6 +2,7 @@
 import type { Locator as PwLocator, Page } from '@cloudflare/playwright'
 import { BUILT_IN_VARIABLES, COMMAND_BY_ID, stepSentence, SWIPE_DIRECTIONS, validateSteps } from '../../shared/commands'
 import type { CommandDef } from '../../shared/commands'
+import { positionLabel } from '../../shared/expand'
 import { locatorToString } from '../../shared/types'
 import type { ElementRef, Fingerprint, HealProposal, Locator, Step, StepResult } from '../../shared/types'
 import { findReplacement } from './heal'
@@ -49,6 +50,13 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
     return { status, results, log: lines.join('\n') }
   }
 
+  // Steps are named as the user sees them: with shared steps expanded, the flat position is not the step number.
+  const position = (i: number) => opts.positions?.[i] ?? { number: i + 1 }
+  const numbered = (i: number): Pick<StepResult, 'number' | 'sub'> => {
+    const p = position(i)
+    return p.sub ? { number: p.number, sub: p.sub } : { number: p.number }
+  }
+
   for (const name of BUILT_IN_VARIABLES) {
     if (Object.hasOwn(opts.variables, name)) log(`[warning] the project variable ${name} is ignored: ${name} is built in (its value here is ${quote(vars[name])})`)
   }
@@ -58,12 +66,12 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
     const seen = new Set<string>()
     for (const problem of structural) {
       const index = steps.findIndex((s) => s.id === problem.stepId)
-      log(`[${index + 1}] STEP ERROR: ${problem.message}`)
+      log(`[${index < 0 ? '?' : positionLabel(position(index))}] STEP ERROR: ${problem.message}`)
       if (seen.has(problem.stepId) || index < 0) continue
       seen.add(problem.stepId)
       await report({
         stepId: problem.stepId,
-        number: index + 1,
+        ...numbered(index),
         status: 'failed',
         sentence: stepSentence(steps[index]),
         durationMs: 0,
@@ -126,7 +134,7 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
   }
 
   /** Finds the step's element, self-healing if allowed. */
-  const locate = async (step: Step, def: CommandDef, target: ElementRef, n: number, out: Outcome, timeoutMs = waitMs): Promise<PwLocator> => {
+  const locate = async (step: Step, def: CommandDef, target: ElementRef, n: string, out: Outcome, timeoutMs = waitMs): Promise<PwLocator> => {
     const locator = effectiveLocator(target)
     const found = await waitForElement(page, locator, timeoutMs)
     if (found.el) return found.el
@@ -274,7 +282,7 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
   /* eslint-enable @typescript-eslint/no-explicit-any */
 
   /** Executes one non-structural step. Returns the branch condition for If commands. */
-  const execute = async (step: Step, def: CommandDef, value: string, n: number, out: Outcome): Promise<boolean | void> => {
+  const execute = async (step: Step, def: CommandDef, value: string, n: string, out: Outcome): Promise<boolean | void> => {
     const describe = (t: ElementRef) => `${t.name} (${locatorToString(effectiveLocator(t))})`
     const act = async (t: ElementRef, verb: string, fn: (el: PwLocator) => Promise<unknown>) => {
       const el = await locate(step, def, t, n, out)
@@ -529,6 +537,9 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
         const name = needVariable(step)
         return (vars[name] ?? '') === value
       }
+      case 'shared_step':
+        // Calls are replaced by the shared step's steps before a run starts (shared/expand.ts).
+        throw new StepError('This shared step call was not expanded, so it cannot run')
       default:
         throw new StepError(`Unknown command ${quote(String(step.command))}`)
     }
@@ -539,17 +550,20 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
   const range = opts.range ?? null
   // Partial runs: the steps before the range are replayed silently so the range starts on the right page.
   const setupTo = range && opts.replaySetup ? range.from - 1 : 0
-  if (setupTo > 0) log(`Set-up: replaying steps 1-${setupTo} before the requested range`)
+  if (setupTo > 0) log(`Set-up: replaying steps 1-${position(setupTo - 1).number} before the requested range`)
   const blockedMessage = (url: string) => `Navigation to ${url} was blocked: the host is not allowed by this deployment's target policy`
   let failed = false
   let aborted = false
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i]
-    const n = i + 1
+    const at = i + 1
+    const n = positionLabel(position(i))
     if (step.disabled) continue
-    if (range && (n > range.to || (n < range.from && n > setupTo))) continue
-    const setup = n <= setupTo
+    // The marker row of an expanded shared step call: its steps follow it in the list.
+    if (step.command === 'shared_step' && step.call) continue
+    if (range && (at > range.to || (at < range.from && at > setupTo))) continue
+    const setup = at <= setupTo
     const def: CommandDef | undefined = COMMAND_BY_ID[step.command]
     const isIf = step.command === 'if_exists' || step.command === 'if_variable_equals'
 
@@ -580,7 +594,7 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
     }
 
     const started = Date.now()
-    const result: StepResult = { stepId: step.id, number: n, status: 'passed', sentence: stepSentence(step), durationMs: 0 }
+    const result: StepResult = { stepId: step.id, ...numbered(i), status: 'passed', sentence: stepSentence(step), durationMs: 0 }
     const out: Outcome = {}
     let condition: boolean | void = undefined
     try {

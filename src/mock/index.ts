@@ -1,7 +1,8 @@
 // In-browser stand-in for the Worker API. Loaded only when VITE_MOCK is set (see main.tsx);
 // it exists so the UI can be exercised before, or without, the real backend.
-import { COMMAND_BY_ID, stepSentence } from '../../shared/commands'
+import { COMMAND_BY_ID, sharedLabel, stepSentence, validateSteps } from '../../shared/commands'
 import { DEVICES } from '../../shared/devices'
+import { expandSteps, flatRange, NESTED_SHARED_MESSAGE, positionLabel, positionsOf, reportedSteps, type SharedLookup } from '../../shared/expand'
 import type {
   AssistantEvent,
   AssistantSession,
@@ -192,7 +193,21 @@ const uis: Ui[] = []
 const runs: Run[] = []
 const batches: BatchRun[] = []
 const assistantSessions: AssistantSession[] = []
-const counters = new Map<string, { tc: number; batch: number }>()
+const counters = new Map<string, { tc: number; batch: number; shared: number }>()
+
+/** The shared steps of the mock, as expansion looks them up. */
+const sharedLookup: SharedLookup = (sid) => {
+  const t = cases.find((c) => c.id === sid && c.kind === 'shared')
+  return t && { id: t.id, projectId: t.projectId, number: t.number, name: t.name, steps: t.steps }
+}
+const expand = (tc: TestCase) => expandSteps(structuredClone(tc.steps), sharedLookup, tc.projectId, tc.kind === 'shared')
+/** Test cases that call a shared step. */
+const callersOf = (sid: string) =>
+  cases
+    .filter((c) => c.kind === 'test' && c.steps.some((s) => s.command === 'shared_step' && s.value === sid))
+    .sort((x, y) => x.number - y.number)
+    .map((c) => ({ id: c.id, number: c.number, name: c.name }))
+const withUsedBy = (t: TestCase): TestCase => (t.kind === 'shared' ? { ...t, usedBy: callersOf(t.id) } : t)
 
 function makeUi(tcId: string, page: PageSpec, name: string): Ui {
   return {
@@ -218,17 +233,20 @@ const ref = (ui: Ui, n: number) => {
 function resultsFor(steps: Step[], failAt = -1, healAt = -1, ui?: Ui): StepResult[] {
   const out: StepResult[] = []
   let page = PAGES[0]
+  const positions = positionsOf(steps)
   steps.forEach((s, i) => {
-    if (s.disabled || (failAt >= 0 && i > failAt)) return
+    // `failAt` and `healAt` are positions in the expanded list; the marker row of a call is not executed.
+    if (s.disabled || s.call || (failAt >= 0 && i > failAt)) return
     const def = COMMAND_BY_ID[s.command]
     if (s.target && uis.find((u) => u.id === s.target!.uiId)?.screenshotKey === 'mock-catalog') page = PAGES[1]
-    const r: StepResult = { stepId: s.id, number: i + 1, status: 'passed', sentence: stepSentence(s), durationMs: 180 + ((i * 337) % 900) }
+    const r: StepResult = { stepId: s.id, ...positions[i], status: 'passed', sentence: stepSentence(s), durationMs: 180 + ((i * 337) % 900) }
     if (def.shot) r.screenshotKey = page.key
     if (i === failAt) {
       r.status = 'failed'
       r.error = s.target ? `AssertionError: expected ${s.target.name} to equal ${JSON.stringify(s.value ?? '')}, but it was "Welcome back, Alice"` : 'The step failed.'
     }
-    if (i === healAt && s.target && ui) {
+    const healUi = s.target ? (uis.find((u) => u.id === s.target!.uiId) ?? ui) : ui
+    if (i === healAt && s.target && healUi) {
       r.status = 'healed'
       const box = { ...s.target.fingerprint.box, y: s.target.fingerprint.box.y + 24 }
       const heal: HealProposal = {
@@ -242,7 +260,7 @@ function resultsFor(steps: Step[], failAt = -1, healAt = -1, ui?: Ui): StepResul
         ],
         newFingerprint: { ...s.target.fingerprint, attrs: { type: 'submit' }, box },
         score: 0.86,
-        before: { uiId: ui.id, box: s.target.fingerprint.box },
+        before: { uiId: healUi.id, box: s.target.fingerprint.box },
         after: { screenshotKey: 'mock-login', box, width: 1280, height: 860 },
       }
       r.heal = heal
@@ -253,7 +271,7 @@ function resultsFor(steps: Step[], failAt = -1, healAt = -1, ui?: Ui): StepResul
 }
 
 function makeRun(tc: TestCase, status: RunStatus, opts: { failAt?: number; healAt?: number; batch?: BatchRun; order?: number; minutesAgo?: number } = {}): Run {
-  const steps = structuredClone(tc.steps)
+  const steps = expand(tc).steps
   const done = status !== 'queued' && status !== 'running'
   const firstUi = uis.find((u) => u.testCaseId === tc.id)
   const results = done ? resultsFor(steps, opts.failAt, opts.healAt, firstUi) : []
@@ -262,6 +280,7 @@ function makeRun(tc: TestCase, status: RunStatus, opts: { failAt?: number; healA
     id: id('run'),
     projectId: tc.projectId,
     testCaseId: tc.id,
+    kind: tc.kind,
     testCaseNumber: tc.number,
     testCaseName: tc.name,
     batchRunId: opts.batch?.id ?? null,
@@ -272,6 +291,7 @@ function makeRun(tc: TestCase, status: RunStatus, opts: { failAt?: number; healA
     log: done ? logFor(results, status) : '',
     environment: { browser: 'Chromium 142', device: tc.device, viewport: { ...DEVICES[tc.device].viewport }, baseUrl: ORIGIN },
     range: null,
+    patterns: null,
     createdAt: started,
     startedAt: status === 'queued' ? null : started,
     finishedAt: done ? new Date(Date.parse(started) + 9_000).toISOString() : null,
@@ -284,7 +304,7 @@ function makeRun(tc: TestCase, status: RunStatus, opts: { failAt?: number; healA
 function logFor(results: StepResult[], status: RunStatus): string {
   const lines = ['Environment: Cloudflare Browser Run', 'Browser: Chromium 142, viewport 1280x800']
   for (const r of results) {
-    lines.push(`[${r.number}] ${r.sentence}`)
+    lines.push(`[${positionLabel(r)}] ${r.sentence}`)
     if (r.heal) lines.push(`    locator ${r.heal.oldLocator.key}=${r.heal.oldLocator.value} not found; repaired to ${r.heal.newLocator.key}=${r.heal.newLocator.value} (score ${r.heal.score})`)
     if (r.error) lines.push(`    ${r.error}`)
     lines.push(`    ${r.status} in ${r.durationMs} ms`)
@@ -296,10 +316,10 @@ function logFor(results: StepResult[], status: RunStatus): string {
 function seed() {
   const p: Project = { id: 'p_demo', name: 'Harbor Books storefront', description: 'Sign-in, catalog and cart flows for the public shop.', baseUrl: ORIGIN, variables: { USER_EMAIL: 'alice@example.com', USER_PASSWORD: 'correct-horse' }, createdAt: ago(6000) }
   projects.push(p, { id: 'p_empty', name: 'Internal admin console with a deliberately very long project name to check truncation in breadcrumbs', description: '', baseUrl: '', variables: {}, createdAt: ago(300) })
-  counters.set(p.id, { tc: 4, batch: 3 })
-  counters.set('p_empty', { tc: 1, batch: 1 })
+  counters.set(p.id, { tc: 5, batch: 3, shared: 3 })
+  counters.set('p_empty', { tc: 1, batch: 1, shared: 1 })
 
-  const tc1: TestCase = { id: 'tc_signin', projectId: p.id, number: 1, name: 'Sign in with a valid account', description: 'Happy path: a registered customer signs in and lands on the catalog.', device: 'desktop', steps: [], createdAt: ago(5000), updatedAt: ago(40), lastRun: null }
+  const tc1: TestCase = { id: 'tc_signin', projectId: p.id, kind: 'test', data: null, number: 1, name: 'Sign in with a valid account', description: 'Happy path: a registered customer signs in and lands on the catalog.', device: 'desktop', steps: [], createdAt: ago(5000), updatedAt: ago(40), lastRun: null }
   const login = makeUi(tc1.id, PAGES[0], 'Sign in page')
   const catalog = makeUi(tc1.id, PAGES[1], 'Catalog after sign-in')
   uis.push(login, catalog)
@@ -314,9 +334,21 @@ function seed() {
     { id: 's8', command: 'assert_url_contains', value: '/demo/catalog' },
     { id: 's9', command: 'comment', value: 'Cart checks live in test case #2', disabled: true },
   ]
-  const tc2: TestCase = { id: 'tc_cart', projectId: p.id, number: 2, name: 'Add a book to the cart', description: '', device: 'desktop', steps: [{ id: 'c1', command: 'navigate', value: '/demo/catalog' }, { id: 'c2', command: 'click', target: ref(catalog, 8) }, { id: 'c3', command: 'assert_text_contains', value: 'Cart (1)', target: ref(catalog, 2) }], createdAt: ago(4000), updatedAt: ago(90), lastRun: null }
-  const tc3: TestCase = { id: 'tc_new', projectId: p.id, number: 3, name: 'New test', description: '', device: 'desktop', steps: [], createdAt: ago(10), updatedAt: ago(10), lastRun: null }
-  cases.push(tc1, tc2, tc3)
+  // A shared step with its own captured screen, called by two test cases; and one that nothing uses yet.
+  const sh1: TestCase = { id: 'sh_signin', projectId: p.id, kind: 'shared', data: null, number: 1, name: 'Sign in', description: 'Signs in as the customer in USER_EMAIL / USER_PASSWORD and lands on the catalog.', device: 'desktop', steps: [], createdAt: ago(4500), updatedAt: ago(400), lastRun: null }
+  const sharedLogin = makeUi(sh1.id, PAGES[0], 'Sign in page')
+  uis.push(sharedLogin)
+  sh1.steps = [
+    { id: 'h1', command: 'navigate', value: '${BASE_URL}/demo/login' },
+    { id: 'h2', command: 'input', value: '${USER_EMAIL}', target: ref(sharedLogin, 3) },
+    { id: 'h3', command: 'input', value: '${USER_PASSWORD}', target: ref(sharedLogin, 4) },
+    { id: 'h4', command: 'click', target: ref(sharedLogin, 7) },
+  ]
+  const sh2: TestCase = { id: 'sh_signout', projectId: p.id, kind: 'shared', data: null, number: 2, name: 'Sign out', description: '', device: 'desktop', steps: [{ id: 'o1', command: 'click', target: ref(catalog, 3) }], createdAt: ago(900), updatedAt: ago(900), lastRun: null }
+  const tc2: TestCase = { id: 'tc_cart', projectId: p.id, kind: 'test', data: null, number: 2, name: 'Add a book to the cart', description: '', device: 'desktop', steps: [{ id: 'c1', command: 'shared_step', value: sh1.id }, { id: 'c2', command: 'click', target: ref(catalog, 8) }, { id: 'c3', command: 'assert_text_contains', value: 'Cart (1)', target: ref(catalog, 2) }], createdAt: ago(4000), updatedAt: ago(90), lastRun: null }
+  const tc3: TestCase = { id: 'tc_new', projectId: p.id, kind: 'test', data: null, number: 3, name: 'New test', description: '', device: 'desktop', steps: [], createdAt: ago(10), updatedAt: ago(10), lastRun: null }
+  const tc4: TestCase = { id: 'tc_search', projectId: p.id, kind: 'test', data: null, number: 4, name: 'Search the catalog', description: 'Signs in through the shared step, then searches.', device: 'desktop', steps: [{ id: 'q1', command: 'shared_step', value: sh1.id }, { id: 'q2', command: 'input', value: 'fog', target: ref(catalog, 1) }, { id: 'q3', command: 'press_key', value: 'Enter' }, { id: 'q4', command: 'assert_url_contains', value: '/demo/catalog' }], createdAt: ago(800), updatedAt: ago(70), lastRun: null }
+  cases.push(tc1, tc2, tc3, tc4, sh1, sh2)
 
   makeRun(tc1, 'succeeded', { minutesAgo: 300 })
   makeRun(tc1, 'failed', { failAt: 6, minutesAgo: 120 })
@@ -325,9 +357,12 @@ function seed() {
   const b1: BatchRun = { id: 'b_1', projectId: p.id, number: 1, status: 'succeeded', trigger: 'api', counts: { total: 2, succeeded: 2, failed: 0, unresolved: 0, aborted: 0 }, createdAt: ago(1500), startedAt: ago(1500), finishedAt: ago(1499) }
   makeRun(tc1, 'succeeded', { batch: b1, order: 1, minutesAgo: 1500 })
   makeRun(tc2, 'succeeded', { batch: b1, order: 2, minutesAgo: 1499 })
-  const b2: BatchRun = { id: 'b_2', projectId: p.id, number: 2, status: 'unresolved', trigger: 'manual', counts: { total: 2, succeeded: 0, failed: 1, unresolved: 1, aborted: 0 }, createdAt: ago(60), startedAt: ago(60), finishedAt: ago(59) }
+  const b2: BatchRun = { id: 'b_2', projectId: p.id, number: 2, status: 'unresolved', trigger: 'manual', counts: { total: 3, succeeded: 0, failed: 1, unresolved: 2, aborted: 0 }, createdAt: ago(60), startedAt: ago(60), finishedAt: ago(59) }
   makeRun(tc1, 'unresolved', { batch: b2, order: 1, healAt: 4, minutesAgo: 60 })
-  makeRun(tc2, 'failed', { batch: b2, order: 2, failAt: 2, minutesAgo: 59 })
+  // Positions in the expanded list: 0 is the call's marker row, 1-4 the shared step's steps.
+  makeRun(tc2, 'failed', { batch: b2, order: 2, failAt: 6, minutesAgo: 59 })
+  // A repair inside the shared step (its "Sign in" click).
+  makeRun(tc4, 'unresolved', { batch: b2, order: 3, healAt: 4, minutesAgo: 58 })
   batches.push(b2, b1)
 }
 
@@ -344,9 +379,8 @@ function recount(b: BatchRun) {
 }
 
 function simulate(run: Run, onDone?: () => void) {
-  const from = run.range?.from ?? 1
-  const to = run.range?.to ?? run.steps.length
-  const todo = run.steps.map((s, i) => ({ s, i })).filter(({ s, i }) => !s.disabled && i + 1 >= from && i + 1 <= to)
+  const positions = positionsOf(run.steps)
+  const todo = reportedSteps(run.steps, run.range).map((s) => ({ s, i: run.steps.indexOf(s) }))
   let k = 0
   const finish = (status: RunStatus) => {
     run.status = status
@@ -367,7 +401,7 @@ function simulate(run: Run, onDone?: () => void) {
     if (!item) return finish('succeeded')
     const { s, i } = item
     const def = COMMAND_BY_ID[s.command]
-    const r: StepResult = { stepId: s.id, number: i + 1, status: 'passed', sentence: stepSentence(s), durationMs: 200 + Math.round(Math.random() * 600) }
+    const r: StepResult = { stepId: s.id, ...positions[i], status: 'passed', sentence: stepSentence(s), durationMs: 200 + Math.round(Math.random() * 600) }
     const onCatalog = s.target ? uis.find((u) => u.id === s.target!.uiId)?.screenshotKey === 'mock-catalog' : /catalog/.test(s.value ?? '')
     if (def.shot) r.screenshotKey = onCatalog ? 'mock-catalog' : 'mock-login'
     const fail = (s.value ?? '').includes('!fail')
@@ -452,11 +486,11 @@ const lite = (r: Run) => {
   const { steps: _s, log: _l, ...rest } = r
   return rest
 }
-const withCounts = (p: Project): Project => ({ ...p, testCaseCount: cases.filter((c) => c.projectId === p.id).length, batchRunCount: batches.filter((b) => b.projectId === p.id).length })
+const withCounts = (p: Project): Project => ({ ...p, testCaseCount: cases.filter((c) => c.projectId === p.id && c.kind === 'test').length, batchRunCount: batches.filter((b) => b.projectId === p.id).length })
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 async function handle(method: string, path: string, body: Record<string, unknown>): Promise<unknown> {
-  const seg = path.split('/').filter(Boolean)
+  const seg = path.split('/').filter(Boolean).map(decodeURIComponent)
   const [, b, , d] = seg
   const key = `${method} ${seg.map((s, i) => (i % 2 === 1 && seg[0] !== 'session' ? ':' : s)).join('/')}`
 
@@ -470,7 +504,7 @@ async function handle(method: string, path: string, body: Record<string, unknown
     case 'POST projects': {
       const p: Project = { id: id('p'), name: String(body.name ?? 'Untitled'), description: String(body.description ?? ''), baseUrl: String(body.baseUrl ?? ''), variables: {}, createdAt: now() }
       projects.push(p)
-      counters.set(p.id, { tc: 1, batch: 1 })
+      counters.set(p.id, { tc: 1, batch: 1, shared: 1 })
       return withCounts(p)
     }
     case 'GET projects/:':
@@ -484,10 +518,45 @@ async function handle(method: string, path: string, body: Record<string, unknown
       projects.splice(projects.findIndex((p) => p.id === b), 1)
       return { ok: true }
     case 'GET projects/:/test-cases':
-      return cases.filter((x) => x.projectId === b).sort((x, y) => x.number - y.number)
+      return cases.filter((x) => x.projectId === b && x.kind === 'test').sort((x, y) => x.number - y.number)
+    case 'GET projects/:/shared-steps':
+      return cases.filter((x) => x.projectId === b && x.kind === 'shared').sort((x, y) => x.number - y.number).map(withUsedBy)
+    case 'POST projects/:/shared-steps': {
+      const ctr = need(counters.get(b), 'Project')
+      const tc: TestCase = { id: id('sh'), projectId: b, kind: 'shared', data: null, number: ctr.shared++, name: String(body.name ?? 'New shared step'), description: String(body.description ?? ''), device: 'desktop', steps: [], createdAt: now(), updatedAt: now(), lastRun: null }
+      cases.push(tc)
+      return withUsedBy(tc)
+    }
+    case 'POST test-cases/:/extract-shared': {
+      const src = need(cases.find((x) => x.id === b), 'Test case')
+      const ctr = need(counters.get(src.projectId), 'Project')
+      const ids = new Set(body.stepIds as string[])
+      const first = src.steps.findIndex((s) => ids.has(s.id))
+      const moved = first < 0 ? [] : src.steps.slice(first, first + ids.size)
+      if (src.kind === 'shared') throw new HttpError(400, NESTED_SHARED_MESSAGE)
+      if (!ids.size || moved.length !== ids.size || !moved.every((s) => ids.has(s.id))) throw new HttpError(400, 'stepIds must be consecutive steps of this test case (save the test case first)')
+      if (moved.some((s) => s.command === 'shared_step')) throw new HttpError(400, `The selection contains a shared step call. ${NESTED_SHARED_MESSAGE}.`)
+      if (validateSteps(moved).length) throw new HttpError(400, 'The selection must contain whole If ... End branch blocks: a shared step cannot start or end in the middle of one')
+      await sleep(300)
+      const shared: TestCase = { id: id('sh'), projectId: src.projectId, kind: 'shared', data: null, number: ctr.shared++, name: String(body.name ?? 'New shared step'), description: '', device: src.device, steps: [], createdAt: now(), updatedAt: now(), lastRun: null }
+      // The shared step gets its own copies of the screens its steps point at.
+      const copies = new Map<string, string>()
+      for (const s of moved) {
+        const from = s.target && !copies.has(s.target.uiId) ? uis.find((u) => u.id === s.target!.uiId) : undefined
+        if (!from) continue
+        const copy: Ui = { ...structuredClone(from), id: id('ui'), testCaseId: shared.id }
+        copies.set(from.id, copy.id)
+        uis.push(copy)
+      }
+      shared.steps = structuredClone(moved).map((s) => (s.target ? { ...s, target: { ...s.target, uiId: copies.get(s.target.uiId) ?? s.target.uiId } } : s))
+      src.steps = [...src.steps.slice(0, first), { id: id('st'), command: 'shared_step', value: shared.id }, ...src.steps.slice(first + moved.length)]
+      src.updatedAt = now()
+      cases.push(shared)
+      return { testCase: src, shared: withUsedBy(shared) }
+    }
     case 'POST projects/:/test-cases': {
       const ctr = need(counters.get(b), 'Project')
-      const tc: TestCase = { id: id('tc'), projectId: b, number: ctr.tc++, name: String(body.name ?? 'New test'), description: String(body.description ?? ''), device: 'desktop', steps: [], createdAt: now(), updatedAt: now(), lastRun: null }
+      const tc: TestCase = { id: id('tc'), projectId: b, kind: 'test', data: null, number: ctr.tc++, name: String(body.name ?? 'New test'), description: String(body.description ?? ''), device: 'desktop', steps: [], createdAt: now(), updatedAt: now(), lastRun: null }
       cases.push(tc)
       return tc
     }
@@ -496,7 +565,7 @@ async function handle(method: string, path: string, body: Record<string, unknown
     case 'POST projects/:/batch-runs': {
       const ctr = need(counters.get(b), 'Project')
       const ids = body.testCaseIds as string[] | undefined
-      const picked = cases.filter((x) => x.projectId === b && (!ids || ids.includes(x.id))).sort((x, y) => x.number - y.number)
+      const picked = cases.filter((x) => x.projectId === b && x.kind === 'test' && (!ids || ids.includes(x.id))).sort((x, y) => x.number - y.number)
       const batch: BatchRun = { id: id('b'), projectId: b, number: ctr.batch++, status: 'running', trigger: body.trigger === 'api' ? 'api' : 'manual', counts: { total: picked.length, succeeded: 0, failed: 0, unresolved: 0, aborted: 0 }, createdAt: now(), startedAt: now(), finishedAt: null }
       batches.unshift(batch)
       const queue = picked.map((tc, i) => makeRun(tc, 'queued', { batch, order: i + 1, minutesAgo: 0 }))
@@ -511,22 +580,28 @@ async function handle(method: string, path: string, body: Record<string, unknown
       return batch
     }
     case 'GET test-cases/:':
-      return need(cases.find((x) => x.id === b), 'Test case')
+      return withUsedBy(need(cases.find((x) => x.id === b), 'Test case'))
     case 'PATCH test-cases/:': {
       const tc = need(cases.find((x) => x.id === b), 'Test case')
       await sleep(250)
+      const nested = tc.kind === 'shared' && Array.isArray(body.steps) ? (body.steps as Step[]).findIndex((s) => s.command === 'shared_step') : -1
+      if (nested >= 0) throw new HttpError(400, `Step ${nested + 1}: ${NESTED_SHARED_MESSAGE}`)
       Object.assign(tc, body, { updatedAt: now() })
-      return tc
+      return withUsedBy(tc)
     }
-    case 'DELETE test-cases/:':
-      cases.splice(cases.findIndex((x) => x.id === b), 1)
+    case 'DELETE test-cases/:': {
+      const tc = need(cases.find((x) => x.id === b), 'Test case')
+      const callers = tc.kind === 'shared' ? callersOf(tc.id) : []
+      if (callers.length) throw new HttpError(409, `Shared step ${sharedLabel(tc)} is used by ${callers.map((t) => `#${t.number} ${t.name}`).join(', ')}. Remove the calls first.`)
+      cases.splice(cases.indexOf(tc), 1)
       return { ok: true }
+    }
     case 'POST test-cases/:/duplicate': {
       const src = need(cases.find((x) => x.id === b), 'Test case')
       const ctr = need(counters.get(src.projectId), 'Project')
-      const tc: TestCase = { ...structuredClone(src), id: id('tc'), number: ctr.tc++, name: `${src.name} (copy)`, lastRun: null, createdAt: now(), updatedAt: now() }
+      const tc: TestCase = { ...structuredClone(src), id: id(src.kind === 'shared' ? 'sh' : 'tc'), number: src.kind === 'shared' ? ctr.shared++ : ctr.tc++, name: `${src.name} (copy)`, lastRun: null, createdAt: now(), updatedAt: now() }
       cases.push(tc)
-      return tc
+      return withUsedBy(tc)
     }
     case 'GET test-cases/:/uis':
       return uis.filter((u) => u.testCaseId === b)
@@ -535,8 +610,12 @@ async function handle(method: string, path: string, body: Record<string, unknown
       const req = body as CaptureRequest
       await sleep(2600)
       const upto = req.afterStepId ? tc.steps.findIndex((s) => s.id === req.afterStepId) : -1
-      const replayed = tc.steps.slice(0, upto + 1).filter((s) => !s.disabled)
-      const bad = replayed.find((s) => (s.value ?? '').includes('!fail'))
+      // The replay goes through shared step calls: a call counts with all of its steps.
+      const expanded = expand(tc).steps
+      const replayed = (upto < 0 ? [] : expanded.slice(0, flatRange(expanded, { from: 1, to: upto + 1 }).to)).filter((s) => !s.disabled && !s.call)
+      const failed = replayed.find((s) => (s.value ?? '').includes('!fail'))
+      // A failure inside a shared step is reported on the call, as the Worker does.
+      const bad = failed && { id: failed.origin?.callId ?? failed.id }
       const clicks = replayed.filter((s) => s.command === 'click').length
       const page = /catalog/.test(req.url ?? '') || (clicks > 0 && !bad) ? PAGES[1] : PAGES[0]
       const ui = makeUi(tc.id, page, `UI${uis.filter((u) => u.testCaseId === tc.id).length + 1}`)
@@ -556,6 +635,8 @@ async function handle(method: string, path: string, body: Record<string, unknown
       return { ok: true }
     case 'POST test-cases/:/runs': {
       const tc = need(cases.find((x) => x.id === b), 'Test case')
+      const problem = expand(tc).problems[0]
+      if (problem) throw new HttpError(400, `Step ${tc.steps.findIndex((s) => s.id === problem.stepId) + 1}: ${problem.message}`)
       const run = makeRun(tc, 'queued', { minutesAgo: 0 })
       run.range = (body.range as Run['range']) ?? null
       tc.lastRun = { id: run.id, status: 'queued', finishedAt: null }
@@ -581,6 +662,14 @@ async function handle(method: string, path: string, body: Record<string, unknown
       if (run.status === 'queued' || run.status === 'running') throw new HttpError(409, 'Wait for the run to finish before reviewing its repairs')
       if (res.heal!.state !== 'unresolved') throw new HttpError(409, `This repair was already ${res.heal!.state}`)
       res.heal!.state = body.action === 'approve' ? 'approved' : 'rejected'
+      // An approved repair goes to the step's owner: the shared step for a step that came from one.
+      const healed = run.steps.find((s) => s.id === d)
+      const owner = cases.find((x) => x.id === (healed?.origin?.shared.id ?? run.testCaseId))
+      if (body.action === 'approve' && healed?.target && owner) {
+        const t = healed.target
+        owner.steps = owner.steps.map((s) => (s.target?.uiId === t.uiId && s.target.elementId === t.elementId ? { ...s, target: { ...s.target, locator: res.heal!.newLocator, candidates: res.heal!.newCandidates } } : s))
+        owner.updatedAt = now()
+      }
       if (run.status === 'unresolved') {
         if (run.results.some((r) => r.heal?.state === 'rejected' || r.status === 'failed')) run.status = 'failed'
         else if (!run.results.some((r) => r.heal?.state === 'unresolved')) run.status = 'succeeded'

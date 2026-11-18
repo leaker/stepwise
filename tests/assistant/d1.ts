@@ -34,6 +34,12 @@ class Statement {
     const info = this.db.prepare(this.sql).run(...this.args)
     return { meta: { changes: Number(info.changes) } }
   }
+
+  /** As D1 answers a statement of a batch: the rows of a read, the change count of a write. */
+  async batched(): Promise<{ results: unknown[]; meta: { changes: number } }> {
+    if (/^\s*(SELECT|WITH)\b/i.test(this.sql)) return { results: this.rows(), meta: { changes: 0 } }
+    return { results: [], ...(await this.run()) }
+  }
 }
 
 export function memoryD1(): D1Database {
@@ -44,7 +50,7 @@ export function memoryD1(): D1Database {
     prepare: (sql: string) => new Statement(db, sql),
     batch: async (statements: Statement[]) => {
       const out = []
-      for (const s of statements) out.push(await s.all())
+      for (const s of statements) out.push(await s.batched())
       return out
     },
   }

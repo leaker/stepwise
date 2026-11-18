@@ -3,12 +3,13 @@ import { AlertTriangle, ChevronLeft, ChevronRight, ImageOff, Pencil, Square, X }
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useParams } from 'react-router-dom'
-import { stepSentence } from '../../shared/commands'
+import { sharedLabel, stepSentence } from '../../shared/commands'
 import { deviceOf } from '../../shared/devices'
+import { flatRange, positionLabel, positionsOf, reportedSteps, topLevelCount } from '../../shared/expand'
 import { locatorToString, type Box, type HealProposal, type Run, type StepResult, type Ui } from '../../shared/types'
 import { api, qk, shotUrl } from '../api'
 import { Button, DeviceChip, Dialog, ErrorState, IconButton, Loading, Shell, Spinner, StatusIcon, TableWrap, Tabs } from '../components/ui'
-import { cx, dateTime, duration, isTerminal, ms, STATUS_LABEL } from '../lib/format'
+import { cx, dateTime, duration, isTerminal, ms, plural, STATUS_LABEL } from '../lib/format'
 import { useModalDialog, useTick } from '../lib/hooks'
 
 type TabId = 'shots' | 'log' | 'info'
@@ -37,6 +38,7 @@ export function RunPage() {
   const heals = r.results.filter((x) => x.heal)
   const shots = r.results.filter((x) => x.screenshotKey)
   const healResult = healStep ? r.results.find((x) => x.stepId === healStep && x.heal) : undefined
+  const what = r.kind === 'shared' ? 'shared step' : 'test case'
 
   const crumbs = [
     { label: project.data?.name ?? 'Project', to: `/p/${r.projectId}` },
@@ -55,7 +57,8 @@ export function RunPage() {
               <span className={`result-word status-${r.status}`}>{STATUS_LABEL[r.status]}</span>
             </h1>
             <p className="page-sub">
-              <Link to={`/t/${r.testCaseId}`}>{r.testCaseName}</Link> <span className="hash">#{r.testCaseNumber}</span>
+              <Link to={`/t/${r.testCaseId}`}>{r.testCaseName}</Link> <span className="hash">{r.kind === 'shared' ? `S${r.testCaseNumber}` : `#${r.testCaseNumber}`}</span>
+              {r.kind === 'shared' && <span className="muted"> · shared step run by itself</span>}
             </p>
             <div className="chips">
               <span className="chip num">{duration(r.startedAt, r.finishedAt)}</span>
@@ -77,7 +80,7 @@ export function RunPage() {
           )}
           <Link to={`/t/${r.testCaseId}/edit`} className="btn">
             <Pencil size={15} />
-            <span className="btn-label">Edit test case</span>
+            <span className="btn-label">Edit {what}</span>
           </Link>
         </div>
       </div>
@@ -86,14 +89,14 @@ export function RunPage() {
         <div className="messages">
           {failures.map((f) => (
             <div className="message message-fail" key={`f-${f.stepId}`}>
-              <span className="message-n num">{f.number}</span>
+              <span className="message-n num">{positionLabel(f)}</span>
               <span className="message-label">Failed</span>
               <span className="message-text">{f.error || 'The step failed.'}</span>
             </div>
           ))}
           {heals.map((h) => (
             <button type="button" className={cx('message', 'message-review', `heal-${h.heal!.state}`)} key={`h-${h.stepId}`} onClick={() => setHealStep(h.stepId)}>
-              <span className="message-n num">{h.number}</span>
+              <span className="message-n num">{positionLabel(h)}</span>
               <span className="message-label">{healLabel(h.heal!)}</span>
               <span className="message-text">
                 UI element {h.heal!.elementName} (<code>{locatorToString(h.heal!.oldLocator)}</code>) was not found, so the locator was automatically repaired
@@ -135,7 +138,7 @@ export function RunPage() {
               >
                 <img src={shotUrl(s.screenshotKey!)} alt="" loading="lazy" />
                 <span className="shot-foot">
-                  <span className="shot-n num">{s.number}</span>
+                  <span className="shot-n num">{positionLabel(s)}</span>
                   <span className="truncate">{s.sentence}</span>
                   {s.status !== 'passed' && <StatusIcon status={s.status} size={15} />}
                 </span>
@@ -194,9 +197,10 @@ function LogTab({ run, live, onOpenShot }: { run: Run; live: boolean; onOpenShot
     return () => document.removeEventListener('keydown', onKey)
   }, [shown])
   const byStep = useMemo(() => new Map(run.results.map((x) => [x.stepId, x])), [run.results])
-  const from = run.range?.from ?? 1
-  const to = run.range?.to ?? run.steps.length
-  const runningId = live && run.status === 'running' ? run.steps.find((s, i) => !s.disabled && i + 1 >= from && i + 1 <= to && !byStep.has(s.id))?.id : undefined
+  // The steps are listed as the run executed them: a shared step call is a heading, with its steps under it.
+  const positions = useMemo(() => positionsOf(run.steps), [run.steps])
+  const { from, to } = run.range ? flatRange(run.steps, run.range) : { from: 1, to: run.steps.length }
+  const runningId = live && run.status === 'running' ? reportedSteps(run.steps, run.range).find((s) => !byStep.has(s.id))?.id : undefined
 
   return (
     <div className="log">
@@ -206,21 +210,37 @@ function LogTab({ run, live, onOpenShot }: { run: Run; live: boolean; onOpenShot
           {run.steps.map((s, i) => {
             const res = byStep.get(s.id)
             const out = s.disabled || i + 1 < from || i + 1 > to
+            const label = positionLabel(positions[i])
+            if (s.call) {
+              // Not executed itself: it shows how its steps went.
+              const inside = run.steps.filter((x) => x.origin?.callId === s.id).map((x) => byStep.get(x.id))
+              const status = inside.some((x) => x?.status === 'failed') ? 'failed' : inside.some((x) => x?.status === 'healed') ? 'healed' : inside.some((x) => x) ? 'passed' : undefined
+              return (
+                <li key={s.id} className={cx('log-step', 'log-group', out && 'is-out')}>
+                  <span className="log-n num">{label}</span>
+                  <span className="log-sentence">
+                    Shared step <Link to={`/t/${s.call.id}`}>{sharedLabel(s.call)}</Link>
+                  </span>
+                  <span className="log-meta num">{plural(inside.length, 'step')}</span>
+                  <span className="log-status">{status ? <StatusIcon status={status} size={16} /> : null}</span>
+                </li>
+              )
+            }
             return (
               <li
                 key={s.id}
-                className={cx('log-step', res && `is-${res.status}`, out && 'is-out')}
+                className={cx('log-step', s.origin && 'is-inner', res && `is-${res.status}`, out && 'is-out')}
                 onMouseEnter={(e) => res?.screenshotKey && preview(e.currentTarget, res.screenshotKey)}
                 onMouseLeave={() => setHover(null)}
               >
-                <span className="log-n num">{i + 1}</span>
+                <span className="log-n num">{label}</span>
                 <span className="log-sentence">
                   {res?.screenshotKey ? (
                     // A real control: the keyboard and touch get the screenshot too (focus previews it, activating opens it).
                     <button
                       type="button"
                       className="log-open"
-                      aria-label={`${res.sentence}. Open the screenshot of step ${i + 1}`}
+                      aria-label={`${res.sentence}. Open the screenshot of step ${label}`}
                       onClick={() => onOpenShot(s.id)}
                       onFocus={(e) => e.currentTarget.matches(':focus-visible') && preview(e.currentTarget.closest('li')!, res.screenshotKey!)}
                       onBlur={() => setHover(null)}
@@ -263,12 +283,13 @@ function InfoTab({ run }: { run: Run }) {
   const total = run.results.reduce((n, x) => n + x.durationMs, 0)
   const rows: [string, React.ReactNode][] = [
     ['Status', STATUS_LABEL[run.status]],
-    ['Test case', `${run.testCaseName} (#${run.testCaseNumber})`],
+    [run.kind === 'shared' ? 'Shared step' : 'Test case', `${run.testCaseName} (${run.kind === 'shared' ? 'S' : '#'}${run.testCaseNumber})`],
     ['Browser', run.environment.browser],
     ['Device', `${deviceOf(run.environment.device).label}${deviceOf(run.environment.device).isMobile ? ' (emulated: phone viewport, user agent and touch)' : ''}`],
     ['Viewport', `${run.environment.viewport.width} × ${run.environment.viewport.height}`],
     ['Base URL', run.environment.baseUrl || '–'],
-    ['Step range', run.range ? `${run.range.from}–${run.range.to} of ${run.steps.length}` : `All ${run.steps.length} steps`],
+    ['Step range', run.range ? `${run.range.from}–${run.range.to} of ${topLevelCount(run.steps)}` : `All ${topLevelCount(run.steps)} steps`],
+    ...(run.steps.some((s) => s.call) ? ([['Shared steps', `${run.steps.filter((s) => s.call).length} called, ${run.steps.filter((s) => s.origin).length} steps inside them (as they were when the run was created)`]] as [string, React.ReactNode][]) : []),
     ['Self-healing', run.batchRunId ? 'On (batch run)' : 'Off (single run)'],
     ['Queued', dateTime(run.createdAt)],
     ['Started', dateTime(run.startedAt)],
@@ -304,14 +325,14 @@ function Lightbox({ shots, index, onIndex, onClose }: { shots: StepResult[]; ind
     <dialog
       ref={ref}
       className="lightbox"
-      aria-label={`Screenshot of step ${s.number}`}
+      aria-label={`Screenshot of step ${positionLabel(s)}`}
       onKeyDown={(e) => {
         if (e.key === 'ArrowLeft' && index > 0) onIndex(index - 1)
         if (e.key === 'ArrowRight' && index < shots.length - 1) onIndex(index + 1)
       }}
     >
       <header className="lightbox-bar">
-        <span className="shot-n num">{s.number}</span>
+        <span className="shot-n num">{positionLabel(s)}</span>
         <span className="lightbox-title">{s.sentence}</span>
         {s.status !== 'passed' && <StatusIcon status={s.status} size={16} />}
         <span className="lightbox-count num">
@@ -379,14 +400,18 @@ function Crop({ src, width, height, box }: { src: string; width: number; height:
 function HealDialog({ run, result, live, onClose }: { run: Run; result: StepResult; live: boolean; onClose: () => void }) {
   const qc = useQueryClient()
   const heal = result.heal!
-  const uis = useQuery({ queryKey: qk.uis(run.testCaseId), queryFn: () => api.uis(run.testCaseId), retry: false })
+  // A step that came from a shared step points at a screen of that shared step, and is repaired there.
+  const origin = run.steps.find((s) => s.id === result.stepId)?.origin
+  const ownerId = origin?.shared.id ?? run.testCaseId
+  const uis = useQuery({ queryKey: qk.uis(ownerId), queryFn: () => api.uis(ownerId), retry: false })
   const before: Ui | undefined = uis.data?.find((u) => u.id === heal.before.uiId)
   const decide = useMutation({
     mutationFn: (action: 'approve' | 'reject') => api.heal(run.id, result.stepId, action),
     onSuccess: (r) => {
       qc.setQueryData(qk.run(run.id), r)
-      void qc.invalidateQueries({ queryKey: qk.testCase(run.testCaseId) })
-      void qc.invalidateQueries({ queryKey: qk.uis(run.testCaseId) })
+      void qc.invalidateQueries({ queryKey: qk.testCase(ownerId) })
+      void qc.invalidateQueries({ queryKey: qk.uis(ownerId) })
+      if (origin) void qc.invalidateQueries({ queryKey: qk.sharedSteps(run.projectId) })
       if (run.batchRunId) void qc.invalidateQueries({ queryKey: qk.batchRun(run.batchRunId) })
       onClose()
     },
@@ -396,7 +421,7 @@ function HealDialog({ run, result, live, onClose }: { run: Run; result: StepResu
 
   return (
     <Dialog
-      title={`Self-healing result, step ${result.number}`}
+      title={`Self-healing result, step ${positionLabel(result)}`}
       onClose={onClose}
       width={920}
       footer={
@@ -410,8 +435,10 @@ function HealDialog({ run, result, live, onClose }: { run: Run; result: StepResu
         ) : open ? (
           <>
             <span className="heal-foot-note">
-              Approving saves the new locator to the step and to the element on its captured screen (the screenshot is not retaken). Rejecting marks this
-              run as failed and changes nothing.
+              {origin
+                ? `This step belongs to shared step ${sharedLabel(origin.shared)}. Approving saves the new locator there, for every test case that calls it, and to the element on its captured screen (the screenshot is not retaken).`
+                : 'Approving saves the new locator to the step and to the element on its captured screen (the screenshot is not retaken).'}{' '}
+              Rejecting marks this run as failed and changes nothing.
             </span>
             <Button variant="danger" busy={decide.isPending && decide.variables === 'reject'} disabled={decide.isPending} onClick={() => decide.mutate('reject')}>
               Reject

@@ -2,6 +2,7 @@
 // runs and assistant sessions.
 import { launch, type Browser, type BrowserContext } from '@cloudflare/playwright'
 import { deviceOf, type DeviceProfile } from '../shared/devices'
+import { flatRange, positionsOf } from '../shared/expand'
 import { makePreview, type Preview } from './assistant/preview'
 import { processAssistantSession } from './assistant/session'
 import type { CaptureResponse, RunStatus, Step, StepResult, Ui } from '../shared/types'
@@ -63,10 +64,11 @@ export function leaseBrowser(env: Env): BrowserLease {
 
 export interface CaptureInput {
   testCase: TestCaseRow
+  /** With shared step calls expanded (expandSteps). */
   steps: Step[]
   baseUrl: string
   variables: Record<string, string>
-  /** 1-based index of the step to replay up to, or null to open `url`. */
+  /** 1-based number of the test case's step to replay up to (a shared step call is one step), or null to open `url`. */
   replayTo: number | null
   url: URL | null
   appOrigin: string
@@ -89,7 +91,15 @@ export async function captureScreen(env: Env, input: CaptureInput, shared?: Brow
     let replayError: CaptureResponse['replayError']
 
     if (input.replayTo !== null) {
-      const lastStep = input.steps[input.replayTo - 1]
+      const positions = positionsOf(input.steps)
+      const range = flatRange(input.steps, { from: 1, to: input.replayTo })
+      const lastStep = input.steps[range.to - 1]
+      // The editor knows the test case's own steps: a failure inside a shared step is reported on its call.
+      const at = (step: Step, message: string): NonNullable<CaptureResponse['replayError']> => {
+        if (!step.origin) return { stepId: step.id, message }
+        const sub = positions[input.steps.indexOf(step)]?.sub
+        return { stepId: step.origin.callId, message: `In shared step S${step.origin.shared.number} "${step.origin.shared.name}"${sub ? `, step ${sub}` : ''}: ${message}` }
+      }
       try {
         const outcome = await runSteps(page, input.steps, {
           baseUrl: input.baseUrl,
@@ -98,20 +108,21 @@ export async function captureScreen(env: Env, input: CaptureInput, shared?: Brow
           touch: device.hasTouch,
           heal: false,
           waitSeconds: 5,
-          range: { from: 1, to: input.replayTo },
+          range,
+          positions,
           saveShot: async () => '',
           takeBlockedNavigation: guard.takeBlockedNavigation,
           shouldAbort: input.shouldAbort,
         })
         if (outcome.status === 'failed') {
           const failed = outcome.results.findLast((r) => r.status === 'failed')
-          replayError = { stepId: failed?.stepId ?? lastStep.id, message: failed?.error ?? 'A step failed during the replay' }
+          replayError = at(input.steps.find((s) => s.id === failed?.stepId) ?? lastStep, failed?.error ?? 'A step failed during the replay')
         } else if (outcome.status === 'aborted') {
-          const next = input.steps.slice(0, input.replayTo).find((s) => !s.disabled && !outcome.results.some((r) => r.stepId === s.id))
-          replayError = { stepId: (next ?? lastStep).id, message: 'The replay was stopped before this step (the session was aborted or ran out of time)' }
+          const next = input.steps.slice(0, range.to).find((s) => !s.disabled && !s.call && !outcome.results.some((r) => r.stepId === s.id))
+          replayError = at(next ?? lastStep, 'The replay was stopped before this step (the session was aborted or ran out of time)')
         }
       } catch (e) {
-        replayError = { stepId: lastStep.id, message: errorMessage(e) }
+        replayError = at(lastStep, errorMessage(e))
       }
     } else if (input.url) {
       try {
@@ -169,9 +180,11 @@ export async function captureScreen(env: Env, input: CaptureInput, shared?: Brow
 
 export interface TrialInput {
   device: DeviceProfile
+  /** With shared step calls expanded (expandSteps). */
   steps: Step[]
   baseUrl: string
   variables: Record<string, string>
+  /** In the test case's own numbering: a shared step call is one step. */
   range: { from: number; to: number } | null
   appOrigin: string
   shouldAbort(): Promise<boolean | string>
@@ -188,7 +201,8 @@ export async function trialRun(env: Env, browser: Browser, input: TrialInput): P
       device: input.device.id,
       touch: input.device.hasTouch,
       heal: false,
-      range: input.range,
+      range: input.range ? flatRange(input.steps, input.range) : null,
+      positions: positionsOf(input.steps),
       replaySetup: true,
       waitSeconds: 10,
       saveShot: async () => '',
@@ -238,7 +252,7 @@ async function executeRun(env: Env, browser: Browser, runId: string, heal: boole
     const baseUrl = environment.baseUrl ?? project.baseUrl
 
     header = [
-      `Run ${run.id} - test case #${run.test_case_number} ${run.test_case_name}`,
+      `Run ${run.id} - ${run.test_case_number < 0 ? `shared step S${-run.test_case_number}` : `test case #${run.test_case_number}`} ${run.test_case_name}`,
       `Environment: Cloudflare Browser Run`,
       `Platform: Chrome (${device.viewport.width}x${device.viewport.height}${device.isMobile ? `, ${device.label} emulation` : ''})`,
       `Base URL: ${baseUrl || '(none)'}`,
@@ -261,7 +275,9 @@ async function executeRun(env: Env, browser: Browser, runId: string, heal: boole
         device: device.id,
         touch: device.hasTouch,
         heal,
-        range,
+        // The stored range counts a shared step call as one step; the snapshot has the call expanded.
+        range: range ? flatRange(steps, range) : null,
+        positions: positionsOf(steps),
         replaySetup: true,
         takeBlockedNavigation: guarded.guard.takeBlockedNavigation,
         waitSeconds: 10,

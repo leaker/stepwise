@@ -557,6 +557,87 @@ body.is-resizing .ed-resize {
   background: var(--line-strong);
 }
 
+/* Steps selected together (Shift+click, Shift+arrows): the tint of the selected step, without its solid rail. */
+.step.is-in-range {
+  background: var(--accent-soft);
+}
+.step.is-in-range .step-n {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* ---------- Shared step call ---------- */
+/* The command of a call cannot be changed, so it is a label, not a pull-down. */
+.step-cmd.is-static {
+  padding-inline: 8px;
+  border-color: transparent;
+  background: var(--surface-3);
+}
+/* The small text controls next to the chip: show / hide the steps, open the shared step. */
+.step-mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 27px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--r-control);
+  background: none;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.step-mini:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+.step-mini:active {
+  background: var(--line-strong);
+}
+.step-shared {
+  margin: 4px 0 6px;
+  padding: 0;
+  border-inline-start: 2px solid var(--accent-line);
+  list-style: none;
+  font-size: 0.8125rem;
+}
+.step-shared li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 4px 3px 8px;
+  color: var(--ink-2);
+}
+.step-shared li.is-none {
+  color: var(--ink-3);
+}
+.step-shared li.is-disabled .step-shared-text {
+  color: var(--ink-3);
+  text-decoration: line-through;
+}
+.step-shared li.is-failed {
+  color: var(--ink);
+}
+.step-shared-n {
+  flex-shrink: 0;
+  min-width: 28px;
+  color: var(--ink-3);
+  font-size: 0.75rem;
+}
+.step-shared-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.step-shared-error {
+  display: block;
+  color: var(--fail);
+}
+.step-shared li > svg {
+  flex-shrink: 0;
+  align-self: center;
+}
+
 /* ---------- Command palette ---------- */
 .palette {
   display: flex;
@@ -671,6 +752,22 @@ body.is-resizing .ed-resize {
   padding: 24px;
   color: var(--ink-3);
   text-align: center;
+}
+/* The palette's second page: which shared step to call. */
+.palette-back {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 0 20px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.palette-empty p {
+  margin: 0 auto 14px;
+  max-width: 44ch;
+}
+.palette-empty .spin {
+  vertical-align: -2px;
 }
 
 /* ---------- Captured screens panel ---------- */

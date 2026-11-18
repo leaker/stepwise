@@ -1,21 +1,22 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, ChevronRight, Copy, CopyPlus, MoreHorizontal, Play, Plus, Trash2, X } from 'lucide-react'
+import { Check, ChevronRight, Copy, CopyPlus, MoreHorizontal, Pencil, Play, Plus, Trash2, X } from 'lucide-react'
 import { useEffect, useId, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { isBuiltInVariable } from '../../shared/commands'
 import type { BatchRun, Project, TestCase } from '../../shared/types'
 import { api, qk } from '../api'
-import { Button, Confirm, DeviceChip, Empty, ErrorState, Field, IconButton, Loading, MenuButton, Shell, StatusIcon, TableWrap, Tabs, toast } from '../components/ui'
+import { Button, Confirm, DeviceChip, Dialog, Empty, ErrorState, Field, IconButton, Loading, MenuButton, Shell, StatusIcon, TableWrap, Tabs, toast } from '../components/ui'
 import { clock, dateTime, isTerminal, plural, STATUS_LABEL } from '../lib/format'
 
-type TabId = 'cases' | 'batches' | 'settings'
+type TabId = 'cases' | 'shared' | 'batches' | 'settings'
 
 export function ProjectPage() {
   const { pid = '' } = useParams()
   const [params, setParams] = useSearchParams()
-  const tab = (['cases', 'batches', 'settings'] as const).find((t) => t === params.get('tab')) ?? 'cases'
+  const tab = (['cases', 'shared', 'batches', 'settings'] as const).find((t) => t === params.get('tab')) ?? 'cases'
   const project = useQuery({ queryKey: qk.project(pid), queryFn: () => api.project(pid) })
   const cases = useQuery({ queryKey: qk.testCases(pid), queryFn: () => api.testCases(pid) })
+  const shared = useQuery({ queryKey: qk.sharedSteps(pid), queryFn: () => api.sharedSteps(pid) })
   const batches = useQuery({
     queryKey: qk.batchRuns(pid),
     queryFn: () => api.batchRuns(pid),
@@ -39,6 +40,7 @@ export function ProjectPage() {
         onChange={(id) => setParams(id === 'cases' ? {} : { tab: id }, { replace: true })}
         tabs={[
           { id: 'cases', label: 'Test cases', count: cases.data?.length ?? p.testCaseCount ?? 0 },
+          { id: 'shared', label: 'Shared steps', count: shared.data?.length ?? 0 },
           { id: 'batches', label: 'Batch runs', count: batches.data?.length ?? p.batchRunCount ?? 0 },
           { id: 'settings', label: 'Settings' },
         ]}
@@ -46,6 +48,8 @@ export function ProjectPage() {
       >
       {tab === 'cases' &&
         (cases.isPending ? <Loading /> : cases.isError ? <ErrorState error={cases.error} onRetry={() => cases.refetch()} /> : <TestCasesTab pid={pid} cases={cases.data} />)}
+      {tab === 'shared' &&
+        (shared.isPending ? <Loading /> : shared.isError ? <ErrorState error={shared.error} onRetry={() => shared.refetch()} /> : <SharedStepsTab pid={pid} list={shared.data} />)}
       {tab === 'batches' &&
         (batches.isPending ? <Loading /> : batches.isError ? <ErrorState error={batches.error} onRetry={() => batches.refetch()} /> : <BatchRunsTab batches={batches.data} />)}
       {tab === 'settings' && <SettingsTab key={p.id} project={p} />}
@@ -214,6 +218,187 @@ function TestCasesTab({ pid, cases }: { pid: string; cases: TestCase[] }) {
         </Confirm>
       )}
     </>
+  )
+}
+
+function SharedStepsTab({ pid, list }: { pid: string; list: TestCase[] }) {
+  const qc = useQueryClient()
+  const navigate = useNavigate()
+  const [renaming, setRenaming] = useState<TestCase | null>(null)
+  const [deleting, setDeleting] = useState<TestCase | null>(null)
+  const refresh = () => void qc.invalidateQueries({ queryKey: qk.sharedSteps(pid) })
+  const create = useMutation({
+    mutationFn: () => api.createSharedStep(pid),
+    onSuccess: (t) => {
+      refresh()
+      navigate(`/t/${t.id}/edit`)
+    },
+  })
+  const duplicate = useMutation({ mutationFn: (id: string) => api.duplicateTestCase(id), onSuccess: refresh })
+  const rename = useMutation({
+    mutationFn: (v: { id: string; name: string }) => api.updateTestCase(v.id, { name: v.name }),
+    onSuccess: (t) => {
+      qc.setQueryData(qk.testCase(t.id), t)
+      setRenaming(null)
+      refresh()
+    },
+  })
+  const remove = useMutation({
+    mutationFn: (id: string) => api.deleteTestCase(id),
+    // Also after a refusal: the list of callers may be what changed.
+    onSettled: () => {
+      setDeleting(null)
+      refresh()
+    },
+  })
+  const newButton = (
+    <Button variant="primary" icon={<Plus size={16} />} busy={create.isPending} onClick={() => create.mutate()}>
+      New shared step
+    </Button>
+  )
+
+  if (list.length === 0) {
+    return (
+      <Empty title="No shared steps yet" action={newButton}>
+        A shared step is a sequence of steps, such as signing in, that several test cases call with the “Shared step” command. Editing it changes every
+        test case that calls it.
+      </Empty>
+    )
+  }
+
+  return (
+    <>
+      <div className="toolbar">
+        <span className="muted">Test cases call these with the “Shared step” command. Editing one changes every test case that calls it.</span>
+        <span className="toolbar-gap" />
+        {newButton}
+      </div>
+      <TableWrap label="Shared steps">
+        <table className="table table-list">
+          <thead>
+            <tr>
+              <th className="col-fit">#</th>
+              <th>Name</th>
+              <th className="col-fit">Steps</th>
+              <th>Used by</th>
+              <th className="col-fit" />
+            </tr>
+          </thead>
+          <tbody>
+            {list.map((t) => {
+              const usedBy = t.usedBy ?? []
+              return (
+                <tr key={t.id}>
+                  <td className="col-fit num">
+                    <span className="hash">S{t.number}</span>
+                  </td>
+                  <th scope="row" className="col-main">
+                    <div className="cell-name">
+                      <Link to={`/t/${t.id}`} title={t.name}>
+                        {t.name}
+                      </Link>
+                    </div>
+                    {t.description && (
+                      <div className="cell-desc" title={t.description}>
+                        {t.description}
+                      </div>
+                    )}
+                  </th>
+                  <td className="col-fit num" data-label="Steps">
+                    {t.steps.length}
+                  </td>
+                  <td data-label="Used by">
+                    {usedBy.length === 0 ? (
+                      <span className="muted">Not used</span>
+                    ) : (
+                      <span className="used-by-cell" title={usedBy.map((u) => `#${u.number} ${u.name}`).join('\n')}>
+                        <span className="num">{plural(usedBy.length, 'test case')}</span>
+                        <span className="muted">
+                          {usedBy
+                            .slice(0, 3)
+                            .map((u) => `#${u.number}`)
+                            .join(', ')}
+                          {usedBy.length > 3 && ', …'}
+                        </span>
+                      </span>
+                    )}
+                  </td>
+                  <td className="col-fit">
+                    <MenuButton
+                      className="icon-btn"
+                      label={`Actions for ${t.name}`}
+                      items={[
+                        { label: 'Open in the editor', icon: <Pencil size={15} />, onSelect: () => navigate(`/t/${t.id}/edit`) },
+                        { label: 'Rename', icon: <Pencil size={15} />, onSelect: () => setRenaming(t) },
+                        { label: 'Duplicate', icon: <CopyPlus size={15} />, onSelect: () => duplicate.mutate(t.id) },
+                        { label: 'Delete', icon: <Trash2 size={15} />, danger: true, onSelect: () => setDeleting(t) },
+                      ]}
+                    >
+                      <MoreHorizontal size={16} />
+                    </MenuButton>
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </TableWrap>
+      {renaming && <RenameDialog current={renaming.name} busy={rename.isPending} onSave={(name) => rename.mutate({ id: renaming.id, name })} onClose={() => setRenaming(null)} />}
+      {deleting &&
+        ((deleting.usedBy ?? []).length > 0 ? (
+          // The server refuses this too; saying why here saves the round trip.
+          <Dialog
+            title="This shared step is in use"
+            onClose={() => setDeleting(null)}
+            width={460}
+            footer={
+              <Button onClick={() => setDeleting(null)} data-autofocus>
+                Close
+              </Button>
+            }
+          >
+            <p className="confirm-text">
+              “{deleting.name}” (S{deleting.number}) cannot be deleted while {plural(deleting.usedBy!.length, 'test case calls', 'test cases call')} it. Remove the
+              step from:
+            </p>
+            <ul className="used-by">
+              {deleting.usedBy!.map((u) => (
+                <li key={u.id}>
+                  <Link to={`/t/${u.id}/edit`}>{u.name}</Link> <span className="hash">#{u.number}</span>
+                </li>
+              ))}
+            </ul>
+          </Dialog>
+        ) : (
+          <Confirm title="Delete shared step?" confirmLabel="Delete shared step" busy={remove.isPending} onConfirm={() => remove.mutate(deleting.id)} onClose={() => setDeleting(null)}>
+            “{deleting.name}” (S{deleting.number}) and its captured screens will be deleted. No test case calls it.
+          </Confirm>
+        ))}
+    </>
+  )
+}
+
+function RenameDialog({ current, busy, onSave, onClose }: { current: string; busy: boolean; onSave: (name: string) => void; onClose: () => void }) {
+  const [name, setName] = useState(current)
+  const clean = name.trim()
+  return (
+    <Dialog
+      title="Rename shared step"
+      onClose={onClose}
+      onSubmit={() => clean && (clean === current ? onClose() : onSave(clean))}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button type="submit" variant="primary" busy={busy} disabled={!clean}>
+            Rename
+          </Button>
+        </>
+      }
+    >
+      <Field label="Name" hint="Every test case that calls it shows the new name.">
+        <input className="input" data-autofocus value={name} maxLength={120} onChange={(e) => setName(e.target.value)} />
+      </Field>
+    </Dialog>
   )
 }
 

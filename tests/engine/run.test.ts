@@ -2,6 +2,7 @@ import { chromium } from 'playwright'
 import type { Browser, BrowserContext, Page } from 'playwright'
 import type { Server } from 'node:http'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { expandSteps, flatRange, positionsOf, type SharedSource } from '../../shared/expand'
 import type { Step } from '../../shared/types'
 import { capture, jpegSize, ref, run, startDemoServer, step } from './helpers'
 import type { CapturedUi } from './helpers'
@@ -412,5 +413,86 @@ describe('self-healing', () => {
     const proposals = r.results.filter((x) => x.heal)
     expect(proposals).toHaveLength(4)
     expect(proposals.every((x) => x.heal?.warning === 'A later step failed after this repair')).toBe(true)
+  })
+})
+
+describe('runSteps with shared step calls expanded', () => {
+  const signIn = (): SharedSource => ({ id: 'sh-sign-in', projectId: 'p', number: 1, name: 'Sign in', steps: loginSteps() })
+  /** The steps as a run gets them, and the options that go with an expanded list. */
+  const expanded = (steps: Step[], range?: { from: number; to: number }) => {
+    const shared = signIn()
+    const out = expandSteps(steps, (id) => (id === shared.id ? shared : undefined), 'p')
+    expect(out.problems).toEqual([])
+    return { steps: out.steps, opts: { variables: V1, positions: positionsOf(out.steps), ...(range ? { range: flatRange(out.steps, range), replaySetup: true } : {}) } }
+  }
+  const call = (): Step => step('shared_step', { value: 'sh-sign-in' })
+  const welcome = (): Step => step('assert_text_equals', { target: ref(uis.dashboard, '"Welcome back, Demo User" text'), value: 'Welcome back, Demo User' })
+
+  it('runs the steps of the call under its number and reports nothing for the call itself', async () => {
+    const { steps, opts } = expanded([step('comment', { value: 'start' }), call(), welcome()])
+    const r = await run(page, steps, baseUrl, opts)
+    expect(r.log).not.toContain('ERROR')
+    expect(r.status).toBe('succeeded')
+    expect(r.results.map((x) => (x.sub ? `${x.number}.${x.sub}` : `${x.number}`))).toEqual(['1', '2.1', '2.2', '2.3', '2.4', '2.5', '3'])
+    expect(r.results.some((x) => x.stepId === steps[1].id)).toBe(false)
+    expect(r.results[1].stepId).toBe(`${steps[1].id}.${steps[2].origin!.stepId}`)
+    expect(r.log).toContain('[2.5] click("Sign in" button (id=signin-button))')
+    expect(r.log).toContain('[3] assert_text_equals(')
+  })
+
+  it('skips a call inside an If arm that is not taken, and runs one inside the arm that is', async () => {
+    // On the fresh page first: had the call run, the page would no longer be blank.
+    const other = expanded([step('if_variable_equals', { variable: 'MODE', value: 'member' }), call(), step('end_if'), step('assert_url_equals', { value: 'about:blank' })])
+    const skipped = await run(page, other.steps, baseUrl, other.opts)
+    expect(skipped.status).toBe('succeeded')
+    expect(skipped.results.map((x) => x.number)).toEqual([1, 3, 4])
+
+    const { steps, opts } = expanded([
+      step('store_fixed', { variable: 'MODE', value: 'guest' }),
+      step('if_variable_equals', { variable: 'MODE', value: 'member' }),
+      step('navigate', { value: 'index.html' }),
+      step('else'),
+      call(),
+      step('end_if'),
+      welcome(),
+    ])
+    const r = await run(page, steps, baseUrl, opts)
+    expect(r.status).toBe('succeeded')
+    expect(r.results.map((x) => (x.sub ? `${x.number}.${x.sub}` : `${x.number}`))).toEqual(['1', '2', '4', '5.1', '5.2', '5.3', '5.4', '5.5', '6', '7'])
+
+  })
+
+  it('treats a range that ends on a call as including all of it, and replays a call before the range as set-up', async () => {
+    const list = [step('comment', { value: 'start' }), call(), welcome(), step('assert_title_equals', { value: 'not run' })]
+    const upTo = expanded(list, { from: 1, to: 2 })
+    const first = await run(page, upTo.steps, baseUrl, upTo.opts)
+    expect(first.status).toBe('succeeded')
+    expect(first.results.map((x) => (x.sub ? `${x.number}.${x.sub}` : `${x.number}`))).toEqual(['1', '2.1', '2.2', '2.3', '2.4', '2.5'])
+
+    await context.close()
+    context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    page = await context.newPage()
+    const only = expanded(list, { from: 3, to: 3 })
+    const second = await run(page, only.steps, baseUrl, only.opts)
+    expect(second.status).toBe('succeeded')
+    expect(second.results.map((x) => x.number)).toEqual([3])
+    expect(second.log).toContain('Set-up: replaying steps 1-2 before the requested range')
+  })
+
+  it('reports a failure inside the call with its own number and stops', async () => {
+    const shared = signIn()
+    shared.steps[2] = { ...shared.steps[2], target: { ...shared.steps[2].target!, locator: { key: 'id', value: 'no-such-field' }, candidates: [] } }
+    const { steps } = expandSteps([call(), welcome()], () => shared, 'p')
+    const r = await run(page, steps, baseUrl, { variables: V1, positions: positionsOf(steps) })
+    expect(r.status).toBe('failed')
+    expect(r.results.at(-1)).toMatchObject({ number: 1, sub: 3, status: 'failed' })
+    expect(r.results).toHaveLength(3)
+    expect(r.log).toContain('[1.3] ERROR:')
+  })
+
+  it('fails a call that reaches the engine without having been expanded', async () => {
+    const r = await run(page, [call()], baseUrl, { variables: V1 })
+    expect(r.status).toBe('failed')
+    expect(r.results[0].error).toBe('This shared step call was not expanded, so it cannot run')
   })
 })

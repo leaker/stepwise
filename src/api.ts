@@ -87,6 +87,11 @@ export const api = {
   deleteTestCase: (tid: string) => del<{ ok: true }>(`/test-cases/${tid}`),
   duplicateTestCase: (tid: string) => post<TestCase>(`/test-cases/${tid}/duplicate`),
 
+  // A shared step is read, renamed, edited, run and deleted through the test case calls above, by its id.
+  sharedSteps: (pid: string) => get<TestCase[]>(`/projects/${pid}/shared-steps`),
+  createSharedStep: (pid: string, b: { name?: string; description?: string; device?: DeviceId } = {}) => post<TestCase>(`/projects/${pid}/shared-steps`, b),
+  extractShared: (tid: string, b: { stepIds: string[]; name?: string }) => post<{ testCase: TestCase; shared: TestCase }>(`/test-cases/${tid}/extract-shared`, b),
+
   uis: (tid: string) => get<Ui[]>(`/test-cases/${tid}/uis`),
   capture: (tid: string, b: CaptureRequest) => post<CaptureResponse>(`/test-cases/${tid}/uis`, b),
   updateUi: (uid: string, b: { name?: string; elements?: UiElement[] }) => patch<Ui>(`/uis/${uid}`, b),
@@ -98,7 +103,8 @@ export const api = {
   run: (rid: string) => get<Run>(`/runs/${rid}`),
   abortRun: (rid: string) => post<Run>(`/runs/${rid}/abort`),
   heal: (rid: string, stepId: string, action: 'approve' | 'reject') =>
-    post<Run>(`/runs/${rid}/heals/${stepId}`, { action }),
+    // A step that came from a shared step has a compound id; any step id is whatever the client that saved it chose.
+    post<Run>(`/runs/${rid}/heals/${encodeURIComponent(stepId)}`, { action }),
 
   batchRuns: (pid: string) => get<BatchRun[]>(`/projects/${pid}/batch-runs`),
   startBatchRun: (pid: string, testCaseIds?: string[]) =>
@@ -129,6 +135,7 @@ export const qk = {
   project: (pid: string) => ['project', pid] as const,
   testCases: (pid: string) => ['project', pid, 'test-cases'] as const,
   batchRuns: (pid: string) => ['project', pid, 'batch-runs'] as const,
+  sharedSteps: (pid: string) => ['project', pid, 'shared-steps'] as const,
   testCase: (tid: string) => ['test-case', tid] as const,
   uis: (tid: string) => ['test-case', tid, 'uis'] as const,
   runs: (tid: string) => ['test-case', tid, 'runs'] as const,

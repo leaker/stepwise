@@ -7,7 +7,11 @@ import {
   ChevronDown,
   CircleAlert,
   CopyPlus,
+  ChevronRight,
+  ExternalLink,
   GripVertical,
+  Layers,
+  ArrowLeft,
   MoreHorizontal,
   MousePointerClick,
   Play,
@@ -16,11 +20,13 @@ import {
   SkipForward,
   Trash2,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { CATEGORIES, COMMAND_BY_ID, COMMANDS, KEYS, SWIPE_DIRECTIONS, type Category, type CommandDef } from '../../shared/commands'
-import type { CommandId, Step, StepResult } from '../../shared/types'
-import { Dialog, Menu, onTablistKeyDown, StatusIcon, type Anchor, type MenuItem } from '../components/ui'
-import { cx } from '../lib/format'
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { CATEGORIES, COMMAND_BY_ID, COMMANDS, KEYS, sharedLabel, stepSentence, SWIPE_DIRECTIONS, validateSteps, type Category, type CommandDef } from '../../shared/commands'
+import type { SharedLookup, SharedSource } from '../../shared/expand'
+import type { CommandId, Step, StepResult, TestCase } from '../../shared/types'
+import { Button, Dialog, Menu, onTablistKeyDown, Spinner, StatusIcon, type Anchor, type MenuItem } from '../components/ui'
+import { cx, plural } from '../lib/format'
 import { isComposing } from '../lib/hooks'
 import { commandChoices, isNumeric, ROW_PARTS, stepDepths } from './model'
 
@@ -33,7 +39,20 @@ export interface StepListProps {
   pickFor: string | null
   focusId: string | null
   canRun: boolean
+  /** The steps selected together (Shift+click, Shift+arrows): always consecutive, and more than one when present. */
+  range: Set<string>
+  /** The project's shared steps: undefined while loading. */
+  sharedSteps: TestCase[] | undefined
+  shared: SharedLookup
+  /** Results of the steps inside shared step calls, by the id they have in the run (`callId.stepId`). */
+  subResults: Map<string, StepResult>
+  /** False in the editor of a shared step: shared steps do not nest. */
+  canExtract: boolean
   onSelect: (id: string) => void
+  /** Extend the selection from the selected step to this one. */
+  onExtend: (id: string) => void
+  onDeleteMany: (ids: string[]) => void
+  onExtract: (ids: string[]) => void
   onChange: (id: string, patch: Partial<Step>, coalesce?: string) => void
   onCommand: (id: string, command: CommandId) => void
   onMove: (id: string, toIndex: number) => void
@@ -48,6 +67,7 @@ export function StepList(p: StepListProps) {
   const listRef = useRef<HTMLDivElement>(null)
   const [menu, setMenu] = useState<{ id: string; anchor: Anchor } | null>(null)
   const [cmdMenu, setCmdMenu] = useState<{ id: string; anchor: Anchor } | null>(null)
+  const [sharedMenu, setSharedMenu] = useState<{ id: string; anchor: Anchor } | null>(null)
   const [dragId, setDragId] = useState<string | null>(null)
   const [dropIndex, setDropIndex] = useState<number | null>(null)
   const depths = useMemo(() => stepDepths(p.steps), [p.steps])
@@ -93,6 +113,14 @@ export function StepList(p: StepListProps) {
 
   const menuStep = menu ? p.steps.find((s) => s.id === menu.id) : undefined
   const menuIndex = menuStep ? p.steps.indexOf(menuStep) : -1
+  // Opened on a step of a multi-selection, the menu's group actions apply to all of it.
+  const group = menuStep ? (p.range.has(menuStep.id) ? p.steps.filter((s) => p.range.has(s.id)) : [menuStep]) : []
+  const many = group.length > 1
+  const extractProblem = group.some((s) => s.command === 'shared_step')
+    ? 'A shared step cannot call another shared step.'
+    : validateSteps(group).length
+      ? 'Select whole If … End branch blocks.'
+      : undefined
   const menuItems: MenuItem[] = menuStep
     ? [
         { label: 'Insert command above', icon: <ArrowUpToLine size={15} />, onSelect: () => p.onInsert(menuIndex) },
@@ -118,6 +146,17 @@ export function StepList(p: StepListProps) {
               } satisfies MenuItem,
             ]
           : []),
+        ...(p.canExtract
+          ? [
+              {
+                label: many ? `Move ${group.length} steps to a new shared step` : 'Move to a new shared step',
+                desc: extractProblem ?? (many ? undefined : 'Shift+click another step first to move several.'),
+                icon: <Layers size={15} />,
+                disabled: !!extractProblem,
+                onSelect: () => p.onExtract(group.map((s) => s.id)),
+              } satisfies MenuItem,
+            ]
+          : []),
         { type: 'separator' },
         { label: 'Run up to this step', icon: <Play size={15} />, disabled: !p.canRun, onSelect: () => p.onRunRange(1, menuIndex + 1) },
         {
@@ -128,7 +167,13 @@ export function StepList(p: StepListProps) {
           onSelect: () => p.onRunRange(menuIndex + 1, menuIndex + 1),
         },
         { type: 'separator' },
-        { label: 'Delete', icon: <Trash2 size={15} />, danger: true, hint: 'Del', onSelect: () => p.onDelete(menuStep.id) },
+        {
+          label: many ? `Delete ${group.length} steps` : 'Delete',
+          icon: <Trash2 size={15} />,
+          danger: true,
+          hint: 'Del',
+          onSelect: () => (many ? p.onDeleteMany(group.map((s) => s.id)) : p.onDelete(menuStep.id)),
+        },
       ]
     : []
 
@@ -145,6 +190,15 @@ export function StepList(p: StepListProps) {
     }
     return out
   }, [cmdStep, p])
+
+  const sharedMenuStep = sharedMenu ? p.steps.find((s) => s.id === sharedMenu.id) : undefined
+  const sharedItems: MenuItem[] = !sharedMenuStep
+    ? []
+    : !p.sharedSteps
+      ? [{ label: 'Loading shared steps…', disabled: true, onSelect: () => {} }]
+      : p.sharedSteps.length === 0
+        ? [{ label: 'This project has no shared steps', disabled: true, onSelect: () => {} }]
+        : p.sharedSteps.map((t) => ({ label: sharedLabel(t), checked: t.id === sharedMenuStep.value, onSelect: () => p.onChange(sharedMenuStep.id, { value: t.id }) }))
 
   return (
     <>
@@ -177,6 +231,13 @@ export function StepList(p: StepListProps) {
           index={i}
           depth={depths[i]}
           selected={step.id === p.selectedId}
+          inRange={p.range.has(step.id)}
+          sharedTarget={step.command === 'shared_step' && step.value ? p.shared(step.value) : undefined}
+          // Only while the call still shows a result: an edited call has not been run.
+          subResults={p.results.has(step.id) ? p.subResults : undefined}
+          sharedOpen={sharedMenu?.id === step.id}
+          onSharedMenu={(anchor) => setSharedMenu({ id: step.id, anchor })}
+          onExtend={() => p.onExtend(step.id)}
           error={p.errors.get(step.id)}
           result={p.results.get(step.id)}
           running={step.id === p.runningId}
@@ -191,7 +252,7 @@ export function StepList(p: StepListProps) {
           onChange={(patch, coalesce) => p.onChange(step.id, patch, coalesce)}
           onChip={() => p.onChip(step.id)}
           onMenu={(anchor) => {
-            p.onSelect(step.id)
+            if (!p.range.has(step.id)) p.onSelect(step.id)
             setMenu({ id: step.id, anchor })
           }}
           onCmdMenu={(anchor) => setCmdMenu({ id: step.id, anchor })}
@@ -204,9 +265,13 @@ export function StepList(p: StepListProps) {
       ))}
       {menu && menuStep && <Menu anchor={menu.anchor} items={menuItems} onClose={() => setMenu(null)} />}
       {cmdMenu && cmdStep && <Menu anchor={cmdMenu.anchor} items={cmdItems} onClose={() => setCmdMenu(null)} />}
+      {sharedMenu && sharedMenuStep && <Menu anchor={sharedMenu.anchor} items={sharedItems} onClose={() => setSharedMenu(null)} />}
     </div>
     <span className="sr-only" role="status">
       {moved}
+    </span>
+    <span className="sr-only" role="status">
+      {p.range.size > 1 ? `${p.range.size} steps selected.` : ''}
     </span>
     </>
   )
@@ -217,6 +282,14 @@ interface RowProps {
   index: number
   depth: number
   selected: boolean
+  /** Part of a multi-selection. */
+  inRange: boolean
+  /** The shared step a call points at, when it exists. */
+  sharedTarget?: SharedSource
+  subResults?: Map<string, StepResult>
+  sharedOpen: boolean
+  onSharedMenu: (anchor: Anchor) => void
+  onExtend: () => void
   error?: string
   result?: StepResult
   running: boolean
@@ -242,6 +315,9 @@ function StepRow(p: RowProps) {
   const parts = ROW_PARTS[step.command] ?? []
   const status = p.result?.status
   const failText = p.result?.status === 'failed' ? p.result.error : undefined
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const previewId = `${useId()}-shared`
+  const target = p.sharedTarget
 
   return (
     <div
@@ -252,6 +328,7 @@ function StepRow(p: RowProps) {
       className={cx(
         'step',
         p.selected && 'is-selected',
+        p.inRange && 'is-in-range',
         step.disabled && 'is-disabled',
         p.dragging && 'is-dragging',
         p.dropBefore && 'drop-before',
@@ -260,8 +337,20 @@ function StepRow(p: RowProps) {
         p.error && 'has-error',
         step.command === 'comment' && 'is-comment',
       )}
-      onMouseDown={p.onSelect}
-      onFocusCapture={p.onSelect}
+      onMouseDown={(e) => {
+        if (e.shiftKey && e.button === 0) {
+          // Extends the selection; the default would select text and move focus into the row.
+          e.preventDefault()
+          p.onExtend()
+          return
+        }
+        // The menu of a multi-selection is opened on one of its rows: that must not collapse it.
+        if (p.inRange && (e.button === 2 || (e.target as HTMLElement).closest('.step-more'))) return
+        p.onSelect()
+      }}
+      onFocusCapture={() => {
+        if (!p.inRange) p.onSelect()
+      }}
       onContextMenu={(e) => {
         e.preventDefault()
         p.onMenu({ x: e.clientX, y: e.clientY })
@@ -285,18 +374,59 @@ function StepRow(p: RowProps) {
       <span className="step-n num">{p.index + 1}</span>
       <div className="step-main" style={p.depth ? { paddingInlineStart: 8 + p.depth * 18 } : undefined}>
         <div className="step-line">
-          <button
-            type="button"
-            className="step-cmd"
-            aria-haspopup="menu"
-            aria-expanded={p.cmdOpen}
-            title={`${def?.label ?? step.command} (change command)`}
-            onClick={(e) => p.onCmdMenu({ el: e.currentTarget })}
-          >
-            <span className="truncate">{def?.label ?? step.command}</span>
-            <ChevronDown size={14} />
-          </button>
+          {step.command === 'shared_step' ? (
+            // A call does not turn into another command: what it does is chosen with the chip next to it.
+            <span className="step-cmd is-static">{def?.label}</span>
+          ) : (
+            <button
+              type="button"
+              className="step-cmd"
+              aria-haspopup="menu"
+              aria-expanded={p.cmdOpen}
+              title={`${def?.label ?? step.command} (change command)`}
+              onClick={(e) => p.onCmdMenu({ el: e.currentTarget })}
+            >
+              <span className="truncate">{def?.label ?? step.command}</span>
+              <ChevronDown size={14} />
+            </button>
+          )}
           {parts.map((part, i) => {
+            if (part.kind === 'shared')
+              return (
+                <Fragment key={i}>
+                  <button
+                    type="button"
+                    className={cx('step-chip', !target && 'is-empty')}
+                    aria-haspopup="menu"
+                    aria-expanded={p.sharedOpen}
+                    title={target ? `${sharedLabel(target)} (choose another shared step)` : 'Choose the shared step to call'}
+                    onClick={(e) => p.onSharedMenu({ el: e.currentTarget })}
+                  >
+                    <Layers size={14} />
+                    <span className="truncate">{target ? sharedLabel(target) : step.value ? 'Shared step not found' : 'Choose shared step'}</span>
+                  </button>
+                  {target && (
+                    <>
+                      <button
+                        type="button"
+                        className="step-mini"
+                        aria-expanded={previewOpen}
+                        aria-controls={previewId}
+                        aria-label={`${previewOpen ? 'Hide' : 'Show'} the steps of ${sharedLabel(target)}`}
+                        title={previewOpen ? 'Hide its steps' : 'Show its steps'}
+                        onClick={() => setPreviewOpen(!previewOpen)}
+                      >
+                        {previewOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        <span className="num">{plural(target.steps.length, 'step')}</span>
+                      </button>
+                      <Link className="step-mini" to={`/t/${target.id}/edit`} aria-label={`Open ${sharedLabel(target)} in the editor`} title="Open this shared step in the editor">
+                        <ExternalLink size={14} />
+                        <span>Open</span>
+                      </Link>
+                    </>
+                  )}
+                </Fragment>
+              )
             if (part.kind === 'word')
               return (
                 <span className="step-word" key={i}>
@@ -377,6 +507,27 @@ function StepRow(p: RowProps) {
             </span>
           )}
         </div>
+        {target && previewOpen && (
+          // Read-only: a shared step is edited in its own editor, for every test case that calls it.
+          <ol className="step-shared" id={previewId} aria-label={`Steps of ${sharedLabel(target)}`}>
+            {target.steps.length === 0 && <li className="is-none">No steps yet. Open it to add some.</li>}
+            {target.steps.map((inner, j) => {
+              const res = p.subResults?.get(`${step.id}.${inner.id}`)
+              return (
+                <li key={inner.id} className={cx(inner.disabled && 'is-disabled', res && `is-${res.status}`)}>
+                  <span className="step-shared-n num">
+                    {p.index + 1}.{j + 1}
+                  </span>
+                  <span className="step-shared-text">
+                    {stepSentence(inner)}
+                    {res?.status === 'failed' && res.error && <span className="step-shared-error">{res.error}</span>}
+                  </span>
+                  {res && <StatusIcon status={res.status} size={14} />}
+                </li>
+              )
+            })}
+          </ol>
+        )}
         {(p.error || failText) && (
           <p className={cx('step-msg', p.error ? 'is-warn' : 'is-fail')} role={p.error ? undefined : 'alert'}>
             {p.error ?? failText}
@@ -413,44 +564,78 @@ function StepRow(p: RowProps) {
 
 type PaletteTab = Category | 'All'
 
-export function CommandPalette({ onPick, onClose, position }: { onPick: (id: CommandId) => void; onClose: () => void; position: string }) {
+export interface PaletteShared {
+  /** The project's shared steps; undefined while loading. */
+  list: TestCase[] | undefined
+  creating: boolean
+  /** Create a shared step and add a call to it. */
+  onCreate: () => void
+}
+
+/**
+ * `shared`: offer the "Shared step" command, which then asks which one (omitted in the editor of a shared
+ * step, where a call is not allowed). onPick gets the shared step's id as `value`.
+ */
+export function CommandPalette({ onPick, onClose, position, shared }: { onPick: (id: CommandId, value?: string) => void; onClose: () => void; position: string; shared?: PaletteShared }) {
   const [tab, setTab] = useState<PaletteTab>('All')
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
+  // The second page of the dialog: which shared step to call.
+  const [choosing, setChoosing] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
   const q = query.trim().toLowerCase()
-  const list = COMMANDS.filter((c) => (q ? c.label.toLowerCase().includes(q) || c.category.toLowerCase().includes(q) : tab === 'All' || c.category === tab))
-  const current = Math.min(active, Math.max(0, list.length - 1))
+  const list = COMMANDS.filter((c) => (shared || c.id !== 'shared_step') && (q ? c.label.toLowerCase().includes(q) || c.category.toLowerCase().includes(q) : tab === 'All' || c.category === tab))
+  const sharedList = (shared?.list ?? []).filter((t) => !q || sharedLabel(t).toLowerCase().includes(q))
+  const count = choosing ? sharedList.length : list.length
+  const current = Math.min(active, Math.max(0, count - 1))
+  const pick = (id: CommandId) => {
+    if (id !== 'shared_step') return onPick(id)
+    setChoosing(true)
+    setQuery('')
+    setActive(0)
+  }
+  const leave = () => {
+    setChoosing(false)
+    setQuery('')
+    setActive(0)
+  }
 
   useEffect(() => {
     listRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' })
-  }, [current, tab, q])
+  }, [current, tab, q, choosing])
+  // The control that was clicked is gone after the page change: the search field takes the focus.
+  useEffect(() => {
+    searchRef.current?.focus()
+  }, [choosing])
 
   return (
-    <Dialog title={`Add command ${position}`} onClose={onClose} width={600}>
+    <Dialog title={choosing ? `Add a shared step call ${position}` : `Add command ${position}`} onClose={onClose} width={600}>
       <div
         className="palette"
         onKeyDown={(e) => {
           if (e.key === 'ArrowDown') {
             e.preventDefault()
-            setActive(Math.min(list.length - 1, current + 1))
+            setActive(Math.min(count - 1, current + 1))
           } else if (e.key === 'ArrowUp') {
             e.preventDefault()
             setActive(Math.max(0, current - 1))
-          } else if (e.key === 'Enter' && list[current] && !(e.target as HTMLElement).closest('[role="tab"]')) {
+          } else if (e.key === 'Enter' && current < count && !(e.target as HTMLElement).closest('[role="tab"], .palette-back, .palette-empty')) {
             e.preventDefault()
             // Not the Enter that confirms an input method's conversion in the search field.
             if (isComposing(e)) return
-            onPick(list[current].id)
+            if (choosing) onPick('shared_step', sharedList[current].id)
+            else pick(list[current].id)
           }
         }}
       >
         <div className="palette-search">
           <Search size={16} />
           <input
+            ref={searchRef}
             data-autofocus
-            aria-label="Search commands"
-            placeholder="Search commands"
+            aria-label={choosing ? 'Search shared steps' : 'Search commands'}
+            placeholder={choosing ? 'Search shared steps' : 'Search commands'}
             enterKeyHint="search"
             autoComplete="off"
             autoCapitalize="none"
@@ -463,6 +648,52 @@ export function CommandPalette({ onPick, onClose, position }: { onPick: (id: Com
             }}
           />
         </div>
+        {choosing && (
+          <div className="palette-back">
+            <Button size="sm" icon={<ArrowLeft size={14} />} onClick={leave}>
+              All commands
+            </Button>
+            <span className="muted">Choose the shared step to call.</span>
+          </div>
+        )}
+        {choosing && (
+          <div className="palette-list" role="listbox" ref={listRef} aria-label="Shared steps">
+            {!shared?.list ? (
+              <p className="palette-empty">
+                <Spinner size={14} /> Loading shared steps…
+              </p>
+            ) : shared.list.length === 0 ? (
+              <div className="palette-empty">
+                <p>
+                  This project has no shared steps yet. A shared step is a sequence of steps kept in one place and called from several test cases, such as
+                  signing in.
+                </p>
+                <Button variant="primary" icon={<Plus size={14} />} busy={shared.creating} onClick={shared.onCreate}>
+                  Create a shared step
+                </Button>
+              </div>
+            ) : sharedList.length === 0 ? (
+              <p className="palette-empty">No shared step matches “{query}”.</p>
+            ) : (
+              sharedList.map((t, i) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="option"
+                  aria-selected={i === current}
+                  className={cx('palette-item', i === current && 'is-active')}
+                  onMouseMove={() => i !== current && setActive(i)}
+                  onClick={() => onPick('shared_step', t.id)}
+                >
+                  <Layers size={14} />
+                  <span className="palette-label">{sharedLabel(t)}</span>
+                  <span className="palette-cat">{plural(t.steps.length, 'step')}</span>
+                </button>
+              ))
+            )}
+          </div>
+        )}
+        {!choosing && (
         <div className="palette-tabs" role="tablist" aria-label="Command categories" onKeyDown={onTablistKeyDown}>
           {(['All', ...CATEGORIES] as PaletteTab[]).map((t) => (
             <button
@@ -482,6 +713,8 @@ export function CommandPalette({ onPick, onClose, position }: { onPick: (id: Com
             </button>
           ))}
         </div>
+        )}
+        {!choosing && (
         <div className="palette-list" role="listbox" ref={listRef} aria-label="Commands">
           {list.length === 0 && <p className="palette-empty">No command matches “{query}”.</p>}
           {list.map((c, i) => (
@@ -492,7 +725,7 @@ export function CommandPalette({ onPick, onClose, position }: { onPick: (id: Com
               aria-selected={i === current}
               className={cx('palette-item', i === current && 'is-active')}
               onMouseMove={() => i !== current && setActive(i)}
-              onClick={() => onPick(c.id)}
+              onClick={() => pick(c.id)}
             >
               <Plus size={14} />
               <span className="palette-label">{c.label}</span>
@@ -501,10 +734,16 @@ export function CommandPalette({ onPick, onClose, position }: { onPick: (id: Com
                   <MousePointerClick size={13} /> then pick an element
                 </span>
               )}
+              {c.id === 'shared_step' && (
+                <span className="palette-note">
+                  <Layers size={13} /> then choose which one
+                </span>
+              )}
               <span className="palette-cat">{c.category}</span>
             </button>
           ))}
         </div>
+        )}
       </div>
     </Dialog>
   )

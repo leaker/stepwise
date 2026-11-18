@@ -1,5 +1,6 @@
 // Request body validation shared by the API routes.
 import { COMMAND_BY_ID, isBuiltInVariable } from '../shared/commands'
+import { positionLabel, type StepPosition } from '../shared/expand'
 import type { Box, ElementRef, ElementType, Fingerprint, Locator, Step, UiElement } from '../shared/types'
 import { HttpError, type Env } from './env'
 import { newId } from './db'
@@ -154,6 +155,7 @@ export function parseSteps(value: unknown): Step[] {
     seen.add(id)
     const step: Step = { id, command: raw.command as Step['command'] }
     if (raw.target !== undefined && raw.target !== null) step.target = parseTarget(raw.target, at)
+    // `call` and `origin` exist in run snapshots only; they are not read here, so a client cannot store them.
     for (const key of ['value', 'variable'] as const) {
       const v = raw[key]
       if (v === undefined || v === null) continue
@@ -254,7 +256,15 @@ export function isPrivateHost(hostname: string): boolean {
  * Check every navigate step whose URL is known before the run starts (after substituting BASE_URL and
  * project variables). URLs that depend on run-time variables are enforced by the navigation guard in the runner.
  */
-export function assertNavigateTargetsAllowed(steps: Step[], baseUrl: string, variables: Record<string, string>, env: Pick<Env, 'ALLOWED_HOSTS'>, appOrigin: string): void {
+export function assertNavigateTargetsAllowed(
+  steps: Step[],
+  baseUrl: string,
+  variables: Record<string, string>,
+  env: Pick<Env, 'ALLOWED_HOSTS'>,
+  appOrigin: string,
+  /** How the steps are numbered in the message when shared step calls were expanded (positionsOf). */
+  positions?: StepPosition[],
+): void {
   // The values a run will really use: built-ins win over a project variable of the same name (older data may
   // still hold one). DEVICE depends on the test case, so a URL built from it is left to the navigation guard.
   const vars: Record<string, string> = { ...variables, BASE_URL: baseUrl, BROWSER: 'chrome' }
@@ -264,6 +274,6 @@ export function assertNavigateTargetsAllowed(steps: Step[], baseUrl: string, var
     const value = (step.value ?? '').replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, name: string) => (Object.hasOwn(vars, name) ? vars[name] : m))
     if (value.includes('${')) return
     const url = resolveUrl(value, baseUrl)
-    if (url && !isHostAllowed(url, env, appOrigin)) throw new HttpError(400, `Step ${i + 1}: ${url.hostname} is not in this deployment's allowed hosts`)
+    if (url && !isHostAllowed(url, env, appOrigin)) throw new HttpError(400, `Step ${positions?.[i] ? positionLabel(positions[i]) : i + 1}: ${url.hostname} is not in this deployment's allowed hosts`)
   })
 }

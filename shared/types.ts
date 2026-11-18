@@ -115,12 +115,33 @@ export type CommandId =
   | 'end_if'
   | 'screenshot'
   | 'comment'
+  | 'shared_step'
+
+/** A shared step as a call to it names it: enough to show "Shared step S1: Sign in" without loading it. */
+export interface SharedRef {
+  id: string
+  /** Sequential per project among shared steps, shown as S1. */
+  number: number
+  name: string
+}
+
+/** Run snapshots only: where a step that was copied out of a shared step came from. */
+export interface StepOrigin {
+  /** Id of the calling step in the test case. */
+  callId: string
+  /** Id of the step inside the shared step. */
+  stepId: string
+  shared: SharedRef
+}
 
 export interface Step {
   id: string
   command: CommandId
   target?: ElementRef
-  /** Main text parameter. May contain ${VAR} references. Meaning depends on the command (see shared/commands.ts). */
+  /**
+   * Main text parameter. May contain ${VAR} references. Meaning depends on the command (see shared/commands.ts).
+   * For `shared_step` it is the id of the shared step that is called.
+   */
   value?: string
   /** Variable name parameter (bare name, no ${}). */
   variable?: string
@@ -128,7 +149,25 @@ export interface Step {
   disabled?: boolean
   /** Assertions only: record the failure and keep going. */
   continueOnFailure?: boolean
+  /**
+   * Run snapshots only (never stored on a test case): set on a `shared_step` call that was expanded. The row
+   * stays in the snapshot as the heading of its group and is not executed; the steps after it that carry a
+   * matching `origin` are the shared step's steps as they were when the run was created.
+   */
+  call?: SharedRef
+  /** Run snapshots only: this step was copied from a shared step. Its id is unique within the run. */
+  origin?: StepOrigin
 }
+
+/** The data table of a data-driven test case: one run executes the steps once per row. */
+export interface DataTable {
+  /** Variable names; a step reads a cell as ${COLUMN}. */
+  columns: string[]
+  /** Each row has one string per column. */
+  rows: string[][]
+}
+
+export type TestCaseKind = 'test' | 'shared'
 
 export interface Project {
   id: string
@@ -149,13 +188,22 @@ export interface Project {
 export interface TestCase {
   id: string
   projectId: string
-  /** Sequential per project, shown as #3. Never reused. */
+  /**
+   * A shared step is stored and edited like a test case, but it is only a named list of steps that test
+   * cases call with the "Shared step" command: it is not in the test case list or in batch runs.
+   */
+  kind: TestCaseKind
+  /** Sequential per project and per kind, shown as #3 for a test case and S3 for a shared step. Never reused. */
   number: number
   name: string
   description: string
-  /** Device profile captures and runs of this test case use. */
+  /** Device profile captures and runs of this test case use. A shared step called from a test case runs on the caller's device. */
   device: DeviceId
   steps: Step[]
+  /** Test cases only; null when the test case has no data table. */
+  data: DataTable | null
+  /** Shared steps only, on the routes that say so: the test cases that call it. */
+  usedBy?: { id: string; number: number; name: string }[]
   createdAt: string
   updatedAt: string
   lastRun?: { id: string; status: RunStatus; finishedAt: string | null } | null
@@ -181,10 +229,24 @@ export interface HealProposal {
   warning?: string
 }
 
+/** One row of a data-driven run. */
+export interface RunPattern {
+  /** 1-based row of the data table. */
+  index: number
+  values: Record<string, string>
+  status: RunStatus
+  startedAt: string | null
+  finishedAt: string | null
+}
+
 export interface StepResult {
   stepId: string
-  /** 1-based position among the test case's steps. */
+  /** 1-based position among the test case's steps. For a step of a shared step: the position of the call. */
   number: number
+  /** Steps of a shared step only: 1-based position inside it, so the step reads as 3.2. */
+  sub?: number
+  /** Data-driven runs only: the 1-based data row this result belongs to. */
+  pattern?: number
   status: StepStatus
   /** The step rendered as a sentence, e.g. `Click "Sign in" button`. */
   sentence: string
@@ -199,13 +261,18 @@ export interface Run {
   id: string
   projectId: string
   testCaseId: string
+  /** What was run: a test case, or a shared step by itself. */
+  kind: TestCaseKind
   testCaseNumber: number
   testCaseName: string
   batchRunId: string | null
   /** Position inside the batch run (1-based); 0 for single runs. */
   order: number
   status: RunStatus
-  /** Steps as they were when the run started. */
+  /**
+   * Steps as they were when the run was created, with every shared step call expanded: the call row (it has
+   * `call`) is followed by the shared step's steps (they have `origin`). See shared/expand.ts.
+   */
   steps: Step[]
   /** Results so far; grows while the run is in progress. */
   results: StepResult[]
@@ -213,8 +280,13 @@ export interface Run {
   log: string
   /** As it was when the run was queued. `device` is the test case's device profile at that time. */
   environment: { browser: string; device: DeviceId; viewport: { width: number; height: number }; baseUrl: string }
-  /** Inclusive 1-based step range for partial runs. The steps before it are replayed as set-up and not reported unless one fails. */
+  /**
+   * Inclusive 1-based step range for partial runs, in the test case's own numbering (a shared step call is
+   * one step). The steps before it are replayed as set-up and not reported unless one fails.
+   */
   range: { from: number; to: number } | null
+  /** Data-driven runs only: one entry per data row that the run executes. */
+  patterns: RunPattern[] | null
   createdAt: string
   startedAt: string | null
   finishedAt: string | null
@@ -253,8 +325,17 @@ export interface BatchRun {
 // GET    /api/test-cases/:tid                  -> TestCase
 // PATCH  /api/test-cases/:tid { name?, description?, device?, steps? } -> TestCase
 //          409 when `steps` is sent while an assistant session of the test case is queued or running
+//          400 when a shared step is given a `shared_step` step (shared steps do not nest)
 // DELETE /api/test-cases/:tid                  -> { ok: true }
+//          409 for a shared step that a test case still calls; the message names the callers
 // POST   /api/test-cases/:tid/duplicate        -> TestCase
+//
+// Shared steps are rows of the same kind as test cases (TestCase.kind = 'shared'): every /api/test-cases/:tid
+// route, the captured screens and single runs work on them by id.
+// GET    /api/projects/:pid/shared-steps       -> TestCase[] (ordered by number, each with usedBy)
+// POST   /api/projects/:pid/shared-steps { name?, description?, device? } -> TestCase
+// POST   /api/test-cases/:tid/extract-shared { stepIds: string[], name? } -> { testCase: TestCase, shared: TestCase }
+//          moves consecutive steps of a test case into a new shared step and puts a call in their place
 //
 // GET    /api/test-cases/:tid/uis              -> Ui[] (oldest first)
 // POST   /api/test-cases/:tid/uis CaptureRequest -> CaptureResponse   (synchronous; may take 5-30 s)
@@ -286,15 +367,20 @@ export interface BatchRun {
 export interface CaptureRequest {
   /**
    * Replay the test case's enabled steps up to and including this step in a fresh browser, then capture.
-   * Omit (or null) to capture right after `url` is opened.
+   * A shared step call is replayed whole. Omit (or null) to capture right after `url` is opened.
    */
   afterStepId?: string | null
   /** Used when afterStepId is not given: open this URL and capture. */
   url?: string
+  /** Data-driven test cases: the 1-based data row whose values the replay uses. Default 1. */
+  row?: number
 }
 export interface CaptureResponse {
   ui: Ui
-  /** Set when the replay stopped early because a step failed; the capture shows the page at that point. */
+  /**
+   * Set when the replay stopped early because a step failed; the capture shows the page at that point.
+   * `stepId` is a step of the test case: for a failure inside a shared step it is the call, and the message says where.
+   */
   replayError?: { stepId: string; message: string }
 }
 

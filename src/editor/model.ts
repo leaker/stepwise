@@ -1,8 +1,9 @@
 import { COMMAND_BY_ID, COMMANDS, SWIPE_DIRECTIONS, validateSteps, type CommandDef } from '../../shared/commands'
-import type { CommandId, ElementRef, Locator, Step, Ui, UiElement } from '../../shared/types'
+import { callProblems, type SharedLookup, type SharedSource } from '../../shared/expand'
+import type { CommandId, ElementRef, Locator, Step, TestCase, Ui, UiElement } from '../../shared/types'
 import { uid } from '../lib/format'
 
-export type Part = { kind: 'target' } | { kind: 'value' } | { kind: 'variable' } | { kind: 'word'; text: string }
+export type Part = { kind: 'target' } | { kind: 'value' } | { kind: 'variable' } | { kind: 'word'; text: string } | { kind: 'shared' }
 
 const T: Part = { kind: 'target' }
 const V: Part = { kind: 'value' }
@@ -22,6 +23,7 @@ export const ROW_PARTS: Record<CommandId, Part[]> = {
   swipe: [V],
   screenshot: [w('named'), V],
   comment: [V],
+  shared_step: [{ kind: 'shared' }],
   assert_text_equals: [T, w('is'), V],
   assert_text_contains: [T, w('includes'), V],
   assert_exists: [T],
@@ -57,14 +59,32 @@ export function newStep(command: CommandId, patch: Partial<Step> = {}): Step {
 /** Commands offered by a row's dropdown: an element step can only become another element command. */
 export function commandChoices(step: Step): CommandDef[] {
   const def = COMMAND_BY_ID[step.command]
-  if (step.target) return COMMANDS.filter((c) => c.target)
-  if (def?.target) return COMMANDS
-  return COMMANDS.filter((c) => !c.target)
+  // A call is added from the palette, where the shared step is chosen: no other row turns into one.
+  const others = COMMANDS.filter((c) => c.id !== 'shared_step')
+  if (step.target) return others.filter((c) => c.target)
+  if (def?.target) return others
+  return others.filter((c) => !c.target)
 }
 
-/** What a command's value is: free text, a number of seconds, a key name, a swipe direction, or nothing at all. */
-type ValueKind = 'none' | 'text' | 'seconds' | 'key' | 'direction'
-const valueKind = (command: CommandId): ValueKind => (!COMMAND_BY_ID[command]?.value ? 'none' : isNumeric(command) ? 'seconds' : command === 'press_key' ? 'key' : command === 'swipe' ? 'direction' : 'text')
+/** What a command's value is: free text, a number of seconds, a key name, a swipe direction, a shared step id, or nothing at all. */
+type ValueKind = 'none' | 'text' | 'seconds' | 'key' | 'direction' | 'shared'
+const valueKind = (command: CommandId): ValueKind =>
+  !COMMAND_BY_ID[command]?.value ? 'none' : command === 'shared_step' ? 'shared' : isNumeric(command) ? 'seconds' : command === 'press_key' ? 'key' : command === 'swipe' ? 'direction' : 'text'
+
+/** The project's shared steps as the look-up that expansion and validation use. */
+export function sharedLookup(list: TestCase[] | undefined): SharedLookup {
+  const byId = new Map((list ?? []).map((t): [string, SharedSource] => [t.id, { id: t.id, projectId: t.projectId, number: t.number, name: t.name, steps: t.steps }]))
+  return (id) => byId.get(id)
+}
+
+/** What stepErrors needs to check shared step calls. */
+export interface SharedContext {
+  /** Absent while the project's shared steps are still loading: calls are then not checked. */
+  lookup?: SharedLookup
+  projectId: string
+  /** The steps being checked are a shared step's own. */
+  nested: boolean
+}
 
 /** Parameters only carry over to a command that reads them the same way: a text is not a number of seconds. */
 export function changeCommand(step: Step, command: CommandId): Step {
@@ -103,10 +123,13 @@ function parameterError(s: Step): string | null {
 }
 
 /** Errors that block a run: branch structure, element commands without an element, unusable parameters. */
-export function stepErrors(steps: Step[]): Map<string, string> {
+export function stepErrors(steps: Step[], shared?: SharedContext): Map<string, string> {
   const map = new Map<string, string>()
+  if (shared && (shared.lookup || shared.nested)) {
+    for (const p of callProblems(steps, shared.lookup ?? (() => undefined), shared.projectId, shared.nested)) map.set(p.stepId, `${p.message}.`)
+  }
   for (const s of steps) {
-    if (s.disabled) continue
+    if (s.disabled || map.has(s.id)) continue
     if (COMMAND_BY_ID[s.command]?.target && !s.target) map.set(s.id, 'No UI element chosen. Click the placeholder, then pick an element on the captured screen.')
     else {
       const problem = parameterError(s)

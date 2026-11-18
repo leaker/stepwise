@@ -1,6 +1,6 @@
 // D1 access helpers: row <-> shared type mapping and the queries used by more than one route.
 import { DEVICES, deviceOf } from '../shared/devices'
-import type { BatchRun, Project, Run, RunStatus, Step, StepResult, TestCase, Ui, UiElement } from '../shared/types'
+import type { BatchRun, DataTable, Project, Run, RunPattern, RunStatus, Step, StepResult, TestCase, Ui, UiElement } from '../shared/types'
 import { HttpError } from './env'
 
 export const now = (): string => new Date().toISOString()
@@ -25,6 +25,7 @@ export interface ProjectRow {
   variables: string
   next_case_number: number
   next_batch_number: number
+  next_shared_number: number
   created_at: string
   test_case_count?: number
   batch_run_count?: number
@@ -33,11 +34,16 @@ export interface ProjectRow {
 export interface TestCaseRow {
   id: string
   project_id: string
+  /** Negative for a shared step: S1 is stored as -1 (see migrations/0006). */
   number: number
   name: string
   description: string
   device: string
   steps: string
+  /** 'test' | 'shared' */
+  kind: string
+  /** JSON DataTable, or '' */
+  data: string
   created_at: string
   updated_at: string
 }
@@ -60,6 +66,7 @@ export interface RunRow {
   id: string
   project_id: string
   test_case_id: string
+  /** Negative when the run is of a shared step, as in test_cases.number. */
   test_case_number: number
   test_case_name: string
   batch_run_id: string | null
@@ -70,6 +77,7 @@ export interface RunRow {
   log?: string
   environment: string
   range: string | null
+  patterns?: string | null
   created_at: string
   started_at: string | null
   finished_at: string | null
@@ -109,15 +117,22 @@ export function toProject(r: ProjectRow, origin: string): Project {
   return p
 }
 
+export const isSharedRow = (r: Pick<TestCaseRow, 'kind'>): boolean => r.kind === 'shared'
+
+/** `#3` for a test case, `S3` for a shared step. */
+export const rowLabel = (r: Pick<TestCaseRow, 'kind' | 'number'>): string => `${isSharedRow(r) ? 'S' : '#'}${Math.abs(r.number)}`
+
 export function toTestCase(r: TestCaseRow, lastRun: TestCase['lastRun'] = null): TestCase {
   return {
     id: r.id,
     projectId: r.project_id,
-    number: r.number,
+    kind: isSharedRow(r) ? 'shared' : 'test',
+    number: Math.abs(r.number),
     name: r.name,
     description: r.description,
     device: deviceOf(r.device).id,
     steps: parseJson<Step[]>(r.steps, []),
+    data: parseJson<DataTable | null>(r.data, null),
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     lastRun,
@@ -159,7 +174,8 @@ export function toRunSummary(r: RunRow): Omit<Run, 'steps' | 'log'> {
     id: r.id,
     projectId: r.project_id,
     testCaseId: r.test_case_id,
-    testCaseNumber: r.test_case_number,
+    kind: r.test_case_number < 0 ? 'shared' : 'test',
+    testCaseNumber: Math.abs(r.test_case_number),
     testCaseName: r.test_case_name,
     batchRunId: r.batch_run_id,
     order: r.run_order,
@@ -167,6 +183,7 @@ export function toRunSummary(r: RunRow): Omit<Run, 'steps' | 'log'> {
     results: parseJson<StepResult[]>(r.results, []),
     environment: toEnvironment(r.environment),
     range: parseJson<Run['range']>(r.range, null),
+    patterns: parseJson<RunPattern[] | null>(r.patterns, null),
     createdAt: r.created_at,
     startedAt: r.started_at,
     finishedAt: r.finished_at,
@@ -200,7 +217,7 @@ export function toBatchRun(r: BatchRunRow, statuses: string[]): BatchRun {
 
 /** Columns of `runs` without the two big ones. */
 export const RUN_SUMMARY_COLUMNS =
-  'id, project_id, test_case_id, test_case_number, test_case_name, batch_run_id, run_order, status, results, environment, range, created_at, started_at, finished_at'
+  'id, project_id, test_case_id, test_case_number, test_case_name, batch_run_id, run_order, status, results, environment, range, patterns, created_at, started_at, finished_at'
 
 // ---- lookups ----
 
