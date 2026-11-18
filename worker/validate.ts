@@ -2,6 +2,7 @@
 import { COMMAND_BY_ID, isBuiltInVariable } from '../shared/commands'
 import { describeDataProblem, validateDataTable } from '../shared/data'
 import { positionLabel, type StepPosition } from '../shared/expand'
+import { parseHttpUrl, resolveUrl } from '../shared/url'
 import type { Box, DataTable, ElementRef, ElementType, Fingerprint, Locator, Step, UiElement } from '../shared/types'
 import { HttpError, type Env } from './env'
 import { newId } from './db'
@@ -221,23 +222,7 @@ export function parseElements(value: unknown): UiElement[] {
 
 // ---- URL rules ----
 
-export function parseHttpUrl(text: string): URL | null {
-  try {
-    const url = new URL(text)
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url : null
-  } catch {
-    return null
-  }
-}
-
-/** Absolute http(s) URLs pass through; anything else is appended to the project's base URL. */
-export function resolveUrl(value: string, baseUrl: string): URL | null {
-  const text = value.trim()
-  if (text === '') return null
-  if (/^[a-z][a-z0-9+.-]*:/i.test(text)) return parseHttpUrl(text)
-  if (!baseUrl) return null
-  return parseHttpUrl(baseUrl.replace(/\/+$/, '') + (text.startsWith('/') ? '' : '/') + text)
-}
+export { parseHttpUrl, resolveUrl }
 
 /** True when the URL may be opened: no allow-list configured, the app's own origin, or a listed hostname. */
 export function isHostAllowed(url: URL, env: Pick<Env, 'ALLOWED_HOSTS'>, appOrigin: string): boolean {

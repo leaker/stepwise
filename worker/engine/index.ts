@@ -39,6 +39,8 @@ export interface RunOptions {
   replaySetup?: boolean
   /** Seconds to keep retrying a missing element or a failing assertion. Default 10. */
   waitSeconds?: number
+  /** Tests only: how long a fixed wait sleeps between two keep-alive commands. */
+  waitSliceMs?: number
   /** Persist a JPEG and return its storage key. */
   saveShot(bytes: Uint8Array): Promise<string>
   /** Called after every step (including skipped ones are NOT reported). */
@@ -56,6 +58,11 @@ export interface RunOutcome {
   status: 'succeeded' | 'failed' | 'unresolved' | 'aborted'
   results: StepResult[]
   log: string
+  /**
+   * The result that ended the run early: a failed step (not an assertion set to continue on failure), or a
+   * broken branch structure. Absent when every step that was meant to run did.
+   */
+  stoppedBy?: StepResult
 }
 
 export { captureUi } from './detect'

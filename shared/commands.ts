@@ -120,22 +120,49 @@ export function stepSentence(step: Step, shared?: (id: string) => Pick<SharedRef
     .trim()
 }
 
-/** Structural errors in IF / Otherwise / End branch nesting. Empty array means the steps can run. */
-export function validateSteps(steps: Step[]): { stepId: string; message: string }[] {
+/** Longest fixed wait and longest "wait until visible" a step may ask for, in seconds. */
+export const MAX_WAIT_SECONDS = 300
+
+/**
+ * Structural errors in IF / Otherwise / End branch nesting. Empty array means the steps can run.
+ *
+ * `span`: only the steps at these inclusive 1-based positions are executed (a partial run, or the replay
+ * before a capture). A branch that is still open where the span ends is fine then: the steps that close it
+ * are simply not reached, which is the normal state of a branch that is being built. And a span that does
+ * not start at the first step may start inside a branch, so an "Otherwise" or "End branch" whose "If" is
+ * before the span is fine too.
+ */
+export function validateSteps(steps: Step[], span?: { from: number; to: number } | null): { stepId: string; message: string }[] {
   const errors: { stepId: string; message: string }[] = []
   const stack: { id: string; hasElse: boolean }[] = []
-  for (const s of steps) {
+  const first = span ? Math.max(1, span.from) : 1
+  const last = span ? Math.min(steps.length, span.to) : steps.length
+  const inside = !!span && first > 1
+  for (let i = first - 1; i < last; i++) {
+    const s = steps[i]
     if (s.disabled) continue
     if (s.command === 'if_exists' || s.command === 'if_variable_equals') stack.push({ id: s.id, hasElse: false })
     else if (s.command === 'else') {
       const top = stack[stack.length - 1]
-      if (!top) errors.push({ stepId: s.id, message: '"Otherwise" has no matching "If"' })
-      else if (top.hasElse) errors.push({ stepId: s.id, message: 'This branch already has an "Otherwise"' })
+      if (!top) {
+        if (inside) stack.push({ id: s.id, hasElse: true })
+        else errors.push({ stepId: s.id, message: '"Otherwise" has no matching "If"' })
+      } else if (top.hasElse) errors.push({ stepId: s.id, message: 'This branch already has an "Otherwise"' })
       else top.hasElse = true
     } else if (s.command === 'end_if') {
-      if (!stack.pop()) errors.push({ stepId: s.id, message: '"End branch" has no matching "If"' })
+      if (!stack.pop() && !inside) errors.push({ stepId: s.id, message: '"End branch" has no matching "If"' })
     }
   }
-  for (const open of stack) errors.push({ stepId: open.id, message: '"If" is missing its "End branch"' })
+  if (!span) for (const open of stack) errors.push({ stepId: open.id, message: '"If" is missing its "End branch"' })
   return errors
+}
+
+/** The name of the next capture: one more than the highest `UI<n>` there is, so a deleted capture's name is not handed out again. */
+export function nextUiName(names: string[]): string {
+  let highest = 0
+  for (const name of names) {
+    const m = /^UI(\d{1,9})$/.exec(name)
+    if (m) highest = Math.max(highest, Number(m[1]))
+  }
+  return `UI${highest + 1}`
 }

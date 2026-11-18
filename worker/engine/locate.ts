@@ -13,9 +13,14 @@ export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(r
 
 const POLL_MS = 150
 
+/** Is this the error of a page, context or browser that no longer exists (closed, crashed, session lost)? */
+export const isPageGone = (e: unknown): boolean =>
+  /Target (page, context or browser has been )?closed|Target crashed|Page crashed|(Browser|Context|Page|Session) (has been )?closed|Browser closed|Connection closed/i.test(String(e instanceof Error ? e.message : e))
+
 /**
  * Calls `attempt` until it returns a truthy value or `timeoutMs` has passed. Errors thrown by an
- * attempt (page navigating, detached nodes) count as "not yet". Always tries at least once.
+ * attempt (page navigating, detached nodes) count as "not yet", except the one of a page that is gone:
+ * waiting cannot bring it back, so it is thrown at once. Always tries at least once.
  */
 export async function poll<T>(attempt: () => Promise<T | null | undefined | false>, timeoutMs: number): Promise<T | null> {
   const deadline = Date.now() + timeoutMs
@@ -23,8 +28,9 @@ export async function poll<T>(attempt: () => Promise<T | null | undefined | fals
     try {
       const value = await attempt()
       if (value) return value
-    } catch {
-      // retry
+    } catch (e) {
+      if (isPageGone(e)) throw e
+      // anything else: retry
     }
     const left = deadline - Date.now()
     if (left <= 0) return null

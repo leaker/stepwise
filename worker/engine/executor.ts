@@ -1,17 +1,22 @@
 // Step executor: runs a test case's steps against a Playwright page.
 import type { Locator as PwLocator, Page } from '@cloudflare/playwright'
-import { BUILT_IN_VARIABLES, COMMAND_BY_ID, stepSentence, SWIPE_DIRECTIONS, validateSteps } from '../../shared/commands'
+import { BUILT_IN_VARIABLES, COMMAND_BY_ID, MAX_WAIT_SECONDS, stepSentence, SWIPE_DIRECTIONS, validateSteps } from '../../shared/commands'
 import type { CommandDef } from '../../shared/commands'
 import { positionLabel } from '../../shared/expand'
 import { locatorToString } from '../../shared/types'
 import type { ElementRef, Fingerprint, HealProposal, Locator, Step, StepResult } from '../../shared/types'
+import { canonicalUrl, hasScheme, resolveUrl } from '../../shared/url'
 import { findReplacement } from './heal'
 import type { RunOptions, RunOutcome } from './index'
-import { isRendered, poll, sleep, waitForElement } from './locate'
+import { isPageGone, isRendered, poll, sleep, waitForElement } from './locate'
 
 const IF_WAIT_MS = 2000
 const NAVIGATION_TIMEOUT_MS = 30_000
-const MAX_FIXED_WAIT_S = 300
+/** A fixed wait is slept in slices with a cheap command in between: Browser Run closes a session that gets no command for a minute. */
+const WAIT_SLICE_MS = 20_000
+/** Longest value quoted in a message or in the log. Values read from the page can be whole articles, and results and log are stored in one row. */
+const MAX_QUOTED = 300
+const PAGE_GONE = 'The browser page closed unexpectedly during this step'
 /** How far a swipe moves the page, as a share of the viewport. */
 const SWIPE_SHARE = 0.7
 
@@ -20,6 +25,8 @@ class StepError extends Error {}
 const normalize = (s: string) => s.replace(/\s+/g, ' ').trim()
 const firstLine = (e: unknown) => String(e instanceof Error ? e.message : e).split('\n')[0]
 const quote = (s: string) => JSON.stringify(s)
+/** For messages and the log: long values are cut, with their length. */
+const shown = (s: string) => (s.length > MAX_QUOTED ? `${quote(s.slice(0, MAX_QUOTED))}… (${s.length} characters)` : quote(s))
 
 interface Healed {
   locator: Locator
@@ -28,6 +35,8 @@ interface Healed {
 }
 
 interface Frame {
+  /** The number of the "If" (as shown to the user), when it is among the steps of this run. */
+  label?: string
   /** Are the steps of the current arm being executed? */
   exec: boolean
   /** Has any arm of this branch been taken (or is the whole branch inside a skipped arm)? */
@@ -36,7 +45,8 @@ interface Frame {
 
 export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Promise<RunOutcome> {
   const waitMs = Math.max(0, opts.waitSeconds ?? 10) * 1000
-  const vars: Record<string, string> = { ...opts.variables, BASE_URL: opts.baseUrl, BROWSER: 'chrome', DEVICE: opts.device ?? 'desktop' }
+  // No prototype: a variable named `constructor` or `__proto__` is a variable like any other, defined only when something set it.
+  const vars: Record<string, string> = Object.assign(Object.create(null), opts.variables, { BASE_URL: opts.baseUrl, BROWSER: 'chrome', DEVICE: opts.device ?? 'desktop' })
   const results: StepResult[] = []
   const lines: string[] = []
   const healed = new Map<string, Healed>()
@@ -45,10 +55,17 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
     results.push(result)
     await opts.onStep?.(result, lines.join('\n'))
   }
+  let stoppedBy: StepResult | undefined
   const finish = (status: RunOutcome['status']): RunOutcome => {
     log(`Finished: ${status}`)
-    return { status, results, log: lines.join('\n') }
+    return { status, results, log: lines.join('\n'), ...(stoppedBy ? { stoppedBy } : {}) }
   }
+
+  // A crashed renderer does not always close the page object, so both are remembered.
+  let gone = false
+  page.on('crash', () => void (gone = true))
+  page.on('close', () => void (gone = true))
+  const pageGone = (e?: unknown): boolean => gone || page.isClosed() || (e !== undefined && isPageGone(e))
 
   // Steps are named as the user sees them: with shared steps expanded, the flat position is not the step number.
   const position = (i: number) => opts.positions?.[i] ?? { number: i + 1 }
@@ -58,10 +75,12 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
   }
 
   for (const name of BUILT_IN_VARIABLES) {
-    if (Object.hasOwn(opts.variables, name)) log(`[warning] the project variable ${name} is ignored: ${name} is built in (its value here is ${quote(vars[name])})`)
+    if (Object.hasOwn(opts.variables, name)) log(`[warning] the project variable ${name} is ignored: ${name} is built in (its value here is ${shown(vars[name])})`)
   }
 
-  const structural = validateSteps(steps)
+  const range = opts.range ?? null
+  // A partial run is checked for the steps it executes only: the branch being built further down is not its business.
+  const structural = validateSteps(steps, range ? { from: opts.replaySetup ? 1 : range.from, to: range.to } : null)
   if (structural.length) {
     const seen = new Set<string>()
     for (const problem of structural) {
@@ -77,6 +96,7 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
         durationMs: 0,
         error: `Step error: ${problem.message}`,
       })
+      stoppedBy ??= results[results.length - 1]
     }
     return finish('failed')
   }
@@ -89,13 +109,12 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
     })
 
   const absoluteUrl = (value: string): string => {
-    if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return value
-    if (!opts.baseUrl) throw new StepError(`Cannot resolve relative URL ${quote(value)}: the project has no base URL`)
-    try {
-      return new URL(value, opts.baseUrl).toString()
-    } catch {
-      throw new StepError(`Invalid URL ${quote(value)}`)
-    }
+    if (hasScheme(value)) return value
+    if (!opts.baseUrl) throw new StepError(`Cannot resolve relative URL ${shown(value)}: the project has no base URL`)
+    // The same rule as the checks before a run and the capture dialog (shared/url.ts): appended to the base URL.
+    const url = resolveUrl(value, opts.baseUrl)
+    if (!url) throw new StepError(`Invalid URL ${shown(value)}`)
+    return url.href
   }
 
   const targetKey = (t: ElementRef) => `${t.uiId}/${t.elementId}`
@@ -138,6 +157,8 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
     const locator = effectiveLocator(target)
     const found = await waitForElement(page, locator, timeoutMs)
     if (found.el) return found.el
+    // Not a missing element: there is no page any more. Neither the "not found" message nor a repair applies.
+    if (pageGone()) throw new StepError(PAGE_GONE)
     const missing =
       found.count > 1
         ? `UI element ${target.name} is ambiguous: its locator now matches ${found.count} elements (${locatorToString(locator)})`
@@ -195,9 +216,10 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
   }
   const seconds = (value: string, fallback: number | null): number => {
     if (!value.trim() && fallback !== null) return fallback
-    const s = Number(value)
-    if (!Number.isFinite(s) || s < 0) throw new StepError(`${quote(value)} is not a valid number of seconds`)
-    return Math.min(s, MAX_FIXED_WAIT_S)
+    const s = value.trim() === '' ? NaN : Number(value)
+    if (!Number.isFinite(s) || s < 0) throw new StepError(value.trim() === '' ? 'No number of seconds is set for this step' : `${shown(value)} is not a valid number of seconds`)
+    if (s > MAX_WAIT_SECONDS) throw new StepError(`${shown(value)} seconds is more than a step can wait: the longest wait is ${MAX_WAIT_SECONDS} seconds`)
+    return s
   }
 
   /** Retries a read-and-compare until it holds or the wait runs out; returns the last value read. */
@@ -369,7 +391,7 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
             if (at < 0) at = options.findIndex((o) => o.value === value)
             return at >= 0 ? { at } : null
           }, waitMs)
-          if (!index) throw new StepError(`Option ${quote(value)} was not found in ${describe(t)}; available options: ${known.map(quote).join(', ') || '(none)'}`)
+          if (!index) throw new StepError(`Option ${shown(value)} was not found in ${describe(t)}; available options: ${known.slice(0, 50).map((o) => quote(o.slice(0, 80))).join(', ') || '(none)'}${known.length > 50 ? `, and ${known.length - 50} more` : ''}`)
           await el.selectOption({ index: index.at }, { timeout: actionTimeout })
         })
         await settle()
@@ -443,7 +465,7 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
           () => readText(el),
           (actual) => (equals ? actual === expected : actual.includes(expected)),
         )
-        if (!r.ok) throw new StepError(`AssertionError: text ${quote(r.actual)} does not ${equals ? 'equal' : 'contain'} ${quote(expected)}`)
+        if (!r.ok) throw new StepError(`AssertionError: text ${shown(r.actual)} does not ${equals ? 'equal' : 'contain'} ${shown(expected)}`)
         return
       }
       // "Exists" means rendered, matching what a capture offers: a node that is in the DOM but
@@ -471,12 +493,15 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
       case 'assert_url_equals':
       case 'assert_url_contains': {
         const equals = step.command === 'assert_url_equals'
-        const expected = equals && opts.baseUrl && !/^[a-z][a-z0-9+.-]*:/i.test(value.trim()) ? absoluteUrl(value.trim()) : value.trim()
+        const expected = equals && opts.baseUrl && !hasScheme(value.trim()) ? absoluteUrl(value.trim()) : value.trim()
+        // Two spellings of one URL are equal: https://example.com and https://example.com/ (which is what the
+        // browser reports, and what ${BASE_URL} never has), an upper-case host, a default port.
+        const wanted = canonicalUrl(expected)
         const r = await until(
           async () => page.url(),
-          (actual) => (equals ? actual === expected : actual.includes(expected)),
+          (actual) => (equals ? actual === expected || canonicalUrl(actual) === wanted : actual.includes(expected)),
         )
-        if (!r.ok) throw new StepError(`AssertionError: URL ${quote(r.actual)} does not ${equals ? 'equal' : 'contain'} ${quote(expected)}`)
+        if (!r.ok) throw new StepError(`AssertionError: URL ${shown(r.actual)} does not ${equals ? 'equal' : 'contain'} ${shown(expected)}`)
         return
       }
       case 'assert_title_equals':
@@ -487,13 +512,13 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
           async () => normalize(await page.title()),
           (actual) => (equals ? actual === expected : actual.includes(expected)),
         )
-        if (!r.ok) throw new StepError(`AssertionError: title ${quote(r.actual)} does not ${equals ? 'equal' : 'contain'} ${quote(expected)}`)
+        if (!r.ok) throw new StepError(`AssertionError: title ${shown(r.actual)} does not ${equals ? 'equal' : 'contain'} ${shown(expected)}`)
         return
       }
       case 'assert_variable_equals': {
         const name = needVariable(step)
         if (!(name in vars)) throw new StepError(`AssertionError: variable ${name} is not defined`)
-        if (vars[name] !== value) throw new StepError(`AssertionError: variable ${name} is ${quote(vars[name])}, expected ${quote(value)}`)
+        if (vars[name] !== value) throw new StepError(`AssertionError: variable ${name} is ${shown(vars[name])}, expected ${shown(value)}`)
         return
       }
 
@@ -508,27 +533,35 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
         }
         return
       }
-      case 'wait_seconds':
-        await sleep(seconds(value, null) * 1000)
+      case 'wait_seconds': {
+        const end = Date.now() + seconds(value, null) * 1000
+        for (;;) {
+          const left = end - Date.now()
+          if (left <= 0) break
+          await sleep(Math.min(left, opts.waitSliceMs ?? WAIT_SLICE_MS))
+          // Keeps the browser session alive through a long wait. A page that is navigating cannot answer; that is fine.
+          if (end - Date.now() > 0) await page.evaluate(() => 0).catch(() => {})
+        }
         return
+      }
 
       case 'store_text': {
         const name = needVariable(step)
         const el = await locate(step, def, need(step), n, out)
         vars[name] = await readText(el)
-        log(`[${n}] ${name} = ${quote(vars[name])}`)
+        log(`[${n}] ${name} = ${shown(vars[name])}`)
         return
       }
       case 'store_fixed': {
         const name = needVariable(step)
         vars[name] = value
-        log(`[${n}] ${name} = ${quote(value)}`)
+        log(`[${n}] ${name} = ${shown(value)}`)
         return
       }
       case 'store_url': {
         const name = needVariable(step)
         vars[name] = page.url()
-        log(`[${n}] ${name} = ${quote(vars[name])}`)
+        log(`[${n}] ${name} = ${shown(vars[name])}`)
         return
       }
 
@@ -550,29 +583,39 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
 
   const frames: Frame[] = []
   const executing = (depth = frames.length) => frames.slice(0, depth).every((f) => f.exec)
-  const range = opts.range ?? null
   // Partial runs: the steps before the range are replayed silently so the range starts on the right page.
   const setupTo = range && opts.replaySetup ? range.from - 1 : 0
   if (setupTo > 0) log(`Set-up: replaying steps 1-${position(setupTo - 1).number} before the requested range`)
   const blockedMessage = (url: string) => `Navigation to ${url} was blocked: the host is not allowed by this deployment's target policy`
   let failed = false
   let aborted = false
+  /** Why the step at hand is not executed: the innermost branch arm around it that was not taken. */
+  const skippedBy = (): string => {
+    const frame = frames.find((f) => !f.exec)
+    return frame?.label ? `it is in an arm of the "If" at step ${frame.label} that this run did not take` : 'it is in a branch arm that this run did not take'
+  }
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i]
     const at = i + 1
     const n = positionLabel(position(i))
-    if (step.disabled) continue
     // The marker row of an expanded shared step call: its steps follow it in the list.
     if (step.command === 'shared_step' && step.call) continue
     if (range && (at > range.to || (at < range.from && at > setupTo))) continue
     const setup = at <= setupTo
+    // In a partial run the user asked for these very steps, so one that does not run is explained in the log.
+    const asked = !!range && !setup
+    if (step.disabled) {
+      if (asked) log(`[${n}] skipped: the step is disabled`)
+      continue
+    }
     const def: CommandDef | undefined = COMMAND_BY_ID[step.command]
     const isIf = step.command === 'if_exists' || step.command === 'if_variable_equals'
 
     // Branch bookkeeping for steps that are not executed.
     if (isIf && !executing()) {
-      frames.push({ exec: false, taken: true })
+      if (asked) log(`[${n}] skipped: ${skippedBy()}`)
+      frames.push({ label: n, exec: false, taken: true })
       continue
     }
     if (step.command === 'else') {
@@ -587,7 +630,10 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
     } else if (step.command === 'end_if') {
       // No open frame: a partial run started inside the branch, so there is nothing to close.
       if (!frames.pop() || !executing()) continue
-    } else if (!executing()) continue
+    } else if (!executing()) {
+      if (asked) log(`[${n}] skipped: ${skippedBy()}`)
+      continue
+    }
 
     const stop = await opts.shouldAbort?.()
     if (stop) {
@@ -605,23 +651,24 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
       let value = step.value ?? ''
       let substitutionError: unknown = null
       try {
-        value = substitute(value)
+        // A comment is text for people: nothing in it is a variable reference.
+        if (step.command !== 'comment') value = substitute(value)
       } catch (e) {
         substitutionError = e
       }
       const args: string[] = []
       if (def.target) args.push(step.target ? `${step.target.name} (${locatorToString(effectiveLocator(step.target))})` : '(no element)')
       if (def.variable) args.push(step.variable ?? '')
-      if (def.value !== undefined && (step.value !== undefined || !def.target)) args.push(quote(value))
+      if (def.value !== undefined && (step.value !== undefined || !def.target)) args.push(shown(value))
       log(`[${n}] ${step.command}(${args.join(', ')})`)
       if (substitutionError) throw substitutionError
       if (step.command !== 'else' && step.command !== 'end_if') condition = await execute(step, def, value, n, out)
       const blocked = opts.takeBlockedNavigation?.()
       if (blocked) throw new StepError(blockedMessage(blocked))
       // A step must never pass on a dead page (page.url() and friends keep answering from cache after a crash).
-      if (page.isClosed()) throw new StepError('The browser page closed unexpectedly during this step')
+      if (pageGone()) throw new StepError(PAGE_GONE)
       if (isIf) {
-        frames.push({ exec: condition === true, taken: condition === true })
+        frames.push({ label: n, exec: condition === true, taken: condition === true })
         log(`[${n}] condition is ${condition === true}`)
       }
       if (out.heal) {
@@ -632,7 +679,8 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
       result.status = 'failed'
       // A refused navigation explains the failure better than whatever the step tripped over afterwards.
       const blocked = opts.takeBlockedNavigation?.()
-      result.error = blocked ? blockedMessage(blocked) : e instanceof StepError ? e.message : `Unexpected error: ${firstLine(e)}`
+      // Whatever a step reports on a page that is gone (an element that was not found, a failed assertion) is a symptom.
+      result.error = blocked ? blockedMessage(blocked) : pageGone(e instanceof StepError ? undefined : e) ? PAGE_GONE : e instanceof StepError ? e.message : `Unexpected error: ${firstLine(e)}`
       log(`[${n}] ERROR: ${result.error}`)
       if (out.heal && step.target) healed.delete(targetKey(step.target))
     }
@@ -657,11 +705,13 @@ export async function runSteps(page: Page, steps: Step[], opts: RunOptions): Pro
         if (earlier.heal && earlier.heal.state === 'unresolved') earlier.heal.warning = 'A later step failed after this repair'
       }
     }
+    if (result.status === 'failed' && !tolerated) stoppedBy = result
     await report(result)
-    if (result.status === 'failed' && !(def?.assertion && step.continueOnFailure)) break
+    if (result.status === 'failed' && !tolerated) break
     if (result.status === 'failed') log(`[${n}] continuing after the failed assertion`)
   }
 
+  if (range && !aborted && !failed && results.length === 0) log('None of the requested steps was executed: every one of them is disabled or in a branch arm that this run did not take.')
   if (aborted) return finish('aborted')
   if (failed) return finish('failed')
   return finish(results.some((r) => r.status === 'healed') ? 'unresolved' : 'succeeded')
