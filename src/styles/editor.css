@@ -102,7 +102,8 @@ body.is-resizing {
   display: flex;
   align-items: center;
   gap: 12px;
-  min-width: 0;
+  /* The breadcrumb gives way first: the result and its link must not slide under the Run button. */
+  flex-shrink: 0;
   font-size: 0.84375rem;
 }
 .ed-run-status {
@@ -1673,4 +1674,29 @@ body.is-resizing .ed-resize {
   justify-content: space-between;
   gap: 10px;
   font-size: 0.75rem;
+}
+
+/* ---------- Data-driven test cases ---------- */
+.ed-data-dirty {
+  color: var(--rail-ink-2);
+  font-weight: 400;
+}
+/* The data row that partial runs and captures use. */
+.ed-row {
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--rail-2);
+  border-radius: var(--r-control);
+  background: var(--rail);
+  color: var(--rail-ink);
+  font: inherit;
+  font-size: 0.8125rem;
+}
+.ed-row:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 1px;
+}
+.ed-row:disabled {
+  opacity: 0.6;
 }

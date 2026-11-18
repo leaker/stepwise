@@ -1,6 +1,7 @@
 // In-browser stand-in for the Worker API. Loaded only when VITE_MOCK is set (see main.tsx);
 // it exists so the UI can be exercised before, or without, the real backend.
 import { COMMAND_BY_ID, sharedLabel, stepSentence, validateSteps } from '../../shared/commands'
+import { aggregateStatus, describeDataProblem, hasPatterns, patternLogHeading, rowValues, SUMMARY_LOG_HEADING, validateDataTable } from '../../shared/data'
 import { DEVICES } from '../../shared/devices'
 import { expandSteps, flatRange, NESTED_SHARED_MESSAGE, positionLabel, positionsOf, reportedSteps, type SharedLookup } from '../../shared/expand'
 import type {
@@ -9,11 +10,13 @@ import type {
   BatchRun,
   Box,
   CaptureRequest,
+  DataTable,
   ElementType,
   HealProposal,
   Locator,
   Project,
   Run,
+  RunPattern,
   RunStatus,
   Step,
   StepResult,
@@ -270,12 +273,27 @@ function resultsFor(steps: Step[], failAt = -1, healAt = -1, ui?: Ui): StepResul
   return out
 }
 
-function makeRun(tc: TestCase, status: RunStatus, opts: { failAt?: number; healAt?: number; batch?: BatchRun; order?: number; minutesAgo?: number } = {}): Run {
+/** The patterns of a new run of a data-driven test case: every row, or only `rows`. */
+const patternsFor = (tc: TestCase, rows?: number[]): RunPattern[] | null =>
+  tc.kind === 'test' && hasPatterns(tc.data) ? (rows ?? tc.data.rows.map((_, i) => i + 1)).map((index) => ({ index, values: rowValues(tc.data!, index), status: 'queued', startedAt: null, finishedAt: null })) : null
+
+/** `failPattern`: in a data-driven run only this pattern fails at `failAt`; `healAt` applies to every pattern. */
+function makeRun(tc: TestCase, status: RunStatus, opts: { failAt?: number; failPattern?: number; healAt?: number; batch?: BatchRun; order?: number; minutesAgo?: number } = {}): Run {
   const steps = expand(tc).steps
   const done = status !== 'queued' && status !== 'running'
   const firstUi = uis.find((u) => u.testCaseId === tc.id)
-  const results = done ? resultsFor(steps, opts.failAt, opts.healAt, firstUi) : []
+  const patterns = patternsFor(tc)
   const started = ago(opts.minutesAgo ?? 5)
+  let results: StepResult[] = []
+  if (done && patterns) {
+    for (const p of patterns) {
+      const own = resultsFor(steps, opts.failPattern === p.index ? opts.failAt : -1, opts.healAt, firstUi).map((r) => ({ ...r, pattern: p.index }))
+      results.push(...own)
+      p.status = own.some((r) => r.status === 'failed') ? 'failed' : own.some((r) => r.status === 'healed') ? 'unresolved' : 'succeeded'
+      p.startedAt = started
+      p.finishedAt = new Date(Date.parse(started) + 3_000 * p.index).toISOString()
+    }
+  } else if (done) results = resultsFor(steps, opts.failAt, opts.healAt, firstUi)
   const run: Run = {
     id: id('run'),
     projectId: tc.projectId,
@@ -288,10 +306,10 @@ function makeRun(tc: TestCase, status: RunStatus, opts: { failAt?: number; healA
     status,
     steps,
     results,
-    log: done ? logFor(results, status) : '',
+    log: done ? logFor(results, status, patterns) : '',
     environment: { browser: 'Chromium 142', device: tc.device, viewport: { ...DEVICES[tc.device].viewport }, baseUrl: ORIGIN },
     range: null,
-    patterns: null,
+    patterns,
     createdAt: started,
     startedAt: status === 'queued' ? null : started,
     finishedAt: done ? new Date(Date.parse(started) + 9_000).toISOString() : null,
@@ -301,22 +319,34 @@ function makeRun(tc: TestCase, status: RunStatus, opts: { failAt?: number; healA
   return run
 }
 
-function logFor(results: StepResult[], status: RunStatus): string {
+function logFor(results: StepResult[], status: RunStatus, patterns?: RunPattern[] | null): string {
   const lines = ['Environment: Cloudflare Browser Run', 'Browser: Chromium 142, viewport 1280x800']
-  for (const r of results) {
-    lines.push(`[${positionLabel(r)}] ${r.sentence}`)
-    if (r.heal) lines.push(`    locator ${r.heal.oldLocator.key}=${r.heal.oldLocator.value} not found; repaired to ${r.heal.newLocator.key}=${r.heal.newLocator.value} (score ${r.heal.score})`)
-    if (r.error) lines.push(`    ${r.error}`)
-    lines.push(`    ${r.status} in ${r.durationMs} ms`)
+  const steps = (own: StepResult[]) => {
+    for (const r of own) {
+      lines.push(`[${positionLabel(r)}] ${r.sentence}`)
+      if (r.heal) lines.push(`    locator ${r.heal.oldLocator.key}=${r.heal.oldLocator.value} not found; repaired to ${r.heal.newLocator.key}=${r.heal.newLocator.value} (score ${r.heal.score})`)
+      if (r.error) lines.push(`    ${r.error}`)
+      lines.push(`    ${r.status} in ${r.durationMs} ms`)
+    }
   }
-  if (status !== 'running' && status !== 'queued') lines.push(`Run ${status}.`)
+  const done = status !== 'running' && status !== 'queued'
+  if (patterns) {
+    // One section per pattern, as the Worker writes it (shared/data.ts).
+    for (const p of patterns) {
+      if (!p.startedAt) continue
+      lines.push(patternLogHeading(p.index), `Data row ${p.index}: ${Object.entries(p.values).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ')}`)
+      steps(results.filter((r) => r.pattern === p.index))
+    }
+    if (done) lines.push(SUMMARY_LOG_HEADING, ...patterns.map((p) => `Pattern ${p.index}: ${p.startedAt ? p.status : 'not run'}`))
+  } else steps(results)
+  if (done) lines.push(`Run ${status}.`)
   return lines.join('\n')
 }
 
 function seed() {
   const p: Project = { id: 'p_demo', name: 'Harbor Books storefront', description: 'Sign-in, catalog and cart flows for the public shop.', baseUrl: ORIGIN, variables: { USER_EMAIL: 'alice@example.com', USER_PASSWORD: 'correct-horse' }, createdAt: ago(6000) }
   projects.push(p, { id: 'p_empty', name: 'Internal admin console with a deliberately very long project name to check truncation in breadcrumbs', description: '', baseUrl: '', variables: {}, createdAt: ago(300) })
-  counters.set(p.id, { tc: 5, batch: 3, shared: 3 })
+  counters.set(p.id, { tc: 6, batch: 3, shared: 3 })
   counters.set('p_empty', { tc: 1, batch: 1, shared: 1 })
 
   const tc1: TestCase = { id: 'tc_signin', projectId: p.id, kind: 'test', data: null, number: 1, name: 'Sign in with a valid account', description: 'Happy path: a registered customer signs in and lands on the catalog.', device: 'desktop', steps: [], createdAt: ago(5000), updatedAt: ago(40), lastRun: null }
@@ -348,21 +378,51 @@ function seed() {
   const tc2: TestCase = { id: 'tc_cart', projectId: p.id, kind: 'test', data: null, number: 2, name: 'Add a book to the cart', description: '', device: 'desktop', steps: [{ id: 'c1', command: 'shared_step', value: sh1.id }, { id: 'c2', command: 'click', target: ref(catalog, 8) }, { id: 'c3', command: 'assert_text_contains', value: 'Cart (1)', target: ref(catalog, 2) }], createdAt: ago(4000), updatedAt: ago(90), lastRun: null }
   const tc3: TestCase = { id: 'tc_new', projectId: p.id, kind: 'test', data: null, number: 3, name: 'New test', description: '', device: 'desktop', steps: [], createdAt: ago(10), updatedAt: ago(10), lastRun: null }
   const tc4: TestCase = { id: 'tc_search', projectId: p.id, kind: 'test', data: null, number: 4, name: 'Search the catalog', description: 'Signs in through the shared step, then searches.', device: 'desktop', steps: [{ id: 'q1', command: 'shared_step', value: sh1.id }, { id: 'q2', command: 'input', value: 'fog', target: ref(catalog, 1) }, { id: 'q3', command: 'press_key', value: 'Enter' }, { id: 'q4', command: 'assert_url_contains', value: '/demo/catalog' }], createdAt: ago(800), updatedAt: ago(70), lastRun: null }
-  cases.push(tc1, tc2, tc3, tc4, sh1, sh2)
+  // A data-driven test case: the sign-in shared step with three accounts; the mock fails a step whose value contains "!fail".
+  const tc5: TestCase = {
+    id: 'tc_accounts',
+    projectId: p.id,
+    kind: 'test',
+    number: 5,
+    name: 'Sign in with several accounts',
+    description: 'Runs once for every row of its data table.',
+    device: 'desktop',
+    data: {
+      columns: ['USER_EMAIL', 'USER_PASSWORD', 'GREETING'],
+      rows: [
+        ['alice@example.com', 'correct-horse', 'Welcome back, Alice'],
+        ['bob@example.com', 'battery-staple', 'Welcome back, Bob !fail'],
+        ['carol@example.com', 'tr0ub4dor', 'Welcome back, Carol'],
+      ],
+    },
+    steps: [
+      { id: 'd1', command: 'shared_step', value: sh1.id },
+      { id: 'd2', command: 'assert_text_equals', value: '${GREETING}', target: ref(catalog, 4) },
+      { id: 'd3', command: 'assert_url_contains', value: '/demo/catalog' },
+    ],
+    createdAt: ago(700),
+    updatedAt: ago(65),
+    lastRun: null,
+  }
+  cases.push(tc1, tc2, tc3, tc4, tc5, sh1, sh2)
 
   makeRun(tc1, 'succeeded', { minutesAgo: 300 })
   makeRun(tc1, 'failed', { failAt: 6, minutesAgo: 120 })
   makeRun(tc2, 'succeeded', { minutesAgo: 200 })
+  // Positions in the expanded list: 0 is the call's marker row, 1-4 the shared step's steps, 5 the greeting.
+  makeRun(tc5, 'failed', { failAt: 5, failPattern: 2, minutesAgo: 64 })
 
   const b1: BatchRun = { id: 'b_1', projectId: p.id, number: 1, status: 'succeeded', trigger: 'api', counts: { total: 2, succeeded: 2, failed: 0, unresolved: 0, aborted: 0 }, createdAt: ago(1500), startedAt: ago(1500), finishedAt: ago(1499) }
   makeRun(tc1, 'succeeded', { batch: b1, order: 1, minutesAgo: 1500 })
   makeRun(tc2, 'succeeded', { batch: b1, order: 2, minutesAgo: 1499 })
-  const b2: BatchRun = { id: 'b_2', projectId: p.id, number: 2, status: 'unresolved', trigger: 'manual', counts: { total: 3, succeeded: 0, failed: 1, unresolved: 2, aborted: 0 }, createdAt: ago(60), startedAt: ago(60), finishedAt: ago(59) }
+  const b2: BatchRun = { id: 'b_2', projectId: p.id, number: 2, status: 'unresolved', trigger: 'manual', counts: { total: 4, succeeded: 0, failed: 1, unresolved: 3, aborted: 0 }, createdAt: ago(60), startedAt: ago(60), finishedAt: ago(59) }
   makeRun(tc1, 'unresolved', { batch: b2, order: 1, healAt: 4, minutesAgo: 60 })
   // Positions in the expanded list: 0 is the call's marker row, 1-4 the shared step's steps.
   makeRun(tc2, 'failed', { batch: b2, order: 2, failAt: 6, minutesAgo: 59 })
   // A repair inside the shared step (its "Sign in" click).
   makeRun(tc4, 'unresolved', { batch: b2, order: 3, healAt: 4, minutesAgo: 58 })
+  // The same repair in each of the three patterns: approving one approves them all.
+  makeRun(tc5, 'unresolved', { batch: b2, order: 4, healAt: 4, minutesAgo: 57 })
   batches.push(b2, b1)
 }
 
@@ -381,13 +441,15 @@ function recount(b: BatchRun) {
 function simulate(run: Run, onDone?: () => void) {
   const positions = positionsOf(run.steps)
   const todo = reportedSteps(run.steps, run.range).map((s) => ({ s, i: run.steps.indexOf(s) }))
+  // A data-driven run goes through its patterns one after the other and goes on after one that failed.
+  const plan = (run.patterns ?? [null]).flatMap((p) => todo.map((item) => ({ ...item, p })))
   let k = 0
   const finish = (status: RunStatus) => {
-    run.status = status
+    run.status = run.patterns ? aggregateStatus(run.patterns.map((p) => p.status)) : status
     run.finishedAt = now()
-    run.log = logFor(run.results, status)
+    run.log = logFor(run.results, run.status, run.patterns)
     const tc = cases.find((c) => c.id === run.testCaseId)
-    if (tc && !run.batchRunId) tc.lastRun = { id: run.id, status, finishedAt: run.finishedAt }
+    if (tc && !run.batchRunId) tc.lastRun = { id: run.id, status: run.status, finishedAt: run.finishedAt }
     onDone?.()
   }
   const tick = () => {
@@ -397,21 +459,29 @@ function simulate(run: Run, onDone?: () => void) {
       run.startedAt = now()
       return void setTimeout(tick, 500)
     }
-    const item = todo[k++]
+    const item = plan[k++]
     if (!item) return finish('succeeded')
-    const { s, i } = item
+    const { s, i, p } = item
+    if (p && p.status === 'queued') Object.assign(p, { status: 'running', startedAt: now() })
     const def = COMMAND_BY_ID[s.command]
     const r: StepResult = { stepId: s.id, ...positions[i], status: 'passed', sentence: stepSentence(s), durationMs: 200 + Math.round(Math.random() * 600) }
+    if (p) r.pattern = p.index
     const onCatalog = s.target ? uis.find((u) => u.id === s.target!.uiId)?.screenshotKey === 'mock-catalog' : /catalog/.test(s.value ?? '')
     if (def.shot) r.screenshotKey = onCatalog ? 'mock-catalog' : 'mock-login'
-    const fail = (s.value ?? '').includes('!fail')
+    // The value as the pattern sees it: a data row can carry the "!fail" that fails a step in the mock.
+    const value = (s.value ?? '').replace(/\$\{(\w+)\}/g, (m, name: string) => p?.values[name] ?? m)
+    const fail = value.includes('!fail')
     if (fail) {
       r.status = 'failed'
       r.error = `AssertionError: the value contained "!fail", which the mock treats as a failing step`
     }
     run.results = [...run.results, r]
-    run.log = logFor(run.results, 'running')
-    if (fail && !s.continueOnFailure) return finish('failed')
+    const stop = fail && !s.continueOnFailure
+    if (p && (stop || plan[k]?.p !== p)) Object.assign(p, { status: stop ? 'failed' : 'succeeded', finishedAt: now() })
+    // The rest of a failed pattern is not run.
+    if (stop && p) while (plan[k]?.p === p) k++
+    run.log = logFor(run.results, 'running', run.patterns)
+    if (stop && !p) return finish('failed')
     setTimeout(tick, 650)
   }
   setTimeout(tick, 600)
@@ -586,6 +656,12 @@ async function handle(method: string, path: string, body: Record<string, unknown
       await sleep(250)
       const nested = tc.kind === 'shared' && Array.isArray(body.steps) ? (body.steps as Step[]).findIndex((s) => s.command === 'shared_step') : -1
       if (nested >= 0) throw new HttpError(400, `Step ${nested + 1}: ${NESTED_SHARED_MESSAGE}`)
+      if (body.data) {
+        const table = body.data as DataTable
+        if (tc.kind === 'shared') throw new HttpError(400, 'A shared step cannot have a data table: it uses the data of the test case that calls it')
+        const problem = validateDataTable(table)[0]
+        if (problem) throw new HttpError(400, `Data: ${describeDataProblem(table, problem)}`)
+      }
       Object.assign(tc, body, { updatedAt: now() })
       return withUsedBy(tc)
     }
@@ -639,6 +715,8 @@ async function handle(method: string, path: string, body: Record<string, unknown
       if (problem) throw new HttpError(400, `Step ${tc.steps.findIndex((s) => s.id === problem.stepId) + 1}: ${problem.message}`)
       const run = makeRun(tc, 'queued', { minutesAgo: 0 })
       run.range = (body.range as Run['range']) ?? null
+      // A partial run of a data-driven test case uses one data row.
+      if (run.range && run.patterns) run.patterns = patternsFor(tc, [Math.min(Number(body.row) || 1, run.patterns.length)])
       tc.lastRun = { id: run.id, status: 'queued', finishedAt: null }
       simulate(run)
       return run
@@ -652,13 +730,16 @@ async function handle(method: string, path: string, body: Record<string, unknown
       if (run.status === 'queued' || run.status === 'running') {
         run.status = 'aborted'
         run.finishedAt = now()
-        run.log = logFor(run.results, 'aborted')
+        for (const p of run.patterns ?? []) if (p.status === 'queued' || p.status === 'running') p.status = 'aborted'
+        run.log = logFor(run.results, 'aborted', run.patterns)
       }
       return run
     }
     case 'POST runs/:/heals/:': {
       const run = need(runs.find((r) => r.id === b), 'Run')
-      const res = need(run.results.find((r) => r.stepId === d && r.heal), 'Heal')
+      // In a data-driven run the step has a result in every pattern: `pattern` says which one is decided.
+      if (run.patterns && !run.patterns.some((p) => p.index === body.pattern)) throw new HttpError(400, 'pattern must be the number of one of the data rows of this run')
+      const res = need(run.results.find((r) => r.stepId === d && r.heal && r.pattern === (run.patterns ? body.pattern : undefined)), 'Heal')
       if (run.status === 'queued' || run.status === 'running') throw new HttpError(409, 'Wait for the run to finish before reviewing its repairs')
       if (res.heal!.state !== 'unresolved') throw new HttpError(409, `This repair was already ${res.heal!.state}`)
       res.heal!.state = body.action === 'approve' ? 'approved' : 'rejected'
@@ -669,11 +750,16 @@ async function handle(method: string, path: string, body: Record<string, unknown
         const t = healed.target
         owner.steps = owner.steps.map((s) => (s.target?.uiId === t.uiId && s.target.elementId === t.elementId ? { ...s, target: { ...s.target, locator: res.heal!.newLocator, candidates: res.heal!.newCandidates } } : s))
         owner.updatedAt = now()
+        // Saved once: the same repair of the same element in the other patterns is approved with it.
+        const same = new Set(run.steps.filter((s) => s.target?.uiId === t.uiId && s.target.elementId === t.elementId).map((s) => s.id))
+        for (const other of run.results) if (run.patterns && other.heal?.state === 'unresolved' && same.has(other.stepId) && other.heal.newLocator.value === res.heal!.newLocator.value) other.heal.state = 'approved'
       }
-      if (run.status === 'unresolved') {
-        if (run.results.some((r) => r.heal?.state === 'rejected' || r.status === 'failed')) run.status = 'failed'
-        else if (!run.results.some((r) => r.heal?.state === 'unresolved')) run.status = 'succeeded'
-      }
+      const reviewed = (status: RunStatus, own: StepResult[]): RunStatus =>
+        status !== 'unresolved' ? status : own.some((r) => r.heal?.state === 'rejected' || r.status === 'failed') ? 'failed' : own.some((r) => r.heal?.state === 'unresolved') ? 'unresolved' : 'succeeded'
+      if (run.patterns) {
+        for (const p of run.patterns) p.status = reviewed(p.status, run.results.filter((r) => r.pattern === p.index))
+        if (run.status === 'unresolved') run.status = aggregateStatus(run.patterns.map((p) => p.status))
+      } else run.status = reviewed(run.status, run.results)
       const batch = batches.find((x) => x.id === run.batchRunId)
       if (batch) recount(batch)
       return run

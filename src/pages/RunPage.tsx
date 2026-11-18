@@ -1,14 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, ChevronLeft, ChevronRight, ImageOff, Pencil, Square, X } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { sharedLabel, stepSentence } from '../../shared/commands'
+import { logOfPattern, patternSummary } from '../../shared/data'
 import { deviceOf } from '../../shared/devices'
 import { flatRange, positionLabel, positionsOf, reportedSteps, topLevelCount } from '../../shared/expand'
-import { locatorToString, type Box, type HealProposal, type Run, type StepResult, type Ui } from '../../shared/types'
+import { locatorToString, type Box, type HealProposal, type Run, type RunPattern, type RunStatus, type StepResult, type Ui } from '../../shared/types'
 import { api, qk, shotUrl } from '../api'
-import { Button, DeviceChip, Dialog, ErrorState, IconButton, Loading, Shell, Spinner, StatusIcon, TableWrap, Tabs } from '../components/ui'
+import { Button, DeviceChip, Dialog, ErrorState, IconButton, Loading, onTablistKeyDown, Shell, Spinner, StatusIcon, TableWrap, Tabs } from '../components/ui'
 import { cx, dateTime, duration, isTerminal, ms, plural, STATUS_LABEL } from '../lib/format'
 import { useModalDialog, useTick } from '../lib/hooks'
 
@@ -30,14 +31,28 @@ export function RunPage() {
   const [lightbox, setLightbox] = useState<number | null>(null)
   const live = !!run.data && !isTerminal(run.data.status)
   useTick(live)
+  const [params, setParams] = useSearchParams()
 
   if (run.isPending) return <Shell><Loading /></Shell>
   if (run.isError) return <Shell><ErrorState error={run.error} onRetry={() => run.refetch()} /></Shell>
   const r = run.data
-  const failures = r.results.filter((x) => x.status === 'failed')
-  const heals = r.results.filter((x) => x.heal)
-  const shots = r.results.filter((x) => x.screenshotKey)
-  const healResult = healStep ? r.results.find((x) => x.stepId === healStep && x.heal) : undefined
+  // A data-driven run is read one pattern (data row) at a time: the one in the address, else the first that
+  // failed, else the first that waits for a review, else the one that is running, else the first.
+  const patterns = r.patterns
+  const asked = Number(params.get('pattern'))
+  const pattern = patterns
+    ? (patterns.find((p) => p.index === asked) ??
+      patterns.find((p) => p.status === 'failed') ??
+      patterns.find((p) => p.status === 'unresolved') ??
+      patterns.find((p) => p.status === 'running') ??
+      patterns[0])
+    : undefined
+  // What the tabs show: the run itself, or the selected pattern as if it were a run of its own.
+  const view: Run = pattern ? { ...r, status: patternStatus(r, pattern), results: r.results.filter((x) => x.pattern === pattern.index), log: logOfPattern(r.log, pattern.index) } : r
+  const failures = view.results.filter((x) => x.status === 'failed')
+  const heals = view.results.filter((x) => x.heal)
+  const shots = view.results.filter((x) => x.screenshotKey)
+  const healResult = healStep ? view.results.find((x) => x.stepId === healStep && x.heal) : undefined
   const what = r.kind === 'shared' ? 'shared step' : 'test case'
 
   const crumbs = [
@@ -69,6 +84,7 @@ export function RunPage() {
               </span>
               {r.range && <span className="chip num">Steps {r.range.from === r.range.to ? r.range.from : `${r.range.from}–${r.range.to}`}</span>}
               {r.batchRunId && <span className="chip">Batch run, position {r.order}</span>}
+              {patterns && <span className="chip num">{patterns.length === 1 ? `Data row ${patterns[0].index}` : isTerminal(r.status) ? patternSummary(patterns) : `${patterns.length} patterns`}</span>}
             </div>
           </div>
         </div>
@@ -84,6 +100,24 @@ export function RunPage() {
           </Link>
         </div>
       </div>
+
+      {patterns && pattern && (
+        <PatternBar
+          run={r}
+          current={pattern.index}
+          onSelect={(index) => {
+            setHealStep(null)
+            setLightbox(null)
+            setParams(
+              (prev) => {
+                prev.set('pattern', String(index))
+                return prev
+              },
+              { replace: true },
+            )
+          }}
+        />
+      )}
 
       {(failures.length > 0 || heals.length > 0) && (
         <div className="messages">
@@ -125,7 +159,21 @@ export function RunPage() {
 
       {tab === 'shots' &&
         (shots.length === 0 ? (
-          <div className="state">{live ? <><Spinner /> Waiting for the first step…</> : 'No screenshots were taken in this run.'}</div>
+          <div className="state">
+            {!isTerminal(view.status) ? (
+              pattern && view.status === 'queued' && r.status === 'running' ? (
+                'This pattern runs after the ones before it.'
+              ) : (
+                <>
+                  <Spinner /> Waiting for the first step…
+                </>
+              )
+            ) : pattern && view.results.length === 0 ? (
+              'This pattern was not run.'
+            ) : (
+              'No screenshots were taken in this run.'
+            )}
+          </div>
         ) : (
           <div className="shots">
             {shots.map((s, i) => (
@@ -149,7 +197,7 @@ export function RunPage() {
 
       {tab === 'log' && (
         <LogTab
-          run={r}
+          run={view}
           live={live}
           onOpenShot={(stepId) => {
             const i = shots.findIndex((x) => x.stepId === stepId)
@@ -157,12 +205,66 @@ export function RunPage() {
           }}
         />
       )}
-      {tab === 'info' && <InfoTab run={r} />}
+      {tab === 'info' && <InfoTab run={r} view={view} pattern={pattern} />}
       </Tabs>
 
       {lightbox != null && shots[lightbox] && <Lightbox shots={shots} index={lightbox} onIndex={setLightbox} onClose={() => setLightbox(null)} />}
       {healResult && <HealDialog run={r} result={healResult} live={live} onClose={() => setHealStep(null)} />}
     </Shell>
+  )
+}
+
+/**
+ * The status a pattern is shown with. A pattern that is still waiting or running on a run that has
+ * finished was never run to its end (the run was aborted, timed out or crashed): it takes the run's status.
+ */
+function patternStatus(run: Run, p: RunPattern): RunStatus {
+  return isTerminal(run.status) && !isTerminal(p.status) ? (run.status === 'aborted' ? 'aborted' : 'failed') : p.status
+}
+
+/** The patterns of a data-driven run, as tabs: status, row number and the first values of the row. */
+function PatternBar({ run, current, onSelect }: { run: Run; current: number; onSelect: (index: number) => void }) {
+  const patterns = run.patterns ?? []
+  // The row of tabs scrolls when there are many: keep the selected one in view (it may be chosen for the reader, e.g. the first failure).
+  const strip = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    strip.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [current])
+  return (
+    <div className="patterns">
+      <div className="patterns-tabs" ref={strip} role="tablist" aria-label="Patterns (data rows) of this run" onKeyDown={onTablistKeyDown}>
+        {patterns.map((p) => {
+          const status = patternStatus(run, p)
+          const values = Object.entries(p.values)
+          const notRun = isTerminal(run.status) && !p.startedAt
+          return (
+            <button
+              type="button"
+              role="tab"
+              key={p.index}
+              aria-selected={p.index === current}
+              tabIndex={p.index === current ? 0 : -1}
+              className={cx('pattern', p.index === current && 'is-active')}
+              title={values.map(([k, v]) => `${k} = ${v}`).join('\n')}
+              onClick={() => onSelect(p.index)}
+            >
+              <StatusIcon status={status} size={16} />
+              <span className="pattern-n num">
+                Pattern {p.index}
+                <span className="sr-only">, {notRun ? 'not run' : STATUS_LABEL[status]}</span>
+              </span>
+              <span className="pattern-values">
+                {values
+                  .slice(0, 2)
+                  .map(([, v]) => v || '(empty)')
+                  .join(' · ')}
+                {values.length > 2 && ' …'}
+              </span>
+            </button>
+          )
+        })}
+      </div>
+    </div>
   )
 }
 
@@ -279,8 +381,16 @@ function LogTab({ run, live, onOpenShot }: { run: Run; live: boolean; onOpenShot
   )
 }
 
-function InfoTab({ run }: { run: Run }) {
-  const total = run.results.reduce((n, x) => n + x.durationMs, 0)
+function InfoTab({ run, view, pattern }: { run: Run; view: Run; pattern?: RunPattern }) {
+  const total = view.results.reduce((n, x) => n + x.durationMs, 0)
+  const patternRows: [string, React.ReactNode][] =
+    run.patterns && pattern
+      ? [
+          ['Patterns', run.patterns.length === 1 ? `Data row ${pattern.index} only (a partial run uses one row)` : `${run.patterns.length} data rows, run one after the other, each in a fresh browser`],
+          [`Pattern ${pattern.index}`, `${STATUS_LABEL[view.status]}${pattern.startedAt ? `, ${duration(pattern.startedAt, pattern.finishedAt)}` : ', not run'}`],
+          ...Object.entries(pattern.values).map(([k, v]) => [`\${${k}}`, v === '' ? '(empty)' : v] as [string, React.ReactNode]),
+        ]
+      : []
   const rows: [string, React.ReactNode][] = [
     ['Status', STATUS_LABEL[run.status]],
     [run.kind === 'shared' ? 'Shared step' : 'Test case', `${run.testCaseName} (${run.kind === 'shared' ? 'S' : '#'}${run.testCaseNumber})`],
@@ -290,13 +400,14 @@ function InfoTab({ run }: { run: Run }) {
     ['Base URL', run.environment.baseUrl || '–'],
     ['Step range', run.range ? `${run.range.from}–${run.range.to} of ${topLevelCount(run.steps)}` : `All ${topLevelCount(run.steps)} steps`],
     ...(run.steps.some((s) => s.call) ? ([['Shared steps', `${run.steps.filter((s) => s.call).length} called, ${run.steps.filter((s) => s.origin).length} steps inside them (as they were when the run was created)`]] as [string, React.ReactNode][]) : []),
+    ...patternRows,
     ['Self-healing', run.batchRunId ? 'On (batch run)' : 'Off (single run)'],
     ['Queued', dateTime(run.createdAt)],
     ['Started', dateTime(run.startedAt)],
     ['Finished', dateTime(run.finishedAt)],
     ['Duration', duration(run.startedAt, run.finishedAt)],
     ['Time in steps', ms(total)],
-    ['Steps reported', `${run.results.length}`],
+    ['Steps reported', `${view.results.length}${pattern && run.patterns && run.patterns.length > 1 ? ` in this pattern, ${run.results.length} in the run` : ''}`],
     ['Run id', <code key="id">{run.id}</code>],
   ]
   return (
@@ -406,7 +517,7 @@ function HealDialog({ run, result, live, onClose }: { run: Run; result: StepResu
   const uis = useQuery({ queryKey: qk.uis(ownerId), queryFn: () => api.uis(ownerId), retry: false })
   const before: Ui | undefined = uis.data?.find((u) => u.id === heal.before.uiId)
   const decide = useMutation({
-    mutationFn: (action: 'approve' | 'reject') => api.heal(run.id, result.stepId, action),
+    mutationFn: (action: 'approve' | 'reject') => api.heal(run.id, result.stepId, action, result.pattern),
     onSuccess: (r) => {
       qc.setQueryData(qk.run(run.id), r)
       void qc.invalidateQueries({ queryKey: qk.testCase(ownerId) })
@@ -421,7 +532,7 @@ function HealDialog({ run, result, live, onClose }: { run: Run; result: StepResu
 
   return (
     <Dialog
-      title={`Self-healing result, step ${positionLabel(result)}`}
+      title={`Self-healing result, step ${positionLabel(result)}${result.pattern ? `, pattern ${result.pattern}` : ''}`}
       onClose={onClose}
       width={920}
       footer={
@@ -438,7 +549,7 @@ function HealDialog({ run, result, live, onClose }: { run: Run; result: StepResu
               {origin
                 ? `This step belongs to shared step ${sharedLabel(origin.shared)}. Approving saves the new locator there, for every test case that calls it, and to the element on its captured screen (the screenshot is not retaken).`
                 : 'Approving saves the new locator to the step and to the element on its captured screen (the screenshot is not retaken).'}{' '}
-              Rejecting marks this run as failed and changes nothing.
+              {result.pattern && (run.patterns?.length ?? 0) > 1 ? 'The same repair in the other patterns of this run is approved with it. Rejecting marks this pattern, and so the run, as failed and changes nothing.' : 'Rejecting marks this run as failed and changes nothing.'}
             </span>
             <Button variant="danger" busy={decide.isPending && decide.variables === 'reject'} disabled={decide.isPending} onClick={() => decide.mutate('reject')}>
               Reject

@@ -3,10 +3,12 @@ import { ChevronRight, Pencil } from 'lucide-react'
 import { useMemo } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { stepSentence } from '../../shared/commands'
+import { patternSummary } from '../../shared/data'
 import type { TestCase } from '../../shared/types'
 import { sharedLookup } from '../editor/model'
 import { api, qk } from '../api'
-import { DeviceChip, Empty, ErrorState, InlineEdit, Loading, Shell, StatusIcon, TableWrap } from '../components/ui'
+import { DataGrid, useDataDraft } from '../components/DataGrid'
+import { Button, DeviceChip, Empty, ErrorState, InlineEdit, Loading, Shell, StatusIcon, TableWrap } from '../components/ui'
 import { dateTime, duration, isTerminal, plural, STATUS_LABEL } from '../lib/format'
 
 export function TestCasePage() {
@@ -149,6 +151,9 @@ export function TestCasePage() {
                           {STATUS_LABEL[r.status]}
                         </Link>
                         {r.range && <span className="chip chip-quiet">Steps {r.range.from === r.range.to ? r.range.from : `${r.range.from}–${r.range.to}`}</span>}
+                        {r.patterns && (
+                          <span className="chip chip-quiet">{r.patterns.length === 1 ? `Data row ${r.patterns[0].index}` : isTerminal(r.status) ? patternSummary(r.patterns) : `${r.patterns.length} patterns`}</span>
+                        )}
                       </td>
                       <td className="col-fit num" data-label="Started">
                         {dateTime(r.startedAt ?? r.createdAt)}
@@ -167,6 +172,43 @@ export function TestCasePage() {
           )}
         </section>
       </div>
+      {!isShared && <DataPanel testCase={t} />}
     </Shell>
+  )
+}
+
+/** The data table of the test case. Saved explicitly: a half-typed table should not change what the next run does. */
+function DataPanel({ testCase }: { testCase: TestCase }) {
+  const { draft, setDraft, dirty, problems, save, discard } = useDataDraft(testCase)
+  return (
+    <form
+      className="panel data-panel"
+      id="data"
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (dirty && problems.length === 0) save.mutate()
+      }}
+    >
+      <h2>Data</h2>
+      <p className="muted">
+        With data, a run executes the steps once for every row (a pattern), one after the other, each in a fresh browser. A step reads a cell as{' '}
+        <code>{'${COLUMN}'}</code>; a column wins over a project variable of the same name.
+      </p>
+      <DataGrid value={draft} onChange={setDraft} disabled={save.isPending} />
+      {save.isError && (
+        <p className="form-error" role="alert">
+          {save.error.message}
+        </p>
+      )}
+      <div className="panel-foot">
+        <Button type="submit" variant="primary" busy={save.isPending} disabled={!dirty || problems.length > 0}>
+          Save data
+        </Button>
+        <Button disabled={!dirty || save.isPending} onClick={discard}>
+          Discard changes
+        </Button>
+        {dirty && <span className="muted">Unsaved changes</span>}
+      </div>
+    </form>
   )
 }

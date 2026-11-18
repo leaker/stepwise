@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronRight, Square } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
+import { patternSummary } from '../../shared/data'
 import type { RunStatus } from '../../shared/types'
 import { api, qk } from '../api'
 import { Button, DeviceChip, Empty, ErrorState, Loading, Shell, StatusIcon, TableWrap } from '../components/ui'
@@ -118,6 +119,12 @@ export function BatchRunPage() {
                       </Link>
                       <span className="hash">#{r.testCaseNumber}</span>
                     </div>
+                    {r.patterns && (
+                      // A data-driven test case is one line of the batch, whatever its number of data rows.
+                      <div className="cell-sub muted num">
+                        {isTerminal(r.status) ? patternSummary(r.patterns) : `${r.patterns.filter((p) => isTerminal(p.status)).length} of ${r.patterns.length} patterns done`}
+                      </div>
+                    )}
                   </th>
                   <td className="col-fit" data-label="Device">
                     <DeviceChip device={r.environment.device} />

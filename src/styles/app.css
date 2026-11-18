@@ -932,3 +932,182 @@ button.message:active {
   align-self: center;
   font-weight: 400;
 }
+
+/* ---------- Data table (data-driven tests) ---------- */
+.data-panel {
+  margin-top: 16px;
+}
+.data {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  /* Grid items may not grow with the table: it scrolls inside .data-scroll instead. */
+  min-width: 0;
+}
+.data-intro {
+  margin: 0;
+}
+.data-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.data-count {
+  margin-inline-start: auto;
+  font-size: 0.8125rem;
+}
+/* The only place that scrolls sideways when the table is wider than the page. */
+.data-scroll {
+  overflow-x: auto;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--surface-2);
+}
+.data-grid {
+  border-collapse: separate;
+  border-spacing: 0;
+  /* Room for the focus halo of the fields at the edges. */
+  padding: 4px;
+}
+.data-grid th,
+.data-grid td {
+  padding: 3px;
+  font-weight: 400;
+}
+.data-grid thead th {
+  padding-bottom: 6px;
+}
+.data-grid td .input,
+.data-head .input {
+  min-width: 9.5rem;
+}
+.data-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.data-head .input {
+  font-weight: 500;
+}
+.data-n {
+  min-width: 2rem;
+  padding-inline: 6px 4px;
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+  text-align: end;
+  /* The row number stays in view while the cells scroll under it. */
+  position: sticky;
+  inset-inline-start: 0;
+  background: var(--surface-2);
+  z-index: 1;
+}
+.data-end {
+  width: 1%;
+}
+.data-norows {
+  margin: 0;
+  padding: 4px 12px 12px;
+  font-size: 0.8125rem;
+}
+.data-empty {
+  padding: 18px 16px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-card);
+  background: var(--surface-2);
+}
+.data-empty:focus-visible {
+  outline: none;
+  border-style: solid;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft);
+}
+.data-empty p {
+  margin: 0;
+}
+.data-empty p + p {
+  margin-top: 4px;
+  font-size: 0.8125rem;
+}
+.data-problems {
+  margin: 0;
+  padding-inline-start: 1.1rem;
+}
+.cell-sub {
+  margin-top: 2px;
+  font-size: 0.78125rem;
+  font-weight: 400;
+}
+
+/* ---------- Patterns of a data-driven run ---------- */
+.patterns {
+  margin-block: 16px 14px;
+  /* The row of patterns scrolls by itself; the page never does. */
+  min-width: 0;
+}
+.patterns-tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  /* Room for the focus ring inside the scroll container. */
+  padding: 4px;
+  margin: -4px;
+  scrollbar-width: thin;
+}
+.pattern {
+  /* Contains the visually hidden status text: otherwise the ones of the tabs scrolled out of view widen the page. */
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  max-width: 19rem;
+  min-height: max(34px, var(--target-size));
+  padding: 4px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--surface);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .pattern:hover {
+    border-color: var(--line-strong);
+    color: var(--ink);
+  }
+}
+.pattern:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+}
+.pattern.is-active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+.pattern.is-active:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--accent), var(--focus);
+}
+.pattern-n {
+  font-weight: 500;
+  white-space: nowrap;
+}
+.pattern-values {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-3);
+}
+.pattern.is-active .pattern-values {
+  color: var(--ink-2);
+}
+@media (forced-colors: active) {
+  .pattern.is-active {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}

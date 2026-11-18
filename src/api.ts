@@ -4,6 +4,7 @@ import type {
   AssistantStatus,
   BatchRun,
   CaptureRequest,
+  DataTable,
   DeviceId,
   CaptureResponse,
   Project,
@@ -82,7 +83,7 @@ export const api = {
   createTestCase: (pid: string, b: { name?: string; description?: string } = {}) =>
     post<TestCase>(`/projects/${pid}/test-cases`, b),
   testCase: (tid: string) => get<TestCase>(`/test-cases/${tid}`),
-  updateTestCase: (tid: string, b: { name?: string; description?: string; device?: DeviceId; steps?: Step[] }) =>
+  updateTestCase: (tid: string, b: { name?: string; description?: string; device?: DeviceId; steps?: Step[]; data?: DataTable | null }) =>
     patch<TestCase>(`/test-cases/${tid}`, b),
   deleteTestCase: (tid: string) => del<{ ok: true }>(`/test-cases/${tid}`),
   duplicateTestCase: (tid: string) => post<TestCase>(`/test-cases/${tid}/duplicate`),
@@ -97,14 +98,16 @@ export const api = {
   updateUi: (uid: string, b: { name?: string; elements?: UiElement[] }) => patch<Ui>(`/uis/${uid}`, b),
   deleteUi: (uid: string) => del<{ ok: true }>(`/uis/${uid}`),
 
-  startRun: (tid: string, range?: { from: number; to: number } | null) =>
-    post<Run>(`/test-cases/${tid}/runs`, range ? { range } : {}),
+  /** `row`: the data row a partial run of a data-driven test case uses (a full run executes every row). */
+  startRun: (tid: string, range?: { from: number; to: number } | null, row?: number) =>
+    post<Run>(`/test-cases/${tid}/runs`, range ? { range, ...(row ? { row } : {}) } : {}),
   runs: (tid: string) => get<RunSummary[]>(`/test-cases/${tid}/runs`),
   run: (rid: string) => get<Run>(`/runs/${rid}`),
   abortRun: (rid: string) => post<Run>(`/runs/${rid}/abort`),
-  heal: (rid: string, stepId: string, action: 'approve' | 'reject') =>
+  /** `pattern`: required for a data-driven run, where a step has a result in every pattern. */
+  heal: (rid: string, stepId: string, action: 'approve' | 'reject', pattern?: number) =>
     // A step that came from a shared step has a compound id; any step id is whatever the client that saved it chose.
-    post<Run>(`/runs/${rid}/heals/${encodeURIComponent(stepId)}`, { action }),
+    post<Run>(`/runs/${rid}/heals/${encodeURIComponent(stepId)}`, { action, ...(pattern ? { pattern } : {}) }),
 
   batchRuns: (pid: string) => get<BatchRun[]>(`/projects/${pid}/batch-runs`),
   startBatchRun: (pid: string, testCaseIds?: string[]) =>

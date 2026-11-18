@@ -1,12 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Check, ChevronDown, CloudAlert, ListPlus, Play, Plus, Redo2, Sparkles, Square, Undo2 } from 'lucide-react'
+import { ArrowLeft, Check, ChevronDown, CloudAlert, ListPlus, Table2, Play, Plus, Redo2, Sparkles, Square, Undo2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Link, useParams } from 'react-router-dom'
 import { COMMAND_BY_ID, DEFAULT_COMMAND, sharedLabel, stepSentence } from '../../shared/commands'
+import { hasPatterns } from '../../shared/data'
 import { DEVICE_IDS, DEVICES, deviceOf } from '../../shared/devices'
 import { positionLabel, reportedSteps } from '../../shared/expand'
-import type { AssistantSession, CommandId, DeviceId, Step, StepResult, Ui, UiElement } from '../../shared/types'
+import type { AssistantSession, CommandId, DeviceId, Step, StepResult, TestCase, Ui, UiElement } from '../../shared/types'
 import { api, qk } from '../api'
+import { DataGrid, useDataDraft } from '../components/DataGrid'
 import { Button, Confirm, DeviceIcon, Dialog, ErrorState, Field, IconButton, Loading, MenuButton, Spinner, StatusIcon, toast, toastError } from '../components/ui'
 import { cx, isTerminal, plural, STATUS_LABEL, uid } from '../lib/format'
 import { AssistantPanel } from './AssistantPanel'
@@ -306,10 +309,15 @@ function EditorInner({ tid }: { tid: string }) {
     () => stepErrors(steps, { lookup: sharedQuery.data ? shared : undefined, projectId: pid ?? '', nested: isShared }),
     [steps, shared, sharedQuery.data, pid, isShared],
   )
+  // ----- data -----
+  // A data-driven test case: a full run executes every data row; a partial run and a capture use one of them.
+  const table = tc.data && hasPatterns(tc.data.data) ? tc.data.data : null
+  const [dataRow, setDataRow] = useState(1)
+  const row = table ? Math.min(dataRow, table.rows.length) : undefined
   const start = useMutation({
     mutationFn: async (range: { from: number; to: number } | null) => {
       if (!(await flush())) throw new Error('The steps could not be saved, so the run was not started.')
-      return api.startRun(tid, range)
+      return api.startRun(tid, range, row)
     },
     onSuccess: (r) => {
       qc.setQueryData(qk.run(r.id), r)
@@ -319,7 +327,18 @@ function EditorInner({ tid }: { tid: string }) {
   const abort = useMutation({ mutationFn: () => api.abortRun(runId!), onSuccess: (r) => qc.setQueryData(qk.run(r.id), r) })
   const runData = runId ? run.data : undefined
   const running = start.isPending || (!!runData && !isTerminal(runData.status))
-  const reported = useMemo(() => new Map<string, StepResult>((runData?.results ?? []).map((r) => [r.stepId, r])), [runData?.results])
+  // The step list shows one pattern of a data-driven run: the one that is running, afterwards the first that
+  // did not pass (the run page has them all).
+  const shownPattern = useMemo(() => {
+    const patterns = runData?.patterns
+    if (!patterns) return undefined
+    const live = !isTerminal(runData.status)
+    return ((live && patterns.find((p) => p.status === 'running')) || patterns.find((p) => isTerminal(p.status) && p.status !== 'succeeded') || (live && patterns.findLast((p) => isTerminal(p.status))) || patterns[0]).index
+  }, [runData?.patterns, runData?.status])
+  const reported = useMemo(
+    () => new Map<string, StepResult>((runData?.results ?? []).filter((r) => r.pattern === shownPattern).map((r) => [r.stepId, r])),
+    [runData?.results, shownPattern],
+  )
   // A row only shows a result while the step is still what the run executed; an edited step has not been run.
   const results = useMemo(() => {
     const ran = new Map((runData?.steps ?? []).map((s) => [s.id, s]))
@@ -354,7 +373,7 @@ function EditorInner({ tid }: { tid: string }) {
     if (!finished) return
     void qc.invalidateQueries({ queryKey: qk.runs(tid) })
     void qc.invalidateQueries({ queryKey: qk.testCase(tid), refetchType: 'none' })
-    const failed = finished.results.find((r) => r.status === 'failed')
+    const failed = finished.results.find((r) => r.status === 'failed' && r.pattern === shownPattern)
     if (failed) setSelectedId(ownerOf(failed.stepId))
   }, [finished?.id, finished?.status]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -510,7 +529,7 @@ function EditorInner({ tid }: { tid: string }) {
   const capture = useMutation({
     mutationFn: async (req: { afterStepId: string } | { url: string }) => {
       if (!(await flush())) throw new Error('The steps could not be saved, so nothing was captured.')
-      return api.capture(tid, req)
+      return api.capture(tid, 'afterStepId' in req && row ? { ...req, row } : req)
     },
     onSuccess: (res) => {
       qc.setQueryData<Ui[]>(qk.uis(tid), (old) => [...(old ?? []).filter((u) => u.id !== res.ui.id), res.ui])
@@ -736,6 +755,23 @@ function EditorInner({ tid }: { tid: string }) {
           {locked ? <Spinner size={13} /> : <Sparkles size={14} />}
           <span>Assistant</span>
         </button>
+        {!isShared && <DataControl testCase={t} />}
+        {table && table.rows.length > 1 && (
+          <select
+            className="ed-row"
+            aria-label="Data row for partial runs and captures"
+            title="The data row that “Run up to this step”, “Run only this step” and captures use. A full run executes every row."
+            value={row}
+            disabled={running}
+            onChange={(e) => setDataRow(Number(e.target.value))}
+          >
+            {table.rows.map((_, i) => (
+              <option key={i} value={i + 1}>
+                Row {i + 1}
+              </option>
+            ))}
+          </select>
+        )}
         <span className="ed-gap" />
         <div className="ed-run" aria-live="polite">
           {runData ? (
@@ -744,9 +780,15 @@ function EditorInner({ tid }: { tid: string }) {
                 <StatusIcon status={runData.status} size={16} />
                 {STATUS_LABEL[runData.status]}
                 {runData.range && <span className="ed-run-range num">steps {runData.range.from === runData.range.to ? runData.range.from : `${runData.range.from}–${runData.range.to}`}</span>}
+                {runData.patterns && runData.patterns.length > 1 && shownPattern && (
+                  <span className="ed-run-range num">
+                    pattern {shownPattern}/{runData.patterns.length}
+                  </span>
+                )}
+                {runData.patterns?.length === 1 && <span className="ed-run-range num">row {runData.patterns[0].index}</span>}
                 {!isTerminal(runData.status) && runData.steps.length > 0 && (
                   <span className="ed-run-range num">
-                    {runData.results.length} / {expected.length}
+                    {reported.size} / {expected.length}
                   </span>
                 )}
               </span>
@@ -775,7 +817,7 @@ function EditorInner({ tid }: { tid: string }) {
             Abort
           </Button>
         ) : (
-          <Button className="ed-run-btn" variant="primary" icon={<Play size={14} />} busy={start.isPending} title={blocked ?? 'Run every step in a fresh cloud browser'} aria-disabled={!!blocked} onClick={() => startRun(null)}>
+          <Button className="ed-run-btn" variant="primary" icon={<Play size={14} />} busy={start.isPending} title={blocked ?? (table ? `Run every step once for each of the ${table.rows.length} data rows, each in a fresh cloud browser` : 'Run every step in a fresh cloud browser')} aria-disabled={!!blocked} onClick={() => startRun(null)}>
             {finished ? 'Run again' : 'Run'}
           </Button>
         )}
@@ -1001,6 +1043,67 @@ function callResult(call: Step, inside: StepResult[] | undefined): StepResult | 
     durationMs: inside.reduce((n, r) => n + r.durationMs, 0),
     ...(failed ? { error: `Step ${positionLabel(failed)}: ${failed.error ?? 'failed'}` } : {}),
   }
+}
+
+/**
+ * The Data button of the top bar and its dialog: the data table, edited without leaving the editor. It is
+ * saved by itself (it is not part of the step history). The draft lives here, not in the dialog, so a
+ * dialog dismissed by accident still has the unsaved table when it is opened again.
+ */
+function DataControl({ testCase }: { testCase: TestCase }) {
+  const [open, setOpen] = useState(false)
+  const { draft, setDraft, dirty, problems, save, discard } = useDataDraft(testCase)
+  const rows = hasPatterns(testCase.data) ? testCase.data.rows.length : 0
+  return (
+    <>
+      <button type="button" className="ed-device ed-data-toggle" title="Data table: the test case runs once for every row" onClick={() => setOpen(true)}>
+        <Table2 size={14} />
+        <span>
+          {rows ? `Data (${plural(rows, 'row')})` : 'Data'}
+          {dirty && !open && <span className="ed-data-dirty"> · unsaved</span>}
+        </span>
+      </button>
+      {/* In the body, not in the top bar: the bar restyles the buttons and focus rings inside it. */}
+      {open &&
+        createPortal(
+        <Dialog
+          title="Data"
+          width={920}
+          onClose={() => !save.isPending && setOpen(false)}
+          footer={
+            <>
+              {save.isError ? (
+                <span className="form-error heal-foot-note" role="alert">
+                  {save.error.message}
+                </span>
+              ) : (
+                <span className="muted heal-foot-note">{dirty ? 'Unsaved changes' : ''}</span>
+              )}
+              <Button
+                disabled={save.isPending}
+                onClick={() => {
+                  discard()
+                  setOpen(false)
+                }}
+              >
+                {dirty ? 'Discard changes' : 'Close'}
+              </Button>
+              <Button variant="primary" busy={save.isPending} disabled={!dirty || problems.length > 0} onClick={() => save.mutate(undefined, { onSuccess: () => setOpen(false) })}>
+                Save data
+              </Button>
+            </>
+          }
+        >
+          <p className="muted data-intro">
+            With data, a run executes the steps once for every row, each in a fresh browser, and a step reads a cell as <code>{'${COLUMN}'}</code>. “Run up to
+            this step”, “Run only this step” and captures use one row; with more than one row it is chosen next to this button.
+          </p>
+          <DataGrid value={draft} onChange={setDraft} disabled={save.isPending} />
+        </Dialog>,
+          document.body,
+        )}
+    </>
+  )
 }
 
 function ExtractDialog({ count, busy, onSubmit, onClose }: { count: number; busy: boolean; onSubmit: (name: string) => void; onClose: () => void }) {
