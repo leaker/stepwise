@@ -11,6 +11,9 @@ affiliated with, endorsed by, or derived from the code of any such product.
 ## Features
 
 - **Projects and test cases** - numbered test cases per project, a base URL and project-wide variables.
+  A URL without a scheme (in *Navigate*, *Assert URL equals* and the capture dialog) is appended to the
+  base URL, with or without a leading slash: with the base URL `https://example.com/app`, both `login`
+  and `/login` are `https://example.com/app/login`.
 - **Screen capture** - opens a URL (or replays the test case up to a chosen step) in a real browser and
   stores a full-page screenshot together with the UI elements detected on it.
 - **Steps without code** - a step is a command (click, input, select, assertions, waits, variables,
@@ -27,7 +30,9 @@ affiliated with, endorsed by, or derived from the code of any such product.
   executes the steps once per row (a *pattern*), one after the other, each in a fresh browser, and goes
   on after a row that failed; `${COLUMN}` in a step reads that row's cell. The table is edited in a grid
   on the test case page or from the editor's *Data* button: add, rename and remove columns and rows,
-  paste a block copied from a spreadsheet, or import a `.csv` file whose first row names the columns. The
+  paste a block copied from a spreadsheet, or import a `.csv` file whose first row names the columns (UTF-8,
+  or UTF-16 with a byte order mark; a file in a regional encoding such as GBK or Shift_JIS is read as that
+  when it matches the browser's language, and says so, and is refused otherwise). The
   run page has one tab per pattern with its own status, screenshots, log and repairs; a batch run counts
   the test case once and shows "2 of 3 patterns passed". *Run up to this step*, *Run only this step* and
   captures use one row, chosen in the editor.
@@ -39,7 +44,9 @@ affiliated with, endorsed by, or derived from the code of any such product.
   project variables.
 - **Single runs** - run a test case and watch results arrive step by step. *Run up to this step* and
   *Run only this step* run a range; every run starts in a fresh browser, so the steps before the range
-  are replayed first as set-up and only the range is reported.
+  are replayed first as set-up and only the range is reported. A range only needs the steps up to its
+  last one to be sound, so it works while an If block further down is still being built; when none of its
+  steps is executed (disabled, or in a branch arm this run did not take) the editor and the log say so.
 - **Batch runs** - run all or selected test cases of a project in order, with a summary of succeeded /
   failed / unresolved / aborted. Batch runs can be started from CI over HTTP.
 - **Reports** - per-step status, duration, screenshot, error message and a console-style log.
@@ -94,7 +101,15 @@ browser context. Aborting sets the status in D1; the consumer checks it before e
 15 minutes from the moment it starts - the whole run, so all the patterns of a data-driven test case
 together (a queue consumer invocation does not live longer either); one that
 is still unfinished after that is marked failed the next time it is read, so nothing stays "running"
-forever.
+forever. A batch that is not through after 8 minutes hands its remaining test cases to a new invocation
+(a new queue message), so a long batch is executed in stretches; a test case that an invocation was
+stopped in the middle of is failed as *interrupted* when the batch is picked up again.
+
+Saving the steps is guarded against lost updates: a test case reports a revision of its steps
+(`stepsRev`), the editor sends it back with every save (`baseStepsRev`), and a save based on an older
+list than the stored one (another tab saved, a repair was approved, the assistant worked on it) is
+refused with 409 `steps_changed`. The editor then stops editing and offers to load the saved steps;
+undo brings back what was on screen. A client that sends no revision overwrites.
 
 ## How the engine works
 
@@ -115,7 +130,10 @@ The contract is `worker/engine/index.ts`: `captureUi(page)` and `runSteps(page, 
   Every locator matches exactly one element when it is captured. At run time a locator that matches
   several elements is an error ("ambiguous"), never "use the first one".
 - **Auto-wait.** A missing element or a failing assertion is retried until a time limit (10 s in runs)
-  before the step fails. Assertions can be set to "continue on failure". "Exists" means rendered: a
+  before the step fails. A fixed wait may be 300 seconds at most (longer is an error, not a shorter
+  wait). Assertions can be set to "continue on failure". *Assert URL equals* compares URLs, not their
+  spelling: `https://example.com` and `https://example.com/` are equal. A value longer than 300
+  characters is cut in error messages and in the log (a variable keeps all of it). "Exists" means rendered: a
   node that is in the DOM but hidden does not exist for *Assert exists / does not exist / If exists*.
 - **Self-healing.** With healing on (batch runs), a step whose locator matches nothing (or more than
   one element) is compared against the elements on the current page using the stored fingerprint. The
@@ -125,6 +143,9 @@ The contract is `worker/engine/index.ts`: `captureUi(page)` and `runSteps(page, 
   `href`, or its classes; for a text element, the text itself. Sitting in the same place with the same
   tag is not enough, so a different message or an unrelated button is a failure, not a repair.
   Commands that expect an element to be absent, and conditional branches, never heal.
+
+- **Variables.** `${NAME}` in a step's value is replaced when the step runs; a name that is not defined
+  fails the step. The text of a *Comment* step is never looked at, so it may contain `${`.
 
 - **Shared steps.** A test case stores a call as one step that holds the shared step's id. When a run
   is created (single, batch or CI), the step list it snapshots is expanded (`shared/expand.ts`): the
@@ -231,7 +252,9 @@ How it works:
   session, shows the transcript, and reloads the steps and captured screens whenever the session
   reports something new.
 - Each session is a fresh model conversation. Its first message holds the instruction, the test case's
-  device and base URL, and the current steps as numbered sentences. The system prompt explains the
+  device and base URL, the current steps as numbered sentences, and what the last four sessions on the
+  same test case were asked and how each ended (its summary, or what stopped it and the last failure),
+  so a follow-up such as "continue" or "check the user name instead" is understood. The system prompt explains the
   product and lists the commands (generated from `shared/commands.ts`).
 - The model works through six tools, executed in the Worker with the same code the HTTP API uses:
 
@@ -248,10 +271,13 @@ How it works:
 - The tool calls of one model reply run in order, and step numbers are checked against that: once a call
   has removed a step or inserted one in the middle, a later call of the same reply that names a step from
   there on is refused (it was written for the old numbering, so "delete 3, delete 4" would remove steps 3
-  and 5) and the model sends it again.
+  and 5) and the model sends it again. The same holds after an `add_step` that was refused: the steps the
+  model appended after it have lower numbers than it counted on.
 - While a session is queued or running the step list is read-only, in the editor and on the server:
-  `PATCH /api/test-cases/:id` with `steps` answers 409, and the assistant's own writes stop the moment the
-  session is no longer running. When it ends, the editor loads the steps it left and its undo stack gets
+  `PATCH /api/test-cases/:id` with `steps` answers 409 (`assistant_busy`), and the assistant's own writes
+  stop the moment the session is no longer running. Saving the name, the device or the data table during
+  a session is allowed and does not get in the assistant's way. An editor in another tab finds out with
+  its next save, locks, and loads the assistant's steps when the session ends. When it ends, the editor loads the steps it left and its undo stack gets
   one entry, so a single undo removes everything the assistant did; if they cannot be loaded, the editor
   stays read-only and keeps trying rather than letting an edit save the old steps over the new ones.
 
@@ -268,7 +294,8 @@ Safety and limits:
   host, the app itself, or a host listed in `ALLOWED_HOSTS`, and a variable may not decide the host: "any
   public host", which is what the target policy allows without a list, is not enough for a URL that sends
   a variable's value somewhere on every later run. And run errors and captured URLs go back to the model
-  with `${NAME}` in place of a project variable's value. This narrows what an injected instruction can do;
+  with `${NAME}` in place of a project variable's value (where the value stands by itself, not inside a
+  longer word, and never in the host of a URL). This narrows what an injected instruction can do;
   it does not make the model immune. The assistant can still be talked into steps the request did not ask
   for, including removing steps (one undo restores them) or typing a variable into a form of a page it was
   led to, so review what it built, and set `ALLOWED_HOSTS` when project variables hold real credentials.
@@ -281,7 +308,8 @@ Safety and limits:
 - The model's replies cost money on your Anthropic account, so the deployment as a whole has a budget per
   24 hours: by default 100 sessions and an estimated $40 (`ASSISTANT_DAILY_SESSIONS`,
   `ASSISTANT_DAILY_BUDGET_USD`); past either, a new session is refused with a 429. "One session per test
-  case" alone bounds nothing, since test cases are free to create. This is a backstop, not a substitute for
+  case" alone bounds nothing, since test cases are free to create; for the same reason the use is counted
+  in a table of its own (`assistant_usage`), so deleting a test case does not give its sessions back. This is a backstop, not a substitute for
   `ACCESS_CODE` on a public URL or for a spend limit on the API key itself.
 - Each session shows its token usage and an estimated cost, at the list price of the model that worked on
   each request. The system prompt, the tool definitions and the growing conversation are prompt-cached.
@@ -379,6 +407,10 @@ Optional settings go in `.dev.vars` (see `.dev.vars.example`):
 
 - `ACCESS_CODE` - when set, every `/api` route except `/api/session` needs the code: the UI asks for
   it once and keeps an HttpOnly cookie (`__Host-sw_access` over https); scripts send `Authorization: Bearer <code>`.
+  Use a long random code (for example `openssl rand -base64 24`). Wrong codes are counted per client
+  address by the `ACCESS_LIMITER` rate limiting binding in `wrangler.jsonc`: after 10 in a minute the
+  address gets 429 for a minute and its codes are not compared. That slows guessing down; it is the
+  length of the code that makes guessing pointless.
 - `ANTHROPIC_API_KEY` - enables the [AI assistant](#ai-assistant). Without it the rest of the app is
   unaffected.
 - `ASSISTANT_MODEL` - the model the assistant asks: `claude-haiku-5-5` (default), `claude-sonnet-5-5` or
@@ -403,7 +435,7 @@ You need a Cloudflare account with access to Browser Run (Browser Rendering).
 pnpm exec wrangler d1 create stepwise                    # copy database_id into wrangler.jsonc
 pnpm exec wrangler r2 bucket create stepwise-screenshots
 pnpm exec wrangler queues create stepwise-runs
-pnpm db:migrate:remote
+pnpm db:migrate:remote                                   # again after every update that adds a file to migrations/
 pnpm exec wrangler secret put ACCESS_CODE                # optional but recommended on a public URL
 pnpm exec wrangler secret put ANTHROPIC_API_KEY          # optional: enables the AI assistant
 pnpm run deploy
@@ -609,8 +641,10 @@ current page when the address had no `.html`.
   a scroll gesture of about 70% of the viewport in the middle of the screen, not a recorded finger path;
   it moves what a finger there would move (a scrolling list or a layout whose content area scrolls,
   otherwise the page).
-- A batch run executes inside a single queue consumer invocation, so very long batches can hit the
-  platform's time limits; Browser Run's own concurrency and session limits apply too.
+- A batch run is executed in stretches of about 8 minutes, each in its own queue consumer invocation. A
+  single test case still has to finish within its invocation: one that is running when the platform
+  stops the invocation is reported as failed (*interrupted*), and the batch goes on with the next one.
+  Browser Run's own concurrency and session limits apply too.
 - Captures do not look inside iframes or closed shadow roots, and elements inside an open shadow
   root only get CSS locators (XPath cannot reach them).
 - No users, roles, schedules, notifications, loops or visual diffs.
@@ -640,8 +674,13 @@ current page when the address had no `.html`.
 - A run is never retried once it has started. Only a run that could not get a browser (Browser Run's
   concurrency or rate limit) is tried again, up to three times, before it is marked failed.
 - A request body may be 1 MB at most; a run may take 15 minutes at most, all of its patterns included.
+  A run is stored as one row (its steps, and a result and a log line per step and data row), which D1
+  bounds at 2 MB: a run that would come to more than about 1.5 MB is refused when it is created.
+- Screenshots of a deleted project or test case are removed after the response; a large clean-up is put
+  on the queue in pieces and retried there.
 - Self-healing is a similarity heuristic, not a model; every repair needs a human decision.
 - The assistant builds and edits steps only: it does not rename test cases, change the device, or
   manage projects. It works from the element list of a page and looks at a screenshot only when it asks for one (which
-  shows the top of a very long page; the element list covers the whole page, up to 200 elements), and it does not remember earlier sessions beyond the steps they left behind.
-- The access code is a single shared secret, not an account system.
+  shows the top of a very long page; the element list covers the whole page, up to 200 elements), and of earlier sessions it knows the steps they left behind and, for the last four, the request and how it ended, not the whole conversation.
+- The access code is a single shared secret, not an account system. Guessing it is rate limited per
+  client address and Cloudflare location, not globally.
