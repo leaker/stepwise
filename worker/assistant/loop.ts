@@ -5,6 +5,7 @@ import type Anthropic from '@anthropic-ai/sdk'
 import type { AssistantEvent, AssistantToolName, AssistantUsage } from '../../shared/types'
 import { errorMessage } from '../env'
 import { costOf, hasPrice, isSupportedModel, type Tokens } from './models'
+import type { Verdict } from './review'
 
 export type ModelMessage = Anthropic.Beta.BetaMessageParam
 /** The parts of a model response the loop reads. */
@@ -44,6 +45,12 @@ export interface ToolHost {
    * number was shifted by an earlier call of the same reply.
    */
   beginTurn?(): void
+  /**
+   * Asked when the model sends a reply without tool calls, which would end the session: may it end here?
+   * `closing` is the text of that reply. The host knows what was built and whether it was verified
+   * (worker/assistant/review.ts); when it says no, the loop gives the model the reminder and goes on.
+   */
+  finish?(closing: string): Verdict | Promise<Verdict>
 }
 
 export interface SessionSink {
@@ -71,9 +78,12 @@ export interface LoopOptions {
 
 export type LoopResult = { status: 'done' } | { status: 'aborted' } | { status: 'failed'; error: string }
 
-export const MAX_TURNS = 30
+export const MAX_TURNS = 40
+/** With this many model requests left, or this little time, the model is told to wrap up. */
+export const WRAP_UP_TURNS = 5
+export const WRAP_UP_MS = 2 * 60 * 1000
 export const MAX_SESSION_MS = 12 * 60 * 1000
-/** A session of 30 requests normally costs well under a dollar; this stops one whose context grew out of hand. */
+/** A session of 40 requests normally costs well under a dollar; this stops one whose context grew out of hand. */
 export const MAX_SESSION_COST_USD = 5
 const REQUEST_TIMEOUT_MS = 4 * 60 * 1000
 
@@ -108,6 +118,18 @@ export async function runAssistant(o: LoopOptions): Promise<LoopResult> {
 
   const maxCostUsd = o.maxCostUsd ?? MAX_SESSION_COST_USD
   const outOfTime = `Stopped: the session ran into its ${Math.round((o.maxMs ?? MAX_SESSION_MS) / 60_000)} minute limit. ${KEPT}`
+
+  // Said once, with the tool results, when the session is about to run into a limit: a test that is left
+  // half built without a word is worse than a smaller one that was run and reported honestly.
+  let warned = false
+  const wrapUp = (): string | null => {
+    const turnsLeft = maxTurns - usage.turns
+    const msLeft = deadline - now()
+    if (warned || (turnsLeft > WRAP_UP_TURNS && msLeft > WRAP_UP_MS)) return null
+    warned = true
+    const left = turnsLeft <= WRAP_UP_TURNS ? `${turnsLeft} more replies` : `about ${Math.max(1, Math.round(msLeft / 60_000))} more minute${Math.round(msLeft / 60_000) > 1 ? 's' : ''}`
+    return `Stepwise (automatic notice, not the user): this session can take ${left} from you, then it is stopped. Wrap up now: stop adding to the test, get what is there to pass (run_steps without arguments, disable or remove a step you cannot fix), call review_request with what is not done marked not_done, and write your summary, saying plainly what is unfinished.`
+  }
 
   const fail = async (error: string): Promise<LoopResult> => {
     await o.sink.event({ kind: 'error', text: error })
@@ -149,9 +171,15 @@ export async function runAssistant(o: LoopOptions): Promise<LoopResult> {
     }
 
     if (!(await o.sink.active())) return { status: 'aborted' }
-    for (const block of turn.content) {
-      if (block.type === 'text' && block.text.trim()) await o.sink.event({ kind: 'assistant', text: block.text.trim() })
+    const calls = turn.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === 'tool_use')
+    const said = turn.content.flatMap((b) => (b.type === 'text' && b.text.trim() ? [b.text.trim()] : []))
+    const say = async (): Promise<void> => {
+      for (const text of said) await o.sink.event({ kind: 'assistant', text })
     }
+    // A reply without tool calls would end the session: whether it may is decided first, because a closing
+    // summary that turns out to be premature ("the test passes") must not stand in the transcript.
+    const closing = calls.length === 0 && turn.stop_reason !== 'max_tokens' && turn.stop_reason !== 'pause_turn'
+    if (!closing) await say()
 
     // Truncated output: a tool call in it may be incomplete, so none of this turn's tools are run.
     if (turn.stop_reason === 'max_tokens') return fail(`The model's reply was cut off at the output limit. ${KEPT}`)
@@ -160,8 +188,21 @@ export async function runAssistant(o: LoopOptions): Promise<LoopResult> {
     messages.push({ role: 'assistant', content: turn.content as Anthropic.Beta.BetaContentBlockParam[] })
     if (turn.stop_reason === 'pause_turn') continue
 
-    const calls = turn.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === 'tool_use')
-    if (calls.length === 0) return { status: 'done' }
+    if (closing) {
+      const verdict: Verdict = (await o.host.finish?.(said.join('\n\n'))) ?? { ok: true }
+      if (verdict.ok) {
+        await say()
+        return { status: 'done' }
+      }
+      if (verdict.final) {
+        // What it wanted to end with is shown after all: it is the only account of the session there is.
+        await say()
+        return fail(`Stopped: the assistant did not finish the test. ${verdict.event}. Check the steps before relying on this test. ${KEPT}`)
+      }
+      await o.sink.event({ kind: 'tool', text: 'Not finished yet, the assistant goes on', detail: verdict.event })
+      messages.push({ role: 'user', content: verdict.reminder })
+      continue
+    }
 
     // Every call gets a result, in one user message, even when the session is aborted half way.
     const results: Anthropic.Beta.BetaToolResultBlockParam[] = []
@@ -195,6 +236,7 @@ export async function runAssistant(o: LoopOptions): Promise<LoopResult> {
     }
     if (aborted) return { status: 'aborted' }
     if (timedOut) return fail(outOfTime)
-    messages.push({ role: 'user', content: results })
+    const notice = wrapUp()
+    messages.push({ role: 'user', content: notice ? [...results, { type: 'text', text: notice }] : results })
   }
 }

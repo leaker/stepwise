@@ -4,7 +4,8 @@ import { describe, expect, it } from 'vitest'
 import { stepSentence } from '../../shared/commands'
 import type { AssistantEvent, AssistantUsage, Step, Ui } from '../../shared/types'
 import { describeModelError } from '../../worker/assistant/client'
-import { runAssistant, type ModelClient, type ModelMessage, type ModelTurn, type SessionSink, type ToolHost, type ToolOutcome } from '../../worker/assistant/loop'
+import { runAssistant, WRAP_UP_TURNS, type ModelClient, type ModelMessage, type ModelTurn, type SessionSink, type ToolHost, type ToolOutcome } from '../../worker/assistant/loop'
+import type { Verdict } from '../../worker/assistant/review'
 import { costOf, DEFAULT_MODEL } from '../../worker/assistant/models'
 import { firstMessage, SYSTEM_PROMPT, TOOLS } from '../../worker/assistant/prompt'
 import { asInput, checkStep, commandOf, optionalString, targetFrom, ToolInputError } from '../../worker/assistant/steps'
@@ -415,6 +416,56 @@ describe('assistant prompt', () => {
     expect(text).toContain('Project variables: SITE_VERSION')
     expect(text.endsWith('Request from the user:\nCheck the welcome message')).toBe(true)
     expect(firstMessage({ testCaseName: 'x', device: DEVICES.desktop, baseUrl: '', variableNames: [], steps: [] }, 'y')).toContain('(no steps yet)')
+  })
+})
+
+describe('finishing', () => {
+  const verdicts = (list: Verdict[]) => {
+    const closings: string[] = []
+    return { closings, finish: (closing: string) => (closings.push(closing), list.shift() ?? { ok: true as const }) }
+  }
+  const notYet: Verdict = { ok: false, reminder: 'Stepwise (automatic check, not the user): run the whole test.', event: 'The steps were changed after the last full run', final: false }
+
+  it('does not accept a closing reply the host objects to: the model is told why and goes on, and the premature summary is not shown', async () => {
+    const { model, requests } = scripted([
+      turn('tool_use', [{ tool: 'add_step', input: { command: 'navigate', value: '${BASE_URL}/login.html' } }]),
+      turn('end_turn', [{ text: 'The test opens the login page. The run passed.' }]),
+      turn('tool_use', [{ tool: 'run_steps', input: {} }]),
+      turn('end_turn', [{ text: 'The test opens the login page, and I ran it: it passes.' }]),
+    ])
+    const { host } = memoryHost()
+    const gate = verdicts([notYet])
+    const { sink, events } = memorySink()
+    expect(await run(model, { ...host, finish: gate.finish }, sink)).toEqual({ status: 'done' })
+    expect(gate.closings).toEqual(['The test opens the login page. The run passed.', 'The test opens the login page, and I ran it: it passes.'])
+    expect(events.map((e) => `${e.kind}: ${e.text}${e.detail ? ` [${e.detail}]` : ''}`)).toEqual([
+      'tool: Added step 1: Navigate to "${BASE_URL}/login.html"',
+      'tool: Not finished yet, the assistant goes on [The steps were changed after the last full run]',
+      'tool: Ran steps 1-1: all passed',
+      'assistant: The test opens the login page, and I ran it: it passes.',
+    ])
+    // The reminder is appended after the reply it answers; nothing before it changed.
+    expect(requests[2].slice(0, requests[1].length)).toEqual(requests[1])
+    expect(requests[2].at(-1)).toEqual({ role: 'user', content: notYet.reminder })
+  })
+
+  it('ends the session as failed, with what the model said, when the host stops reminding', async () => {
+    const { model } = scripted([turn('end_turn', [{ text: 'Done.' }])])
+    const { sink, events } = memorySink()
+    const result = await run(model, { ...memoryHost().host, finish: () => ({ ...notYet, final: true }) }, sink)
+    expect(result).toEqual({ status: 'failed', error: 'Stopped: the assistant did not finish the test. The steps were changed after the last full run. Check the steps before relying on this test. The steps built so far are kept.' })
+    expect(events.map((e) => e.kind)).toEqual(['assistant', 'error'])
+  })
+
+  it('tells the model once, with the tool results, when the session is about to run out of requests', async () => {
+    const capture = turn('tool_use', [{ tool: 'capture_screen', input: { after_step: 0 } }])
+    const { model, requests } = scripted([capture, capture, capture, turn('end_turn', [{ text: 'Not finished: the menu could not be opened.' }])])
+    const { sink } = memorySink()
+    expect(await run(model, memoryHost().host, sink, { maxTurns: WRAP_UP_TURNS + 2 })).toEqual({ status: 'done' })
+    const texts = (m: ModelMessage) => (m.content as { type: string; text?: string }[]).filter((b) => b.type === 'text').map((b) => b.text)
+    expect(texts(requests[1][2])).toEqual([])
+    expect(texts(requests[2][4])[0]).toMatch(/^Stepwise \(automatic notice, not the user\): this session can take 5 more replies from you/)
+    expect(texts(requests[3][6])).toEqual([])
   })
 })
 
