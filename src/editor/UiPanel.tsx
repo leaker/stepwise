@@ -17,10 +17,11 @@ import {
   X,
 } from 'lucide-react'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { MAX_ELEMENT_NAME, MAX_LOCATOR_LENGTH } from '../../shared/commands'
 import { deviceOf } from '../../shared/devices'
 import { locatorToString, type DeviceId, type Locator, type LocatorKey, type Step, type Ui, type UiElement } from '../../shared/types'
 import { api, qk, shotUrl } from '../api'
-import { Button, Confirm, DeviceChip, Dialog, Field, IconButton, Menu, Popover, Spinner, type MenuItem } from '../components/ui'
+import { Button, Confirm, DeviceChip, Dialog, Field, IconButton, Menu, Popover, Spinner, toast, type MenuItem } from '../components/ui'
 import { cx } from '../lib/format'
 import { isComposing } from '../lib/hooks'
 import { sameLocator } from './model'
@@ -51,7 +52,7 @@ export interface UiPanelProps {
   /** The failed replay behind the screen that is shown, if any. `sentence` is null when the step was removed since. */
   replayError: { n: number; sentence: string | null; message: string } | null
   onDismissReplayError: () => void
-  /** Why nothing can be captured right now (the assistant is working on the test case), or null. */
+  /** Why nothing can be captured or changed right now (the assistant is working on the test case), or null. */
   locked: string | null
   onCaptureAfter: () => void
   onCaptureUrl: (url: string) => void
@@ -317,15 +318,21 @@ export function UiPanel(p: UiPanelProps) {
             step={inspectStep}
             steps={p.steps}
             saving={patchUi.isPending}
+            locked={p.locked}
             onClose={() => p.onInspect(null)}
             onUse={inspectUi && inspectEl && !inspectStep ? () => p.onPickElement(inspectUi, inspectEl) : undefined}
             onSave={(name, locators, current) => {
-              if (inspectUi && inspectEl) {
-                const elements = inspectUi.elements.map((e) => (e.id === inspectEl.id ? { ...e, name, locators } : e))
-                patchUi.mutate({ id: inspectUi.id, elements })
-              }
+              // The element on the screen and the steps that use it change together or not at all: not while
+              // the steps are read-only, and the steps only once the screen has taken the change.
+              if (p.locked) return toast(p.locked, 'error')
               const ref = inspectStep?.target ?? (inspectUi && inspectEl ? { uiId: inspectUi.id, elementId: inspectEl.id } : null)
-              if (ref) p.onSaveElement({ uiId: ref.uiId, elementId: ref.elementId }, name, inspectStep?.target ? { stepId: inspectStep.id, locator: current, candidates: locators } : undefined)
+              const toSteps = () => {
+                if (ref) p.onSaveElement({ uiId: ref.uiId, elementId: ref.elementId }, name, inspectStep?.target ? { stepId: inspectStep.id, locator: current, candidates: locators } : undefined)
+              }
+              if (!inspectUi || !inspectEl) return toSteps()
+              const elements = inspectUi.elements.map((e) => (e.id === inspectEl.id ? { ...e, name, locators } : e))
+              // The failure is reported by the mutation itself; the steps are then left as they are.
+              patchUi.mutateAsync({ id: inspectUi.id, elements }).then(toSteps, () => {})
             }}
           />
         )}
@@ -342,7 +349,8 @@ export function UiPanel(p: UiPanelProps) {
                     onSubmit={(e) => {
                       e.preventDefault()
                       const name = renaming.name.trim()
-                      if (name && name !== u.name) patchUi.mutate({ id: u.id, name })
+                      if (p.locked) toast(p.locked, 'error')
+                      else if (name && name !== u.name) patchUi.mutate({ id: u.id, name })
                       setRenaming(null)
                     }}
                   >
@@ -350,6 +358,7 @@ export function UiPanel(p: UiPanelProps) {
                       className="input"
                       autoFocus
                       aria-label="Screen name"
+                      maxLength={120}
                       value={renaming.name}
                       onChange={(e) => setRenaming({ id: u.id, name: e.target.value })}
                       enterKeyHint="done"
@@ -389,11 +398,13 @@ export function UiPanel(p: UiPanelProps) {
                         </span>
                       </span>
                     </button>
-                    <IconButton label={`Rename ${u.name}`} onClick={() => setRenaming({ id: u.id, name: u.name })}>
+                    <IconButton label={`Rename ${u.name}`} disabled={!!p.locked} title={p.locked ?? undefined} onClick={() => setRenaming({ id: u.id, name: u.name })}>
                       <Pencil size={14} />
                     </IconButton>
                     <IconButton
                       label={`Delete ${u.name}`}
+                      disabled={!!p.locked}
+                      title={p.locked ?? undefined}
                       onClick={() => {
                         setListAnchor(null)
                         setDeleting(u)
@@ -420,7 +431,7 @@ export function UiPanel(p: UiPanelProps) {
         />
       )}
       {deleting && (
-        <Confirm title="Delete captured screen?" confirmLabel="Delete screen" busy={removeUi.isPending} onConfirm={() => removeUi.mutate(deleting.id)} onClose={() => setDeleting(null)}>
+        <Confirm title="Delete captured screen?" confirmLabel="Delete screen" busy={removeUi.isPending} onConfirm={() => (p.locked ? toast(p.locked, 'error') : removeUi.mutate(deleting.id))} onClose={() => setDeleting(null)}>
           “{deleting.name}” will be removed from this test case. Steps that use its elements keep their own copy of the locator and still run.
         </Confirm>
       )}
@@ -579,6 +590,7 @@ function ElementInspector({
   step,
   steps,
   saving,
+  locked,
   onClose,
   onUse,
   onSave,
@@ -588,6 +600,8 @@ function ElementInspector({
   step?: Step
   steps: Step[]
   saving: boolean
+  /** Why the element cannot be changed right now, or null: the inspector then only shows it. */
+  locked: string | null
   onClose: () => void
   onUse?: () => void
   onSave: (name: string, locators: Locator[], current: Locator) => void
@@ -645,7 +659,7 @@ function ElementInspector({
   const usedBy = element && ui ? steps.map((s, i) => (s.target?.uiId === ui.id && s.target.elementId === element.id ? i + 1 : 0)).filter(Boolean) : []
   const commitName = () => {
     const n = name.trim()
-    if (!n) return setName(baseName)
+    if (!n || locked) return setName(baseName)
     if (n !== baseName && current) onSave(n, locators, current)
   }
   const choose = (l: Locator) => {
@@ -681,6 +695,8 @@ function ElementInspector({
           <input
             className="input"
             value={name}
+            maxLength={MAX_ELEMENT_NAME}
+            readOnly={!!locked}
             onChange={(e) => setName(e.target.value)}
             onBlur={commitName}
             enterKeyHint="done"
@@ -695,7 +711,7 @@ function ElementInspector({
         </label>
         <div className="field">
           <span className="field-label">Locator</span>
-          <button type="button" className="locator-btn" aria-haspopup="menu" aria-expanded={!!locAnchor} disabled={locators.length === 0} onClick={(e) => setLocAnchor(e.currentTarget)} title={current ? locatorToString(current) : undefined}>
+          <button type="button" className="locator-btn" aria-haspopup="menu" aria-expanded={!!locAnchor} disabled={locators.length === 0 || !!locked} onClick={(e) => setLocAnchor(e.currentTarget)} title={current ? locatorToString(current) : undefined}>
             <span className="mono truncate">{current ? locatorToString(current) : 'No locator'}</span>
             <ChevronDown size={14} />
           </button>
@@ -726,6 +742,7 @@ function ElementInspector({
               aria-label="Locator value"
               spellCheck={false}
               placeholder={key === 'id' ? 'submit-button' : key === 'css' ? 'form button[type=submit]' : "//button[text()='Sign in']"}
+              maxLength={MAX_LOCATOR_LENGTH}
               value={value}
               onChange={(e) => setValue(e.target.value)}
               autoCapitalize="none"
@@ -742,12 +759,14 @@ function ElementInspector({
             </Button>
           </form>
         ) : (
-          <Button size="sm" icon={<Plus size={14} />} onClick={() => setAdding(true)}>
+          <Button size="sm" icon={<Plus size={14} />} disabled={!!locked} title={locked ?? undefined} onClick={() => setAdding(true)}>
             Add custom locator
           </Button>
         )}
         <p className="inspector-note muted">
-          {step
+          {locked
+            ? `${locked} The element can be changed again after that.`
+            : step
             ? `The name changes in every step that uses this element. The locator applies to step ${steps.indexOf(step) + 1}${element ? ' and to new steps made from the captured screen' : '; its captured screen was deleted'}.`
             : usedBy.length
               ? `Used by step${usedBy.length === 1 ? '' : 's'} ${usedBy.join(', ')}. Renaming updates them; they keep their locator (open the element from a step to change it there).`
